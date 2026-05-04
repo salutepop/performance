@@ -1,0 +1,14 @@
+{
+    "system": {
+        "fio_path": "fio",
+        "target_disks": [
+            "/dev/ram0",
+            "/dev/ram1",
+            "/dev/ram2",
+            "/dev/ram3"
+        ],
+        "ram_capacity_gb": 32,
+        "numa_node": 0
+    },
+    "type": "python_scenario"
+}

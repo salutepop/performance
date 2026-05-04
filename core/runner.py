@@ -1,0 +1,58 @@
+import subprocess
+import json
+import sys
+
+
+def run_fio_job(disk, workload, numa_node=None, fio_path="fio", runtime_override=None):
+    """
+    fio_path를 인자로 받아 해당 경로의 바이너리를 실행합니다.
+    """
+    job_name = workload.get("name", "default_job")
+    
+    # [수정] disk가 리스트인 경우 콜론(:)으로 연결하여 여러 장치 동시 부하 지원
+    if isinstance(disk, list):
+        target_filename = ":".join(disk)
+        print(f"\n[FIO Run] 멀티 디스크 ({len(disk)}개) | 워크로드: {job_name} 시작...")
+    else:
+        target_filename = disk
+        print(f"\n[FIO Run] 디스크: {disk} | 워크로드: {job_name} 시작...")
+
+    cmd = [
+        fio_path,
+        f"--name={job_name}",
+        f"--filename={target_filename}",
+        "--direct=1",
+        "--ioengine=libaio",
+        f"--rw={workload.get('rw', 'read')}",
+        f"--bs={workload.get('bs', '4k')}",
+        f"--iodepth={workload.get('iodepth', 1)}",
+        f"--numjobs={workload.get('numjobs', 1)}",
+        f"--runtime={runtime_override if runtime_override is not None else workload.get('runtime', 3)}",
+        "--group_reporting=1",
+        "--time_based",
+        f"--ramp_time={0 if runtime_override is not None else 3}",  # -q 시에만 0, 나머지는 무조건 3초
+        "--output-format=json",
+    ]
+
+    if "size" in workload:
+        cmd.append(f"--size={workload['size']}")
+
+    if "cpus_allowed" in workload:
+        cmd.append(f"--cpus_allowed={workload['cpus_allowed']}")
+
+    if numa_node is not None and str(numa_node).isdigit():
+        cmd.append(f"--numa_cpu_nodes={numa_node}")
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        return json.loads(result.stdout)
+    except subprocess.CalledProcessError as e:
+        print(f"[Error] {fio_path} 실행 중 오류 발생: {e}")
+        print(f"[Error Output]\n{e.stderr}")
+        return None
+    except json.JSONDecodeError:
+        print("[Error] 결과를 JSON으로 파싱할 수 없습니다.")
+        return None
+    except FileNotFoundError:
+        print(f"[Error] 지정한 fio 실행 파일을 찾을 수 없습니다: {fio_path}")
+        return None

@@ -1,0 +1,22 @@
+{
+  "tc_name": "TC01_Basic_Performance",
+  "description": "램디스크/SSD의 기본적인 순차 대역폭 및 랜덤 IOPS 측정",
+  "workloads": [
+    {
+      "name": "seq_read_128k",
+      "rw": "read",
+      "bs": "128k",
+      "iodepth": 32,
+      "numjobs": 1,
+      "size": "100%"
+    },
+    {
+      "name": "rand_write_4k",
+      "rw": "randwrite",
+      "bs": "4k",
+      "iodepth": 128,
+      "numjobs": 4,
+      "size": "100%"
+    }
+  ]
+}

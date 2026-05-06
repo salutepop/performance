@@ -26,10 +26,7 @@ int main(int argc, char **argv) {
     int err, nr_cpus;
     struct io_stats *stats_array;
 
-    // JSON 생성을 위한 타입명 매핑
-    const char *type_names[IO_MAX_TYPES] = {
-        "read", "read_ahead", "write", "flush", "discard"
-    };
+    const char *type_names[IO_MAX_TYPES] = {"read", "read_ahead", "write", "flush", "discard"};
 
     signal(SIGINT, sig_handler);
     signal(SIGTERM, sig_handler);
@@ -44,7 +41,7 @@ int main(int argc, char **argv) {
     nr_cpus = libbpf_num_possible_cpus();
     stats_array = calloc(nr_cpus, sizeof(struct io_stats));
 
-    printf("[PID: %d] io_trace is running (All Operations Tracking Mode)...\n", getpid());
+    printf("[PID: %d] io_trace is running (Q2I + D2C Full Split Mode)...\n", getpid());
 
     while (!stop) {
         if (reset_flag) {
@@ -62,29 +59,40 @@ int main(int argc, char **argv) {
 
     while (bpf_map_get_next_key(fd, &key, &next_key) == 0) {
         if (bpf_map_lookup_elem(fd, &next_key, stats_array) == 0) {
-            
             struct io_stats dev_total;
             for (int t = 0; t < IO_MAX_TYPES; t++) {
                 dev_total.stats[t].io_count = 0;
-                dev_total.stats[t].total_latency = 0;
                 dev_total.stats[t].total_bytes = 0;
-                dev_total.stats[t].max_latency = 0;
-                dev_total.stats[t].min_latency = (unsigned long long)-1;
+                dev_total.stats[t].q2i.total = 0;
+                dev_total.stats[t].q2i.max = 0;
+                dev_total.stats[t].q2i.min = (unsigned long long)-1;
+                dev_total.stats[t].d2c.total = 0;
+                dev_total.stats[t].d2c.max = 0;
+                dev_total.stats[t].d2c.min = (unsigned long long)-1;
             }
 
             unsigned long long total_any_io = 0;
 
             for (int i = 0; i < nr_cpus; i++) {
                 for (int t = 0; t < IO_MAX_TYPES; t++) {
-                    if (stats_array[i].stats[t].io_count > 0) {
-                        dev_total.stats[t].io_count += stats_array[i].stats[t].io_count;
-                        dev_total.stats[t].total_latency += stats_array[i].stats[t].total_latency;
-                        dev_total.stats[t].total_bytes += stats_array[i].stats[t].total_bytes;
-                        if (stats_array[i].stats[t].max_latency > dev_total.stats[t].max_latency) 
-                            dev_total.stats[t].max_latency = stats_array[i].stats[t].max_latency;
-                        if (stats_array[i].stats[t].min_latency < dev_total.stats[t].min_latency) 
-                            dev_total.stats[t].min_latency = stats_array[i].stats[t].min_latency;
-                        total_any_io += stats_array[i].stats[t].io_count;
+                    struct rw_stats *cpu_st = &stats_array[i].stats[t];
+                    struct rw_stats *tot_st = &dev_total.stats[t];
+                    
+                    if (cpu_st->io_count > 0) {
+                        tot_st->io_count += cpu_st->io_count;
+                        tot_st->total_bytes += cpu_st->total_bytes;
+                        
+                        // Q2I 합산
+                        tot_st->q2i.total += cpu_st->q2i.total;
+                        if (cpu_st->q2i.max > tot_st->q2i.max) tot_st->q2i.max = cpu_st->q2i.max;
+                        if (cpu_st->q2i.min < tot_st->q2i.min) tot_st->q2i.min = cpu_st->q2i.min;
+                        
+                        // D2C 합산
+                        tot_st->d2c.total += cpu_st->d2c.total;
+                        if (cpu_st->d2c.max > tot_st->d2c.max) tot_st->d2c.max = cpu_st->d2c.max;
+                        if (cpu_st->d2c.min < tot_st->d2c.min) tot_st->d2c.min = cpu_st->d2c.min;
+
+                        total_any_io += cpu_st->io_count;
                     }
                 }
             }
@@ -105,9 +113,18 @@ int main(int argc, char **argv) {
                         printf("        \"%s\": {\n", type_names[t]);
                         printf("          \"total_count\": %llu,\n", dev_total.stats[t].io_count);
                         printf("          \"total_bytes\": %llu,\n", dev_total.stats[t].total_bytes);
-                        printf("          \"total_lat_ns\": %llu,\n", dev_total.stats[t].total_latency);
-                        printf("          \"min_lat_ns\": %llu,\n", dev_total.stats[t].min_latency);
-                        printf("          \"max_lat_ns\": %llu\n", dev_total.stats[t].max_latency);
+                        
+                        printf("          \"q2i\": {\n");
+                        printf("            \"total_lat_ns\": %llu,\n", dev_total.stats[t].q2i.total);
+                        printf("            \"min_lat_ns\": %llu,\n", dev_total.stats[t].q2i.min == (unsigned long long)-1 ? 0 : dev_total.stats[t].q2i.min);
+                        printf("            \"max_lat_ns\": %llu\n", dev_total.stats[t].q2i.max);
+                        printf("          },\n");
+                        
+                        printf("          \"d2c\": {\n");
+                        printf("            \"total_lat_ns\": %llu,\n", dev_total.stats[t].d2c.total);
+                        printf("            \"min_lat_ns\": %llu,\n", dev_total.stats[t].d2c.min == (unsigned long long)-1 ? 0 : dev_total.stats[t].d2c.min);
+                        printf("            \"max_lat_ns\": %llu\n", dev_total.stats[t].d2c.max);
+                        printf("          }\n");
                         printf("        }");
                         first_op = 0;
                     }

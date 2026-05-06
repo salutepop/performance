@@ -17,13 +17,19 @@ enum io_req_type {
     IO_MAX_TYPES
 };
 
-// 개별 I/O 타입의 통계
+// 지연 시간 통계를 담는 서브 구조체
+struct lat_stats {
+    unsigned long long total;
+    unsigned long long max;
+    unsigned long long min;
+};
+
+// 개별 I/O 타입의 통계 (Q2I와 D2C를 완벽히 분리)
 struct rw_stats {
     unsigned long long io_count;
-    unsigned long long total_latency;
     unsigned long long total_bytes;
-    unsigned long long max_latency;
-    unsigned long long min_latency;
+    struct lat_stats q2i; // Queue-to-Issue (OS 오버헤드)
+    struct lat_stats d2c; // Issue-to-Complete (순수 하드웨어 지연)
 };
 
 // 장치 하나가 5가지 I/O 타입의 통계를 모두 가집니다.

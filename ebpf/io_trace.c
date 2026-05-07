@@ -138,7 +138,6 @@ int main(int argc, char **argv) {
 
     printf("\n  ],\n");
 
-    // [새롭게 추가된 libaio 시스템 콜 통계 출력부]
     struct libaio_stats sys_st = {0};
     unsigned int sys_key = 0;
     bpf_map_lookup_elem(bpf_map__fd(skel->maps.sys_stats_map), &sys_key, &sys_st);

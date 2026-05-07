@@ -8,7 +8,7 @@ char LICENSE[] SEC("license") = "GPL";
 #define BPF_REQ_RAHEAD (1ULL << 19)
 
 /* ====================================================
- * 기존: Q2I & D2C 맵 (Block Layer & Hardware)
+ * 블록 레이어 Q2I & D2C 맵
  * ==================================================== */
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
@@ -36,31 +36,30 @@ struct {
 } device_stats SEC(".maps");
 
 /* ====================================================
- * 신규 개선: libaio U2Q & C2U 맵 (동시성/Race Condition 해결)
+ * libaio U2Q & C2U 맵 (개별 iocb 단위 추적)
  * ==================================================== */
-// 스레드 단위(TID) 제출 시간 추적
-struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 10240);
-    __type(key, u64); // pid_tgid (전체 64비트 TID)
-    __type(value, u64); // ts
-} pid_submit_start SEC(".maps");
-
-// io_getevents 진입 시 TID와 ctx_id 매핑
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 10240);
     __type(key, u64); // pid_tgid
-    __type(value, u64); // ctx_id
-} active_getevents SEC(".maps");
+    __type(value, u64); // ts
+} pid_submit_start SEC(".maps");
 
-// AIO 컨텍스트별 마지막 하드웨어 완료 시간
+// io_getevents 진입 시 events 배열 포인터 저장
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 10240);
-    __type(key, u64); // ctx_id (kioctx pointer)
-    __type(value, u64); // ts
-} ctx_last_complete SEC(".maps");
+    __type(key, u64); // pid_tgid
+    __type(value, u64); // events_ptr (userspace address)
+} active_getevents_events SEC(".maps");
+
+// iocb 포인터별 하드웨어 완료 시간 (핵심 수정)
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 1048576);
+    __type(key, u64); // iocb pointer
+    __type(value, u64); // completion ts
+} iocb_complete_ts SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
@@ -76,7 +75,7 @@ struct {
 SEC("tracepoint/syscalls/sys_enter_io_submit")
 int trace_submit_enter(void *ctx) {
     u64 ts = bpf_ktime_get_ns();
-    u64 pid_tgid = bpf_get_current_pid_tgid(); // 64비트 TID 사용 (동시성 해결)
+    u64 pid_tgid = bpf_get_current_pid_tgid();
     bpf_map_update_elem(&pid_submit_start, &pid_tgid, &ts, BPF_ANY);
     return 0;
 }
@@ -101,7 +100,9 @@ int trace_submit_exit(void *ctx) {
     return 0;
 }
 
-/* (이하 블록 레이어 Q2I, D2C 로직은 기존과 동일하므로 생략 없이 원본 유지) */
+/* ====================================================
+ * HOOK: Block Layer (Q2I, D2C)
+ * ==================================================== */
 SEC("tp_btf/block_bio_queue")
 int BPF_PROG(block_bio_queue, struct bio *bio) {
     u64 ts = bpf_ktime_get_ns();
@@ -186,105 +187,136 @@ int BPF_PROG(block_rq_complete, struct request *rq, int error, unsigned int nr_b
 }
 
 /* ====================================================
- * HOOK: Libaio 하단 (C2U - Wakeup 지연 측정 정밀화)
+ * HOOK: Libaio 하단 (C2U - 개별 iocb consume 레이턴시)
  * ==================================================== */
 
-// 1. io_getevents 진입 시 현재 스레드가 대기하려는 ctx_id 저장
-SEC("tracepoint/syscalls/sys_enter_io_getevents")
-int trace_getevents_enter(struct trace_event_raw_sys_enter *ctx) {
-    u64 pid_tgid = bpf_get_current_pid_tgid();
-    u64 ctx_id = ctx->args[0]; // aio_context_t 매개변수 추출
-    bpf_map_update_elem(&active_getevents, &pid_tgid, &ctx_id, BPF_ANY);
-    return 0;
-}
-
-// 2. 하드웨어 인터럽트로 aio_complete 호출 시 해당 ctx_id에 시간 기록
+// BPF_KPROBE 대신 표준 인자 추출 방식으로 우회 (구문 에러 방지)
 SEC("kprobe/aio_complete")
-int BPF_KPROBE(trace_aio_complete, struct kiocb *iocb) {
-    u64 ts = bpf_ktime_get_ns();
-    struct aio_kiocb *aio_req = (struct aio_kiocb *)iocb;
+int trace_aio_complete(struct pt_regs *ctx) {
+    // 커널의 aio_kiocb 구조체를 가져옵니다.
+    struct aio_kiocb *iocb = (struct aio_kiocb *)PT_REGS_PARM1(ctx);
     
-    // [수정된 부분]
-    // ki_ctx(커널 포인터) 자체가 아니라, ki_ctx 내부의 user_id를 읽어와야 
-    // 유저 스페이스의 io_getevents syscall이 사용하는 ctx_id와 정확히 일치합니다.
-    u64 ctx_id = (u64)BPF_CORE_READ(aio_req, ki_ctx, user_id);
+    // vmlinux.h 기반으로 구조체 내부에 있는 userspace 포인터(ev.obj 와 동일한 값)를 읽어옵니다.
+    u64 key = BPF_CORE_READ(iocb, ki_res.obj);
     
-    if (ctx_id) {
-        bpf_map_update_elem(&ctx_last_complete, &ctx_id, &ts, BPF_ANY);
+    if (key) {
+        u64 ts = bpf_ktime_get_ns();
+        bpf_map_update_elem(&iocb_complete_ts, &key, &ts, BPF_ANY);
     }
     return 0;
 }
 
-// 3. io_getevents 반환 시, 매핑된 ctx_id의 완료 시간과 비교하여 딜레이 산출
+SEC("kprobe/aio_complete_rw")
+int trace_aio_complete_rw(struct pt_regs *ctx) {
+    // kiocb가 aio_kiocb의 첫 번째 멤버이므로 포인터 캐스팅이 가능합니다.
+    struct aio_kiocb *iocb = (struct aio_kiocb *)PT_REGS_PARM1(ctx);
+    
+    u64 key = BPF_CORE_READ(iocb, ki_res.obj);
+    
+    if (key) {
+        u64 ts = bpf_ktime_get_ns();
+        bpf_map_update_elem(&iocb_complete_ts, &key, &ts, BPF_ANY);
+    }
+    return 0;
+}
+
+// args[3] 이 struct io_event __user *events 임
+SEC("tracepoint/syscalls/sys_enter_io_getevents")
+int trace_getevents_enter(struct trace_event_raw_sys_enter *ctx) {
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    u64 events_ptr = ctx->args[3]; 
+    bpf_map_update_elem(&active_getevents_events, &pid_tgid, &events_ptr, BPF_ANY);
+    return 0;
+}
+
 SEC("tracepoint/syscalls/sys_exit_io_getevents")
 int trace_getevents_exit(struct trace_event_raw_sys_exit *ctx) {
-    if (ctx->ret <= 0) return 0; // 이벤트를 수거하지 못했으면 제외
+    long ret = ctx->ret;
+    if (ret <= 0) return 0; // 반환된 이벤트가 없으면 무시
 
     u64 ts = bpf_ktime_get_ns();
     u64 pid_tgid = bpf_get_current_pid_tgid();
     
-    u64 *ctx_id_ptr = bpf_map_lookup_elem(&active_getevents, &pid_tgid);
-    if (ctx_id_ptr) {
-        u64 *last_ts = bpf_map_lookup_elem(&ctx_last_complete, ctx_id_ptr);
+    u64 *events_ptr_p = bpf_map_lookup_elem(&active_getevents_events, &pid_tgid);
+    if (!events_ptr_p) return 0;
+    
+    u64 events_ptr = *events_ptr_p;
+    bpf_map_delete_elem(&active_getevents_events, &pid_tgid);
+
+    u32 key = 0;
+    struct libaio_stats *st = bpf_map_lookup_elem(&sys_stats_map, &key);
+    if (!st) return 0;
+
+    struct io_event ev;
+    
+    // 최대 256개 루프 제한 (fio iodepth=128 커버)
+    #pragma unroll
+    for (int i = 0; i < 256; i++) {
+        if (i >= ret) break; // 반환된 개수만큼만 처리
         
-        if (last_ts && *last_ts > 0 && ts > *last_ts) {
-            u64 wakeup_lat = ts - *last_ts;
-            u32 key = 0;
-            struct libaio_stats *st = bpf_map_lookup_elem(&sys_stats_map, &key);
+        // userspace에 있는 io_event 구조체를 읽어옴
+        if (bpf_probe_read_user(&ev, sizeof(ev), (void *)(events_ptr + i * sizeof(ev))) == 0) {
+            u64 iocb_ptr = ev.obj; // io_event.obj 가 커널의 iocb 포인터임
+            u64 *last_ts = bpf_map_lookup_elem(&iocb_complete_ts, &iocb_ptr);
             
-            if (st) {
+            if (last_ts && *last_ts > 0 && ts > *last_ts) {
+                u64 wakeup_lat = ts - *last_ts;
                 __sync_fetch_and_add(&st->getevents_count, 1);
                 __sync_fetch_and_add(&st->wakeup_lat_total, wakeup_lat);
                 if (wakeup_lat > st->wakeup_lat_max) st->wakeup_lat_max = wakeup_lat;
             }
+            // 처리된 IO는 맵에서 삭제하여 메모리 누수 방지
+            bpf_map_delete_elem(&iocb_complete_ts, &iocb_ptr);
         }
-        bpf_map_delete_elem(&active_getevents, &pid_tgid); // 측정 완료 후 정리
     }
     return 0;
 }
 
-// 1. 최신 커널에서 aio_complete 대신 aio_complete_rw를 거칠 수 있음
-SEC("kprobe/aio_complete_rw")
-int BPF_KPROBE(trace_aio_complete_rw, struct kiocb *iocb) {
-    u64 ts = bpf_ktime_get_ns();
-    struct aio_kiocb *aio_req = (struct aio_kiocb *)iocb;
-    u64 ctx_id = (u64)BPF_CORE_READ(aio_req, ki_ctx, user_id);
-    if (ctx_id) bpf_map_update_elem(&ctx_last_complete, &ctx_id, &ts, BPF_ANY);
-    return 0;
-}
-
-// 2. ARM64 환경 등에서 pgetevents 시스템 콜을 탈 경우를 대비
+// pgetevents 대비용 (ARM64 등)
 SEC("tracepoint/syscalls/sys_enter_io_pgetevents")
 int trace_pgetevents_enter(struct trace_event_raw_sys_enter *ctx) {
     u64 pid_tgid = bpf_get_current_pid_tgid();
-    u64 ctx_id = ctx->args[0]; 
-    bpf_map_update_elem(&active_getevents, &pid_tgid, &ctx_id, BPF_ANY);
+    u64 events_ptr = ctx->args[3]; 
+    bpf_map_update_elem(&active_getevents_events, &pid_tgid, &events_ptr, BPF_ANY);
     return 0;
 }
 
 SEC("tracepoint/syscalls/sys_exit_io_pgetevents")
 int trace_pgetevents_exit(struct trace_event_raw_sys_exit *ctx) {
-    if (ctx->ret <= 0) return 0; 
+    long ret = ctx->ret;
+    if (ret <= 0) return 0;
 
     u64 ts = bpf_ktime_get_ns();
     u64 pid_tgid = bpf_get_current_pid_tgid();
     
-    u64 *ctx_id_ptr = bpf_map_lookup_elem(&active_getevents, &pid_tgid);
-    if (ctx_id_ptr) {
-        u64 *last_ts = bpf_map_lookup_elem(&ctx_last_complete, ctx_id_ptr);
+    u64 *events_ptr_p = bpf_map_lookup_elem(&active_getevents_events, &pid_tgid);
+    if (!events_ptr_p) return 0;
+    
+    u64 events_ptr = *events_ptr_p;
+    bpf_map_delete_elem(&active_getevents_events, &pid_tgid);
+
+    u32 key = 0;
+    struct libaio_stats *st = bpf_map_lookup_elem(&sys_stats_map, &key);
+    if (!st) return 0;
+
+    struct io_event ev;
+    
+    #pragma unroll
+    for (int i = 0; i < 256; i++) {
+        if (i >= ret) break;
         
-        if (last_ts && *last_ts > 0 && ts > *last_ts) {
-            u64 wakeup_lat = ts - *last_ts;
-            u32 key = 0;
-            struct libaio_stats *st = bpf_map_lookup_elem(&sys_stats_map, &key);
+        if (bpf_probe_read_user(&ev, sizeof(ev), (void *)(events_ptr + i * sizeof(ev))) == 0) {
+            u64 iocb_ptr = ev.obj;
+            u64 *last_ts = bpf_map_lookup_elem(&iocb_complete_ts, &iocb_ptr);
             
-            if (st) {
+            if (last_ts && *last_ts > 0 && ts > *last_ts) {
+                u64 wakeup_lat = ts - *last_ts;
                 __sync_fetch_and_add(&st->getevents_count, 1);
                 __sync_fetch_and_add(&st->wakeup_lat_total, wakeup_lat);
                 if (wakeup_lat > st->wakeup_lat_max) st->wakeup_lat_max = wakeup_lat;
             }
+            bpf_map_delete_elem(&iocb_complete_ts, &iocb_ptr);
         }
-        bpf_map_delete_elem(&active_getevents, &pid_tgid);
     }
     return 0;
 }

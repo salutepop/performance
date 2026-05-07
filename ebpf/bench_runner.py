@@ -34,7 +34,6 @@ def print_op_stats(op_name, fio_job, bpf_stats):
     print(f" [{op_name}] IO Count : fio = {fio_cnt:,} | eBPF = {cnt:,}")
     
     if fio_job and fio_cnt > 0:
-        # slat, clat, lat 추출
         lat_ns = fio_job.get('lat_ns', {}).get('mean', 0)
         slat_ns = fio_job.get('slat_ns', {}).get('mean', 0)
         clat_ns = fio_job.get('clat_ns', {}).get('mean', 0)
@@ -65,7 +64,7 @@ def run_benchmark():
     time.sleep(0.1)
 
     print(f"[*] Running fio (RandRW 50:50) for {RUNTIME} seconds...\n")
-    # 원인 분석을 위해 iodepth_batch_complete 제거 또는 1 유지 상태라고 가정
+    
     fio_cmd = [
         "sudo", "fio", "--name=nvme_bench", f"--filename={TEST_FILE}", f"--size={FILE_SIZE_GB}G",   
         "--direct=1", "--rw=randrw", "--rwmixread=50", "--bs=4k", "--ioengine=libaio", 
@@ -117,7 +116,6 @@ def run_benchmark():
             else:
                 print(f" [Background Device: {dev['dev_name']}] Handled {bpf_total_cnt:,} IOs (Skipped)\n")
 
-        # Libaio 시스템 콜 지연 시간 (U2Q, C2U)
         sys_stats = bpf_data.get('libaio_overhead', {})
         sub_cnt = sys_stats.get('submit_count', 0)
         sub_sum_ms = sys_stats.get('submit_lat_ns', 0) / 1000000.0
@@ -130,7 +128,6 @@ def run_benchmark():
         tot_q2i_avg_us = (tot_q2i_ms * 1000.0 / tot_q2i_cnt) if tot_q2i_cnt > 0 else 0
         tot_d2c_avg_us = (tot_d2c_ms * 1000.0 / tot_d2c_cnt) if tot_d2c_cnt > 0 else 0
 
-        # 포맷이 완벽히 통일된 통합 스택 테이블
         print("-" * 75)
         print(" [ FULL STACK LATENCY BREAKDOWN (Target Dev + Libaio) ]")
         print(f" {'Phase':<15} | {'Call Count':>12} | {'Sum (ms)':>15} | {'Avg (us)':>12}")

@@ -33,7 +33,7 @@ struct io_stats {
     struct rw_stats stats[IO_MAX_TYPES];
 };
 
-// [추가] libaio 시스템 콜 오버헤드 추적을 위한 구조체
+// libaio 시스템 콜 오버헤드 추적을 위한 구조체
 struct libaio_stats {
     unsigned long long submit_count;
     unsigned long long submit_lat_total;
@@ -43,5 +43,16 @@ struct libaio_stats {
     unsigned long long wakeup_lat_total;
     unsigned long long wakeup_lat_max;
 };
+
+// BPF 컴파일 환경에서는 vmlinux.h의 구조체를 사용하도록 예외 처리
+#ifndef __BPF__
+// libaio io_event 구조체 (userspace ABI)
+struct io_event {
+    __u64 data;
+    __u64 obj;  // 이게 커널의 struct kiocb * 포인터와 동일함
+    __s64 res;
+    __s64 res2;
+};
+#endif
 
 #endif

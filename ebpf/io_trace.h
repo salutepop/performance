@@ -7,7 +7,6 @@
     #include <linux/types.h>
 #endif
 
-// 리눅스 블록 레이어의 주요 I/O 타입 5가지
 enum io_req_type {
     IO_READ = 0,
     IO_READ_AHEAD,
@@ -17,24 +16,32 @@ enum io_req_type {
     IO_MAX_TYPES
 };
 
-// 지연 시간 통계를 담는 서브 구조체
 struct lat_stats {
     unsigned long long total;
     unsigned long long max;
     unsigned long long min;
 };
 
-// 개별 I/O 타입의 통계 (Q2I와 D2C를 완벽히 분리)
 struct rw_stats {
     unsigned long long io_count;
     unsigned long long total_bytes;
-    struct lat_stats q2i; // Queue-to-Issue (OS 오버헤드)
-    struct lat_stats d2c; // Issue-to-Complete (순수 하드웨어 지연)
+    struct lat_stats q2i; // Queue-to-Issue (블록 대기)
+    struct lat_stats d2c; // Issue-to-Complete (하드웨어 성능)
 };
 
-// 장치 하나가 5가지 I/O 타입의 통계를 모두 가집니다.
 struct io_stats {
     struct rw_stats stats[IO_MAX_TYPES];
+};
+
+// [추가] libaio 시스템 콜 오버헤드 추적을 위한 구조체
+struct libaio_stats {
+    unsigned long long submit_count;
+    unsigned long long submit_lat_total;
+    unsigned long long submit_lat_max;
+
+    unsigned long long getevents_count;
+    unsigned long long wakeup_lat_total;
+    unsigned long long wakeup_lat_max;
 };
 
 #endif

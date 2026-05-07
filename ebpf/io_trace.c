@@ -41,7 +41,7 @@ int main(int argc, char **argv) {
     nr_cpus = libbpf_num_possible_cpus();
     stats_array = calloc(nr_cpus, sizeof(struct io_stats));
 
-    printf("[PID: %d] io_trace is running (Q2I + D2C Full Split Mode)...\n", getpid());
+    printf("[PID: %d] io_trace is running (Q2I + D2C + U2Q + C2U Libaio Mode)...\n", getpid());
 
     while (!stop) {
         if (reset_flag) {
@@ -136,7 +136,23 @@ int main(int argc, char **argv) {
         key = next_key;
     }
 
-    printf("\n  ]\n}\n---JSON_END---\n");
+    printf("\n  ],\n");
+
+    // [새롭게 추가된 libaio 시스템 콜 통계 출력부]
+    struct libaio_stats sys_st = {0};
+    unsigned int sys_key = 0;
+    bpf_map_lookup_elem(bpf_map__fd(skel->maps.sys_stats_map), &sys_key, &sys_st);
+
+    printf("  \"libaio_overhead\": {\n");
+    printf("    \"submit_count\": %llu,\n", sys_st.submit_count);
+    printf("    \"submit_lat_ns\": %llu,\n", sys_st.submit_lat_total);
+    printf("    \"submit_max_ns\": %llu,\n", sys_st.submit_lat_max);
+    printf("    \"getevents_count\": %llu,\n", sys_st.getevents_count);
+    printf("    \"wakeup_lat_ns\": %llu,\n", sys_st.wakeup_lat_total);
+    printf("    \"wakeup_max_ns\": %llu\n", sys_st.wakeup_lat_max);
+    printf("  }\n");
+
+    printf("}\n---JSON_END---\n");
 
     free(stats_array);
 cleanup:

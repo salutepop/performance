@@ -7,16 +7,23 @@
 char LICENSE[] SEC("license") = "GPL";
 #define BPF_REQ_RAHEAD (1ULL << 19)
 
+// 1. BIO 시작 시점에 PID를 함께 저장
+struct bio_start_ctx {
+    u64 ts;
+    u64 pid_tgid;
+};
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 1048576);
     __type(key, u64); 
-    __type(value, u64); 
+    __type(value, struct bio_start_ctx); 
 } bio_start SEC(".maps");
 
+// 2. Request 이슈 시점에 PID 전달
 struct trace_ctx {
     u64 issue_ts;
     u64 q2d_lat;
+    u64 pid_tgid;
 };
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
@@ -32,7 +39,6 @@ struct {
     __type(value, struct io_stats);
 } device_stats SEC(".maps");
 
-// 시스템 콜 시작점 추적 (U2Q 계산용)
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 10240);
@@ -47,16 +53,23 @@ struct {
     __type(value, u64); 
 } active_getevents_events SEC(".maps");
 
+// ★ 핵심 복합 Key: PID + 가상주소 묶음
+struct a2u_key {
+    u64 pid_tgid;
+    u64 iocb_ptr;
+};
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 1048576);
-    __type(key, u64); 
+    __type(key, struct a2u_key); 
     __type(value, u64); 
 } iocb_complete_ts SEC(".maps");
 
+// 3. C2A 시점에 PID 전달
 struct c2a_ctx {
     u64 ts;
     int type;
+    u64 pid_tgid;
 };
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
@@ -72,6 +85,7 @@ struct {
     __type(value, struct libaio_stats);
 } sys_stats_map SEC(".maps");
 
+
 SEC("tracepoint/syscalls/sys_enter_io_submit")
 int trace_submit_enter(void *ctx) {
     u64 ts = bpf_ktime_get_ns();
@@ -82,7 +96,6 @@ int trace_submit_enter(void *ctx) {
 
 SEC("tracepoint/syscalls/sys_exit_io_submit")
 int trace_submit_exit(void *ctx) {
-    // 메모리 누수 방지용 삭제만 수행 (U2Q 측정은 bio_queue에서 완료됨)
     u64 pid_tgid = bpf_get_current_pid_tgid();
     bpf_map_delete_elem(&pid_submit_start, &pid_tgid);
     return 0;
@@ -93,7 +106,6 @@ int BPF_PROG(block_bio_queue, struct bio *bio) {
     u64 ts = bpf_ktime_get_ns();
     u64 pid_tgid = bpf_get_current_pid_tgid();
     
-    // 1. [U2Q] 개별 BIO 단위 제출 지연시간 측정
     u64 *submit_ts = bpf_map_lookup_elem(&pid_submit_start, &pid_tgid);
     if (submit_ts) {
         u64 u2q_lat = ts - *submit_ts;
@@ -105,9 +117,9 @@ int BPF_PROG(block_bio_queue, struct bio *bio) {
         }
     }
 
-    // 2. [Q2D] 큐 대기시간 시작점 마킹
     u64 bio_ptr = (u64)bio;
-    bpf_map_update_elem(&bio_start, &bio_ptr, &ts, BPF_ANY);
+    struct bio_start_ctx bctx = { .ts = ts, .pid_tgid = pid_tgid };
+    bpf_map_update_elem(&bio_start, &bio_ptr, &bctx, BPF_ANY);
     return 0;
 }
 
@@ -119,15 +131,17 @@ int BPF_PROG(block_rq_issue, struct request *rq) {
     u64 bio_ptr = (u64)bio;
     
     u64 q2d_lat = 0;
+    u64 pid_tgid = 0;
     if (bio_ptr != 0) {
-        u64 *b_ts = bpf_map_lookup_elem(&bio_start, &bio_ptr);
-        if (b_ts) {
-            q2d_lat = ts - *b_ts;
+        struct bio_start_ctx *bctx = bpf_map_lookup_elem(&bio_start, &bio_ptr);
+        if (bctx) {
+            q2d_lat = ts - bctx->ts;
+            pid_tgid = bctx->pid_tgid;
             bpf_map_delete_elem(&bio_start, &bio_ptr);
         }
     }
 
-    struct trace_ctx tctx = { .issue_ts = ts, .q2d_lat = q2d_lat };
+    struct trace_ctx tctx = { .issue_ts = ts, .q2d_lat = q2d_lat, .pid_tgid = pid_tgid };
     bpf_map_update_elem(&req_start, &req_ptr, &tctx, BPF_ANY);
     return 0;
 }
@@ -181,7 +195,6 @@ int BPF_PROG(block_rq_complete, struct request *rq, int error, unsigned int nr_b
         }
     }
     
-    // C2A 시작점 마킹 (명령어 타입 함께 저장)
     if (type != -1) {
         struct bio *bio = BPF_CORE_READ(rq, bio);
         if (bio) {
@@ -190,7 +203,7 @@ int BPF_PROG(block_rq_complete, struct request *rq, int error, unsigned int nr_b
                 struct kiocb *iocb_ptr = BPF_CORE_READ((struct iomap_dio *)bi_private, iocb);
                 if (iocb_ptr) {
                     u64 key = (u64)iocb_ptr;
-                    struct c2a_ctx cctx = { .ts = end_ts, .type = type };
+                    struct c2a_ctx cctx = { .ts = end_ts, .type = type, .pid_tgid = tctx->pid_tgid };
                     bpf_map_update_elem(&iocb_c2a_start, &key, &cctx, BPF_ANY);
                 }
             }
@@ -201,70 +214,43 @@ int BPF_PROG(block_rq_complete, struct request *rq, int error, unsigned int nr_b
     return 0;
 }
 
+// 요청하신 대로 kprobe/aio_complete 훅은 건드리지 않고, 내부 Key 생성 로직만 수정
 SEC("kprobe/aio_complete")
 int trace_aio_complete(struct pt_regs *ctx) {
     struct aio_kiocb *aio_iocb = (struct aio_kiocb *)PT_REGS_PARM1(ctx);
     u64 ts = bpf_ktime_get_ns();
+    u64 pid_tgid = 0;
 
-    // 1. C2A 계산
+    // 1. C2A 계산 및 PID 확보
     u64 key_iocb = (u64)aio_iocb; 
     struct c2a_ctx *cctx = bpf_map_lookup_elem(&iocb_c2a_start, &key_iocb);
-    if (cctx && cctx->ts > 0 && ts > cctx->ts) {
-        u64 c2a_lat = ts - cctx->ts;
-        u32 stat_key = 0;
-        struct libaio_stats *st = bpf_map_lookup_elem(&sys_stats_map, &stat_key);
-        if (st) {
-            if (cctx->type == IO_READ || cctx->type == IO_READ_AHEAD) {
-                __sync_fetch_and_add(&st->c2a_read_count, 1);
-                __sync_fetch_and_add(&st->c2a_read_total, c2a_lat);
-            } else if (cctx->type == IO_WRITE) {
-                __sync_fetch_and_add(&st->c2a_write_count, 1);
-                __sync_fetch_and_add(&st->c2a_write_total, c2a_lat);
-            } else if (cctx->type == IO_FLUSH) {
-                __sync_fetch_and_add(&st->c2a_flush_count, 1);
-                __sync_fetch_and_add(&st->c2a_flush_total, c2a_lat);
+    if (cctx && cctx->ts > 0) {
+        pid_tgid = cctx->pid_tgid; // 앞서 전달받은 PID를 가져옴
+        if (ts > cctx->ts) {
+            u64 c2a_lat = ts - cctx->ts;
+            u32 stat_key = 0;
+            struct libaio_stats *st = bpf_map_lookup_elem(&sys_stats_map, &stat_key);
+            if (st) {
+                if (cctx->type == IO_READ || cctx->type == IO_READ_AHEAD) {
+                    __sync_fetch_and_add(&st->c2a_read_count, 1);
+                    __sync_fetch_and_add(&st->c2a_read_total, c2a_lat);
+                } else if (cctx->type == IO_WRITE) {
+                    __sync_fetch_and_add(&st->c2a_write_count, 1);
+                    __sync_fetch_and_add(&st->c2a_write_total, c2a_lat);
+                } else if (cctx->type == IO_FLUSH) {
+                    __sync_fetch_and_add(&st->c2a_flush_count, 1);
+                    __sync_fetch_and_add(&st->c2a_flush_total, c2a_lat);
+                }
             }
         }
         bpf_map_delete_elem(&iocb_c2a_start, &key_iocb);
     }
 
-    // 2. A2U 시작점 마킹
+    // 2. A2U 시작점 마킹 (복합 Key 사용)
     u64 key_user = BPF_CORE_READ(aio_iocb, ki_res.obj);
-    if (key_user) {
-        bpf_map_update_elem(&iocb_complete_ts, &key_user, &ts, BPF_ANY);
-    }
-    return 0;
-}
-
-SEC("kprobe/aio_complete_rw")
-int trace_aio_complete_rw(struct pt_regs *ctx) {
-    struct aio_kiocb *aio_iocb = (struct aio_kiocb *)PT_REGS_PARM1(ctx);
-    u64 ts = bpf_ktime_get_ns();
-
-    u64 key_iocb = (u64)aio_iocb; 
-    struct c2a_ctx *cctx = bpf_map_lookup_elem(&iocb_c2a_start, &key_iocb);
-    if (cctx && cctx->ts > 0 && ts > cctx->ts) {
-        u64 c2a_lat = ts - cctx->ts;
-        u32 stat_key = 0;
-        struct libaio_stats *st = bpf_map_lookup_elem(&sys_stats_map, &stat_key);
-        if (st) {
-            if (cctx->type == IO_READ || cctx->type == IO_READ_AHEAD) {
-                __sync_fetch_and_add(&st->c2a_read_count, 1);
-                __sync_fetch_and_add(&st->c2a_read_total, c2a_lat);
-            } else if (cctx->type == IO_WRITE) {
-                __sync_fetch_and_add(&st->c2a_write_count, 1);
-                __sync_fetch_and_add(&st->c2a_write_total, c2a_lat);
-            } else if (cctx->type == IO_FLUSH) {
-                __sync_fetch_and_add(&st->c2a_flush_count, 1);
-                __sync_fetch_and_add(&st->c2a_flush_total, c2a_lat);
-            }
-        }
-        bpf_map_delete_elem(&iocb_c2a_start, &key_iocb);
-    }
-
-    u64 key_user = BPF_CORE_READ(aio_iocb, ki_res.obj);
-    if (key_user) {
-        bpf_map_update_elem(&iocb_complete_ts, &key_user, &ts, BPF_ANY);
+    if (key_user && pid_tgid) {
+        struct a2u_key akey = { .pid_tgid = pid_tgid, .iocb_ptr = key_user };
+        bpf_map_update_elem(&iocb_complete_ts, &akey, &ts, BPF_ANY);
     }
     return 0;
 }
@@ -303,7 +289,10 @@ int trace_getevents_exit(struct trace_event_raw_sys_exit *ctx) {
         
         if (bpf_probe_read_user(&ev, sizeof(ev), (void *)(events_ptr + i * sizeof(ev))) == 0) {
             u64 iocb_ptr = ev.obj; 
-            u64 *last_ts = bpf_map_lookup_elem(&iocb_complete_ts, &iocb_ptr);
+            
+            // 복합 Key를 만들어 매칭
+            struct a2u_key akey = { .pid_tgid = pid_tgid, .iocb_ptr = iocb_ptr };
+            u64 *last_ts = bpf_map_lookup_elem(&iocb_complete_ts, &akey);
             
             if (last_ts && *last_ts > 0 && ts > *last_ts) {
                 u64 wakeup_lat = ts - *last_ts;
@@ -322,7 +311,7 @@ int trace_getevents_exit(struct trace_event_raw_sys_exit *ctx) {
                     __sync_fetch_and_add(&st->a2u_flush_total, wakeup_lat);
                 }
             }
-            bpf_map_delete_elem(&iocb_complete_ts, &iocb_ptr);
+            bpf_map_delete_elem(&iocb_complete_ts, &akey);
         }
     }
     return 0;
@@ -363,7 +352,10 @@ int trace_pgetevents_exit(struct trace_event_raw_sys_exit *ctx) {
         
         if (bpf_probe_read_user(&ev, sizeof(ev), (void *)(events_ptr + i * sizeof(ev))) == 0) {
             u64 iocb_ptr = ev.obj;
-            u64 *last_ts = bpf_map_lookup_elem(&iocb_complete_ts, &iocb_ptr);
+            
+            // 복합 Key를 만들어 매칭
+            struct a2u_key akey = { .pid_tgid = pid_tgid, .iocb_ptr = iocb_ptr };
+            u64 *last_ts = bpf_map_lookup_elem(&iocb_complete_ts, &akey);
             
             if (last_ts && *last_ts > 0 && ts > *last_ts) {
                 u64 wakeup_lat = ts - *last_ts;
@@ -382,7 +374,7 @@ int trace_pgetevents_exit(struct trace_event_raw_sys_exit *ctx) {
                     __sync_fetch_and_add(&st->a2u_flush_total, wakeup_lat);
                 }
             }
-            bpf_map_delete_elem(&iocb_complete_ts, &iocb_ptr);
+            bpf_map_delete_elem(&iocb_complete_ts, &akey);
         }
     }
     return 0;

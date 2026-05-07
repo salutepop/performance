@@ -4,7 +4,6 @@ import os
 import signal
 import time
 
-TEST_FILE = "./bpf_test_file.bin"
 FILE_SIZE_GB = 1
 RUNTIME = 5.0 
 
@@ -73,11 +72,26 @@ def run_benchmark():
     print(f"[*] Running fio (RandRW 50:50) for {RUNTIME} seconds...\n")
     
     fio_cmd = [
-        "sudo", "fio", "--name=nvme_bench", f"--filename={TEST_FILE}", f"--size={FILE_SIZE_GB}G",   
-        "--direct=1", "--rw=randrw", "--rwmixread=100", "--bs=4k", "--ioengine=libaio", 
-        "--iodepth=128", f"--runtime={int(RUNTIME)}", 
-        "--time_based", "--output-format=json"
+        "sudo", "fio",
+        "--name=testfile_",
+        f"--size={FILE_SIZE_GB}G",
+
+        "--direct=1",
+        "--rw=randrw",
+        "--rwmixread=50",
+        "--bs=4k",
+
+        "--ioengine=libaio",
+        "--iodepth=128",
+        "--numjobs=8",
+
+        f"--runtime={int(RUNTIME)}",
+        "--time_based",
+
+        "--group_reporting",
+        "--output-format=json",
     ]
+
     fio_result = subprocess.run(fio_cmd, capture_output=True, text=True)
 
     os.kill(trace_proc.pid, signal.SIGINT)

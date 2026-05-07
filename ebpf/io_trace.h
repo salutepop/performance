@@ -25,31 +25,34 @@ struct lat_stats {
 struct rw_stats {
     unsigned long long io_count;
     unsigned long long total_bytes;
-    struct lat_stats q2i; // Queue-to-Issue (블록 대기)
-    struct lat_stats d2c; // Issue-to-Complete (하드웨어 성능)
+    struct lat_stats q2d; // Queue to Dispatch
+    struct lat_stats d2c; // Dispatch to Complete
 };
 
 struct io_stats {
     struct rw_stats stats[IO_MAX_TYPES];
 };
 
-// libaio 시스템 콜 오버헤드 추적을 위한 구조체
 struct libaio_stats {
-    unsigned long long submit_count;
-    unsigned long long submit_lat_total;
-    unsigned long long submit_lat_max;
+    // 1. U2Q: 개별 IO 단위의 Submit Latency (Tail-biting)
+    unsigned long long u2q_count;
+    unsigned long long u2q_lat_total;
 
-    unsigned long long getevents_count;
-    unsigned long long wakeup_lat_total;
-    unsigned long long wakeup_lat_max;
+    // 4. C2A (Complete to AIO): FS End-IO 메타데이터 처리 지연
+    unsigned long long c2a_read_count;
+    unsigned long long c2a_read_total;
+    unsigned long long c2a_write_count;
+    unsigned long long c2a_write_total;
+    unsigned long long c2a_flush_count;
+    unsigned long long c2a_flush_total;
 
-    // 명령어(Opcode)별 C2U 분리 추적
-    unsigned long long c2u_read_count;
-    unsigned long long c2u_read_total;
-    unsigned long long c2u_write_count;
-    unsigned long long c2u_write_total;
-    unsigned long long c2u_flush_count;
-    unsigned long long c2u_flush_total;
+    // 5. A2U (AIO to User): User Wakeup 지연
+    unsigned long long a2u_read_count;
+    unsigned long long a2u_read_total;
+    unsigned long long a2u_write_count;
+    unsigned long long a2u_write_total;
+    unsigned long long a2u_flush_count;
+    unsigned long long a2u_flush_total;
 };
 
 #ifndef __BPF__

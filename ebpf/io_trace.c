@@ -46,7 +46,7 @@ int main(int argc, char **argv) {
     device_stats_map = bpf_object__find_map_by_name(skel->obj, "device_stats");
     sys_stats_map = bpf_object__find_map_by_name(skel->obj, "sys_stats_map");
 
-    printf("[PID: %d] io_trace is running (Q2I + D2C + U2Q + C2U Libaio Mode)...\n", getpid());
+    printf("[PID: %d] io_trace is running (U2Q + Q2D + D2C + C2A + A2U Mode)...\n", getpid());
 
     while (!stop) {
         if (reset_flag) {
@@ -68,9 +68,9 @@ int main(int argc, char **argv) {
             for (int t = 0; t < IO_MAX_TYPES; t++) {
                 dev_total.stats[t].io_count = 0;
                 dev_total.stats[t].total_bytes = 0;
-                dev_total.stats[t].q2i.total = 0;
-                dev_total.stats[t].q2i.max = 0;
-                dev_total.stats[t].q2i.min = (unsigned long long)-1;
+                dev_total.stats[t].q2d.total = 0;
+                dev_total.stats[t].q2d.max = 0;
+                dev_total.stats[t].q2d.min = (unsigned long long)-1;
                 dev_total.stats[t].d2c.total = 0;
                 dev_total.stats[t].d2c.max = 0;
                 dev_total.stats[t].d2c.min = (unsigned long long)-1;
@@ -87,9 +87,9 @@ int main(int argc, char **argv) {
                         tot_st->io_count += cpu_st->io_count;
                         tot_st->total_bytes += cpu_st->total_bytes;
                         
-                        tot_st->q2i.total += cpu_st->q2i.total;
-                        if (cpu_st->q2i.max > tot_st->q2i.max) tot_st->q2i.max = cpu_st->q2i.max;
-                        if (cpu_st->q2i.min < tot_st->q2i.min) tot_st->q2i.min = cpu_st->q2i.min;
+                        tot_st->q2d.total += cpu_st->q2d.total;
+                        if (cpu_st->q2d.max > tot_st->q2d.max) tot_st->q2d.max = cpu_st->q2d.max;
+                        if (cpu_st->q2d.min < tot_st->q2d.min) tot_st->q2d.min = cpu_st->q2d.min;
                         
                         tot_st->d2c.total += cpu_st->d2c.total;
                         if (cpu_st->d2c.max > tot_st->d2c.max) tot_st->d2c.max = cpu_st->d2c.max;
@@ -117,10 +117,10 @@ int main(int argc, char **argv) {
                         printf("          \"total_count\": %llu,\n", dev_total.stats[t].io_count);
                         printf("          \"total_bytes\": %llu,\n", dev_total.stats[t].total_bytes);
                         
-                        printf("          \"q2i\": {\n");
-                        printf("            \"total_lat_ns\": %llu,\n", dev_total.stats[t].q2i.total);
-                        printf("            \"min_lat_ns\": %llu,\n", dev_total.stats[t].q2i.min == (unsigned long long)-1 ? 0 : dev_total.stats[t].q2i.min);
-                        printf("            \"max_lat_ns\": %llu\n", dev_total.stats[t].q2i.max);
+                        printf("          \"q2d\": {\n");
+                        printf("            \"total_lat_ns\": %llu,\n", dev_total.stats[t].q2d.total);
+                        printf("            \"min_lat_ns\": %llu,\n", dev_total.stats[t].q2d.min == (unsigned long long)-1 ? 0 : dev_total.stats[t].q2d.min);
+                        printf("            \"max_lat_ns\": %llu\n", dev_total.stats[t].q2d.max);
                         printf("          },\n");
                         
                         printf("          \"d2c\": {\n");
@@ -149,20 +149,22 @@ int main(int argc, char **argv) {
     }
 
     printf("  \"libaio_overhead\": {\n");
-    printf("    \"submit_count\": %llu,\n", sys_st.submit_count);
-    printf("    \"submit_lat_ns\": %llu,\n", sys_st.submit_lat_total);
-    printf("    \"submit_max_ns\": %llu,\n", sys_st.submit_lat_max);
-    printf("    \"getevents_count\": %llu,\n", sys_st.getevents_count);
-    printf("    \"wakeup_lat_ns\": %llu,\n", sys_st.wakeup_lat_total);
-    printf("    \"wakeup_max_ns\": %llu,\n", sys_st.wakeup_lat_max);
-    
-    // 명령어별 C2U 출력
-    printf("    \"c2u_read_count\": %llu,\n", sys_st.c2u_read_count);
-    printf("    \"c2u_read_total\": %llu,\n", sys_st.c2u_read_total);
-    printf("    \"c2u_write_count\": %llu,\n", sys_st.c2u_write_count);
-    printf("    \"c2u_write_total\": %llu,\n", sys_st.c2u_write_total);
-    printf("    \"c2u_flush_count\": %llu,\n", sys_st.c2u_flush_count);
-    printf("    \"c2u_flush_total\": %llu\n", sys_st.c2u_flush_total);
+    printf("    \"u2q_count\": %llu,\n", sys_st.u2q_count);
+    printf("    \"u2q_lat_total\": %llu,\n", sys_st.u2q_lat_total);
+
+    printf("    \"c2a_read_count\": %llu,\n", sys_st.c2a_read_count);
+    printf("    \"c2a_read_total\": %llu,\n", sys_st.c2a_read_total);
+    printf("    \"c2a_write_count\": %llu,\n", sys_st.c2a_write_count);
+    printf("    \"c2a_write_total\": %llu,\n", sys_st.c2a_write_total);
+    printf("    \"c2a_flush_count\": %llu,\n", sys_st.c2a_flush_count);
+    printf("    \"c2a_flush_total\": %llu,\n", sys_st.c2a_flush_total);
+
+    printf("    \"a2u_read_count\": %llu,\n", sys_st.a2u_read_count);
+    printf("    \"a2u_read_total\": %llu,\n", sys_st.a2u_read_total);
+    printf("    \"a2u_write_count\": %llu,\n", sys_st.a2u_write_count);
+    printf("    \"a2u_write_total\": %llu,\n", sys_st.a2u_write_total);
+    printf("    \"a2u_flush_count\": %llu,\n", sys_st.a2u_flush_count);
+    printf("    \"a2u_flush_total\": %llu\n", sys_st.a2u_flush_total);
     printf("  }\n");
 
     printf("}\n---JSON_END---\n");

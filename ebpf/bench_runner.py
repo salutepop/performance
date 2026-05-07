@@ -93,7 +93,7 @@ def run_benchmark():
 
         "--direct=1",
         "--rw=randrw",
-        "--rwmixread=0",
+        "--rwmixread=50",
         "--bs=4k",
 
         "--ioengine=libaio",
@@ -107,7 +107,6 @@ def run_benchmark():
         "--output-format=json",
     ]
 
-    # 측정: 워크로드(여기서는 fio)의 실제 실행 시간 계산
     t0 = time.time()
     fio_result = subprocess.run(fio_cmd, capture_output=True, text=True)
     t1 = time.time()
@@ -118,16 +117,15 @@ def run_benchmark():
 
     try:
         fio_data = json.loads(fio_result.stdout)
-        job_read = fio_data['jobs'][0]['read']
-        job_write = fio_data['jobs'][0]['write']
-        job_trim = fio_data['jobs'][0].get('trim', None)
+        job_info = fio_data['jobs'][0]
+        job_read = job_info['read']
+        job_write = job_info['write']
+        job_trim = job_info.get('trim', None)
         fio_total_ios = job_read['total_ios'] + job_write['total_ios']
 
-        # fio가 자체적으로 기록한 정확한 runtime이 있다면 이를 우선하여 Bandwidth 계산의 기준점으로 삼음
         fio_runtime_ms = max(job_read.get('runtime', 0), job_write.get('runtime', 0))
         effective_duration = (fio_runtime_ms / 1000.0) if fio_runtime_ms > 0 else trace_exec_time
         
-        # fio 없이 실제 워크로드로 대체되었을 경우 방어코드
         if effective_duration <= 0: effective_duration = RUNTIME
 
         raw_json = bpf_output.split("---JSON_START---")[1].split("---JSON_END---")[0].strip()
@@ -137,6 +135,33 @@ def run_benchmark():
         print(" [ I/O PROFILING REPORT (Perfect Tail-Biting Trace) ]")
         print("="*100)
         
+        # --- [추가된 부분] fio 평가 조건 파싱 및 출력 ---
+        if fio_data and 'jobs' in fio_data and len(fio_data['jobs']) > 0:
+            job_opts = job_info.get('job options', {})
+            
+            # JSON에 job options가 없을 경우를 대비한 Fallback (스크립트 기본값)
+            ioengine = job_opts.get('ioengine', 'libaio')
+            rw = job_opts.get('rw', 'randrw')
+            rwmixread = job_opts.get('rwmixread', '50')
+            bs = job_opts.get('bs', '4k')
+            iodepth = job_opts.get('iodepth', '128')
+            numjobs = job_opts.get('numjobs', '8')
+            direct = job_opts.get('direct', '1')
+            size = job_opts.get('size', f"{FILE_SIZE_GB}G")
+            runtime_val = job_opts.get('runtime', str(RUNTIME))
+
+            print(" [ fio Evaluation Conditions ]")
+            print(f"  - IO Engine  : {ioengine}")
+            print(f"  - RW Pattern : {rw} (Read {rwmixread}%)")
+            print(f"  - Block Size : {bs}")
+            print(f"  - IO Depth   : {iodepth}")
+            print(f"  - Num Jobs   : {numjobs}")
+            print(f"  - Direct IO  : {direct}")
+            print(f"  - Target Size: {size}")
+            print(f"  - Runtime    : {runtime_val}s")
+            print("-" * 100)
+        # ------------------------------------------------
+
         sys_stats = bpf_data.get('libaio_overhead', {})
         c2a_read = (sys_stats.get('c2a_read_count', 0), sys_stats.get('c2a_read_total', 0) / 1000000.0)
         c2a_write = (sys_stats.get('c2a_write_count', 0), sys_stats.get('c2a_write_total', 0) / 1000000.0)
@@ -164,7 +189,6 @@ def run_benchmark():
                     ("FLUSH", None, ops.get('flush', {}), c2a_flush, a2u_flush)
                 ]:
                     if bpf_src:
-                        # 파라미터로 effective_duration 전달
                         q_cnt, q_ms, d_ms, c_cnt, c_ms = print_op_stats(op_name, fio_src, bpf_src, c2a_data, a2u_data, effective_duration)
                         
                         tot_q2d_cnt += q_cnt

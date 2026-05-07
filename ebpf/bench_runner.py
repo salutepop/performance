@@ -17,19 +17,32 @@ def get_real_dev_name(dev_id_str):
         pass
     return "unknown"
 
-def print_op_stats(op_name, fio_job, bpf_stats, c2a_data, a2u_data):
+def print_op_stats(op_name, fio_job, bpf_stats, c2a_data, a2u_data, duration):
     c2a_cnt, c2a_ms = c2a_data if c2a_data else (0, 0)
     a2u_cnt, a2u_ms = a2u_data if a2u_data else (0, 0)
     
     if bpf_stats.get('total_count', 0) == 0:
-        return 0, 0, 0, 0, 0, 0
+        return 0, 0, 0, 0, 0
 
+    # eBPF Metrics
     cnt = bpf_stats['total_count']
+    bpf_bytes = bpf_stats.get('total_bytes', 0)
+    bpf_bw_mb = (bpf_bytes / (1024.0 * 1024.0)) / duration if duration > 0 else 0
+
     q2d_ms = bpf_stats.get('q2d', {}).get('total_lat_ns', 0) / 1000000.0
     d2c_ms = bpf_stats.get('d2c', {}).get('total_lat_ns', 0) / 1000000.0
 
+    # fio Metrics
     fio_cnt = fio_job['total_ios'] if fio_job else 0
+    fio_bytes = fio_job.get('io_bytes', 0) if fio_job else 0
+    fio_bw_mb = 0
     
+    if fio_job:
+        if 'bw_bytes' in fio_job:
+            fio_bw_mb = fio_job['bw_bytes'] / (1024.0 * 1024.0)
+        elif 'bw' in fio_job:
+            fio_bw_mb = fio_job['bw'] / 1024.0  # KB/s to MB/s
+
     q2d_avg_us = (q2d_ms * 1000.0 / cnt) if cnt > 0 else 0
     d2c_avg_us = (d2c_ms * 1000.0 / cnt) if cnt > 0 else 0
     c2a_avg_us = (c2a_ms * 1000.0 / c2a_cnt) if c2a_cnt > 0 else 0
@@ -39,6 +52,8 @@ def print_op_stats(op_name, fio_job, bpf_stats, c2a_data, a2u_data):
     ebpf_avg_us = q2d_avg_us + d2c_avg_us + c2a_avg_us + a2u_avg_us
 
     print(f" [{op_name}] IO Count : fio = {fio_cnt:,} | eBPF = {cnt:,} (C2A={c2a_cnt:,}, A2U={a2u_cnt:,})")
+    print(f"  - Total Bytes : fio = {fio_bytes:,} B | eBPF = {bpf_bytes:,} B")
+    print(f"  - Bandwidth   : fio = {fio_bw_mb:>10.2f} MB/s | eBPF = {bpf_bw_mb:>10.2f} MB/s")
     
     if fio_job and fio_cnt > 0:
         lat_ns = fio_job.get('lat_ns', {}).get('mean', 0)
@@ -57,7 +72,7 @@ def print_op_stats(op_name, fio_job, bpf_stats, c2a_data, a2u_data):
         print(f"  - fio  slat (Wait) : Sum = {slat_sum_ms:>10.2f} ms | Avg = {slat_avg_us:>8.2f} us")
         print(f"  - fio  clat (Run)  : Sum = {clat_sum_ms:>10.2f} ms | Avg = {clat_avg_us:>8.2f} us")
         print(f"  - eBPF HW+OS (Run) : Sum = {ebpf_sum_ms:>10.2f} ms | Avg = {ebpf_avg_us:>8.2f} us (Q2D+D2C+C2A+A2U)")
-        print()
+    print()
 
     return cnt, q2d_ms, d2c_ms, c2a_cnt, c2a_ms
 
@@ -78,7 +93,7 @@ def run_benchmark():
 
         "--direct=1",
         "--rw=randrw",
-        "--rwmixread=50",
+        "--rwmixread=0",
         "--bs=4k",
 
         "--ioengine=libaio",
@@ -92,7 +107,11 @@ def run_benchmark():
         "--output-format=json",
     ]
 
+    # 측정: 워크로드(여기서는 fio)의 실제 실행 시간 계산
+    t0 = time.time()
     fio_result = subprocess.run(fio_cmd, capture_output=True, text=True)
+    t1 = time.time()
+    trace_exec_time = t1 - t0
 
     os.kill(trace_proc.pid, signal.SIGINT)
     bpf_output, _ = trace_proc.communicate()
@@ -103,6 +122,13 @@ def run_benchmark():
         job_write = fio_data['jobs'][0]['write']
         job_trim = fio_data['jobs'][0].get('trim', None)
         fio_total_ios = job_read['total_ios'] + job_write['total_ios']
+
+        # fio가 자체적으로 기록한 정확한 runtime이 있다면 이를 우선하여 Bandwidth 계산의 기준점으로 삼음
+        fio_runtime_ms = max(job_read.get('runtime', 0), job_write.get('runtime', 0))
+        effective_duration = (fio_runtime_ms / 1000.0) if fio_runtime_ms > 0 else trace_exec_time
+        
+        # fio 없이 실제 워크로드로 대체되었을 경우 방어코드
+        if effective_duration <= 0: effective_duration = RUNTIME
 
         raw_json = bpf_output.split("---JSON_START---")[1].split("---JSON_END---")[0].strip()
         bpf_data = json.loads(raw_json)
@@ -138,7 +164,8 @@ def run_benchmark():
                     ("FLUSH", None, ops.get('flush', {}), c2a_flush, a2u_flush)
                 ]:
                     if bpf_src:
-                        q_cnt, q_ms, d_ms, c_cnt, c_ms = print_op_stats(op_name, fio_src, bpf_src, c2a_data, a2u_data)
+                        # 파라미터로 effective_duration 전달
+                        q_cnt, q_ms, d_ms, c_cnt, c_ms = print_op_stats(op_name, fio_src, bpf_src, c2a_data, a2u_data, effective_duration)
                         
                         tot_q2d_cnt += q_cnt
                         tot_q2d_ms += q_ms

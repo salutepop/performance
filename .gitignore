@@ -7,6 +7,7 @@ __pycache__/
 *.so
 *.o
 *.bin
+*testfile*
 ebpf/io_trace
 
 # Distribution / packaging

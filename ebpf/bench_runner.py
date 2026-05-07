@@ -72,6 +72,17 @@ def print_op_stats(op_name, fio_job, bpf_stats, c2a_data, a2u_data, duration):
         print(f"  - fio  slat (Wait) : Sum = {slat_sum_ms:>10.2f} ms | Avg = {slat_avg_us:>8.2f} us")
         print(f"  - fio  clat (Run)  : Sum = {clat_sum_ms:>10.2f} ms | Avg = {clat_avg_us:>8.2f} us")
         print(f"  - eBPF HW+OS (Run) : Sum = {ebpf_sum_ms:>10.2f} ms | Avg = {ebpf_avg_us:>8.2f} us (Q2D+D2C+C2A+A2U)")
+    
+    hist = bpf_stats.get('size_hist', [0, 0, 0, 0])
+    if cnt > 0 and sum(hist) > 0:
+        labels = ["<= 4KB", "4K-32K", "32K-128K", "> 128KB"]
+        print(f"  - IO Size Dist :")
+        for i in range(4):
+            count = hist[i]
+            ratio = (count / cnt) * 100
+            bar = "█" * int(ratio / 5)
+            print(f"      {labels[i]:>10} : [{bar:<20}] {ratio:>5.1f}% ({count:,})")
+            
     print()
 
     return cnt, q2d_ms, d2c_ms, c2a_cnt, c2a_ms
@@ -135,20 +146,18 @@ def run_benchmark():
         print(" [ I/O PROFILING REPORT (Perfect Tail-Biting Trace) ]")
         print("="*100)
         
-        # --- [추가된 부분] fio 평가 조건 파싱 및 출력 ---
         if fio_data and 'jobs' in fio_data and len(fio_data['jobs']) > 0:
             job_opts = job_info.get('job options', {})
             
-            # JSON에 job options가 없을 경우를 대비한 Fallback (스크립트 기본값)
-            ioengine = job_opts.get('ioengine', 'libaio')
-            rw = job_opts.get('rw', 'randrw')
-            rwmixread = job_opts.get('rwmixread', '50')
-            bs = job_opts.get('bs', '4k')
-            iodepth = job_opts.get('iodepth', '128')
-            numjobs = job_opts.get('numjobs', '8')
-            direct = job_opts.get('direct', '1')
-            size = job_opts.get('size', f"{FILE_SIZE_GB}G")
-            runtime_val = job_opts.get('runtime', str(RUNTIME))
+            ioengine = job_opts.get('ioengine', '-')
+            rw = job_opts.get('rw', '-')
+            rwmixread = job_opts.get('rwmixread', '-')
+            bs = job_opts.get('bs', '-')
+            iodepth = job_opts.get('iodepth', '-')
+            numjobs = job_opts.get('numjobs', '-')
+            direct = job_opts.get('direct', '-')
+            size = job_opts.get('size', '-')
+            runtime_val = job_opts.get('runtime', '-')
 
             print(" [ fio Evaluation Conditions ]")
             print(f"  - IO Engine  : {ioengine}")
@@ -160,7 +169,6 @@ def run_benchmark():
             print(f"  - Target Size: {size}")
             print(f"  - Runtime    : {runtime_val}s")
             print("-" * 100)
-        # ------------------------------------------------
 
         sys_stats = bpf_data.get('libaio_overhead', {})
         c2a_read = (sys_stats.get('c2a_read_count', 0), sys_stats.get('c2a_read_total', 0) / 1000000.0)
@@ -211,7 +219,6 @@ def run_benchmark():
             else:
                 print(f" [Background Device: {dev['dev_name']}] Handled {bpf_total_cnt:,} IOs (Skipped)\n")
 
-        # Global 통계
         u2q_cnt = sys_stats.get('u2q_count', 0)
         u2q_sum_ms = sys_stats.get('u2q_lat_total', 0) / 1000000.0
         u2q_avg_us = (sys_stats.get('u2q_lat_total', 0) / 1000.0 / u2q_cnt) if u2q_cnt > 0 else 0
@@ -233,9 +240,6 @@ def run_benchmark():
         phase_stats['Q2D']['Total'] = (tot_q2d_cnt, tot_q2d_ms, tot_q2d_avg_us)
         phase_stats['D2C']['Total'] = (tot_q2d_cnt, tot_d2c_ms, tot_d2c_avg_us)
 
-        # ---------------------------------------------------------
-        # 매트릭스 스타일 통합 출력
-        # ---------------------------------------------------------
         table_width = 100
         print("-" * table_width)
         print(f" {'[ FULL STACK LATENCY BREAKDOWN (Target Dev + Libaio) ]':^{table_width-2}}")

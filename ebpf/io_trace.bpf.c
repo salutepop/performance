@@ -7,7 +7,6 @@
 char LICENSE[] SEC("license") = "GPL";
 #define BPF_REQ_RAHEAD (1ULL << 19)
 
-// 1. BIO 시작 시점에 PID를 함께 저장
 struct bio_start_ctx {
     u64 ts;
     u64 pid_tgid;
@@ -19,7 +18,6 @@ struct {
     __type(value, struct bio_start_ctx); 
 } bio_start SEC(".maps");
 
-// 2. Request 이슈 시점에 PID 전달
 struct trace_ctx {
     u64 issue_ts;
     u64 q2d_lat;
@@ -53,7 +51,6 @@ struct {
     __type(value, u64); 
 } active_getevents_events SEC(".maps");
 
-// ★ 핵심 복합 Key: PID + 가상주소 묶음
 struct a2u_key {
     u64 pid_tgid;
     u64 iocb_ptr;
@@ -65,7 +62,6 @@ struct {
     __type(value, u64); 
 } iocb_complete_ts SEC(".maps");
 
-// 3. C2A 시점에 PID 전달
 struct c2a_ctx {
     u64 ts;
     int type;
@@ -85,6 +81,13 @@ struct {
     __type(value, struct libaio_stats);
 } sys_stats_map SEC(".maps");
 
+// [새로 추가] 스택 사이즈 초과 우회를 위한 임시(Scratch) 맵
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, u32);
+    __type(value, struct io_stats);
+} scratch_stats SEC(".maps");
 
 SEC("tracepoint/syscalls/sys_enter_io_submit")
 int trace_submit_enter(void *ctx) {
@@ -148,7 +151,7 @@ int BPF_PROG(block_rq_issue, struct request *rq) {
 
 SEC("tp_btf/block_rq_complete")
 int BPF_PROG(block_rq_complete, struct request *rq, int error, unsigned int nr_bytes) {
-    u64 end_ts = bpf_ktime_get_ns();
+u64 end_ts = bpf_ktime_get_ns();
     u64 req_ptr = (u64)rq;
     
     struct trace_ctx *tctx = bpf_map_lookup_elem(&req_start, &req_ptr);
@@ -171,27 +174,54 @@ int BPF_PROG(block_rq_complete, struct request *rq, int error, unsigned int nr_b
         else if (op == 3) type = IO_DISCARD;
 
         if (type != -1) {
-            struct io_stats new_s = {};
+            // [수정된 부분] 맵에 데이터가 없을 때 스택 대신 임시 맵 활용
             if (!s) {
-                for(int i=0; i<IO_MAX_TYPES; i++) {
-                    new_s.stats[i].q2d.min = (unsigned long long)-1;
-                    new_s.stats[i].d2c.min = (unsigned long long)-1;
+                u32 zero_key = 0;
+                struct io_stats *init_s = bpf_map_lookup_elem(&scratch_stats, &zero_key);
+                if (init_s) {
+                    // 메모리 안전하게 초기화
+                    for(int i=0; i<IO_MAX_TYPES; i++) {
+                        init_s->stats[i].io_count = 0;
+                        init_s->stats[i].total_bytes = 0;
+                        init_s->stats[i].q2d.total = 0;
+                        init_s->stats[i].q2d.max = 0;
+                        init_s->stats[i].q2d.min = (unsigned long long)-1;
+                        init_s->stats[i].d2c.total = 0;
+                        init_s->stats[i].d2c.max = 0;
+                        init_s->stats[i].d2c.min = (unsigned long long)-1;
+                        for(int b=0; b<MAX_SIZE_BUCKETS; b++) {
+                            init_s->stats[i].size_hist[b] = 0;
+                        }
+                    }
+                    // 초기화된 구조체를 실제 사용할 device_stats에 업데이트
+                    bpf_map_update_elem(&device_stats, &dev, init_s, BPF_ANY);
+                    // 업데이트 후 다시 포인터 획득
+                    s = bpf_map_lookup_elem(&device_stats, &dev);
                 }
             }
-            struct rw_stats *target = s ? &s->stats[type] : &new_s.stats[type];
-            target->io_count++;
-            target->total_bytes += nr_bytes;
-            
-            target->d2c.total += d2c_lat;
-            if (d2c_lat > target->d2c.max) target->d2c.max = d2c_lat;
-            if (target->d2c.min == (unsigned long long)-1 || d2c_lat < target->d2c.min) target->d2c.min = d2c_lat;
 
-            if (q2d_lat > 0) {
-                target->q2d.total += q2d_lat;
-                if (q2d_lat > target->q2d.max) target->q2d.max = q2d_lat;
-                if (target->q2d.min == (unsigned long long)-1 || q2d_lat < target->q2d.min) target->q2d.min = q2d_lat;
+            // s가 정상적으로 존재하면 카운트 증가 로직 수행
+            if (s) {
+                struct rw_stats *target = &s->stats[type];
+                
+                target->io_count++;
+                target->total_bytes += nr_bytes;
+                
+                if (nr_bytes <= 4096) target->size_hist[0]++;
+                else if (nr_bytes <= 32768) target->size_hist[1]++;
+                else if (nr_bytes <= 131072) target->size_hist[2]++;
+                else target->size_hist[3]++;
+                
+                target->d2c.total += d2c_lat;
+                if (d2c_lat > target->d2c.max) target->d2c.max = d2c_lat;
+                if (target->d2c.min == (unsigned long long)-1 || d2c_lat < target->d2c.min) target->d2c.min = d2c_lat;
+
+                if (q2d_lat > 0) {
+                    target->q2d.total += q2d_lat;
+                    if (q2d_lat > target->q2d.max) target->q2d.max = q2d_lat;
+                    if (target->q2d.min == (unsigned long long)-1 || q2d_lat < target->q2d.min) target->q2d.min = q2d_lat;
+                }
             }
-            if (!s) bpf_map_update_elem(&device_stats, &dev, &new_s, BPF_ANY);
         }
     }
     
@@ -214,18 +244,16 @@ int BPF_PROG(block_rq_complete, struct request *rq, int error, unsigned int nr_b
     return 0;
 }
 
-// 요청하신 대로 kprobe/aio_complete 훅은 건드리지 않고, 내부 Key 생성 로직만 수정
 SEC("kprobe/aio_complete")
 int trace_aio_complete(struct pt_regs *ctx) {
     struct aio_kiocb *aio_iocb = (struct aio_kiocb *)PT_REGS_PARM1(ctx);
     u64 ts = bpf_ktime_get_ns();
     u64 pid_tgid = 0;
 
-    // 1. C2A 계산 및 PID 확보
     u64 key_iocb = (u64)aio_iocb; 
     struct c2a_ctx *cctx = bpf_map_lookup_elem(&iocb_c2a_start, &key_iocb);
     if (cctx && cctx->ts > 0) {
-        pid_tgid = cctx->pid_tgid; // 앞서 전달받은 PID를 가져옴
+        pid_tgid = cctx->pid_tgid; 
         if (ts > cctx->ts) {
             u64 c2a_lat = ts - cctx->ts;
             u32 stat_key = 0;
@@ -246,7 +274,6 @@ int trace_aio_complete(struct pt_regs *ctx) {
         bpf_map_delete_elem(&iocb_c2a_start, &key_iocb);
     }
 
-    // 2. A2U 시작점 마킹 (복합 Key 사용)
     u64 key_user = BPF_CORE_READ(aio_iocb, ki_res.obj);
     if (key_user && pid_tgid) {
         struct a2u_key akey = { .pid_tgid = pid_tgid, .iocb_ptr = key_user };
@@ -290,7 +317,6 @@ int trace_getevents_exit(struct trace_event_raw_sys_exit *ctx) {
         if (bpf_probe_read_user(&ev, sizeof(ev), (void *)(events_ptr + i * sizeof(ev))) == 0) {
             u64 iocb_ptr = ev.obj; 
             
-            // 복합 Key를 만들어 매칭
             struct a2u_key akey = { .pid_tgid = pid_tgid, .iocb_ptr = iocb_ptr };
             u64 *last_ts = bpf_map_lookup_elem(&iocb_complete_ts, &akey);
             
@@ -317,7 +343,6 @@ int trace_getevents_exit(struct trace_event_raw_sys_exit *ctx) {
     return 0;
 }
 
-// pgetevents 백업 (ARM64 등)
 SEC("tracepoint/syscalls/sys_enter_io_pgetevents")
 int trace_pgetevents_enter(struct trace_event_raw_sys_enter *ctx) {
     u64 pid_tgid = bpf_get_current_pid_tgid();
@@ -353,7 +378,6 @@ int trace_pgetevents_exit(struct trace_event_raw_sys_exit *ctx) {
         if (bpf_probe_read_user(&ev, sizeof(ev), (void *)(events_ptr + i * sizeof(ev))) == 0) {
             u64 iocb_ptr = ev.obj;
             
-            // 복합 Key를 만들어 매칭
             struct a2u_key akey = { .pid_tgid = pid_tgid, .iocb_ptr = iocb_ptr };
             u64 *last_ts = bpf_map_lookup_elem(&iocb_complete_ts, &akey);
             

@@ -74,6 +74,10 @@ int main(int argc, char **argv) {
                 dev_total.stats[t].d2c.total = 0;
                 dev_total.stats[t].d2c.max = 0;
                 dev_total.stats[t].d2c.min = (unsigned long long)-1;
+                
+                for (int b = 0; b < MAX_SIZE_BUCKETS; b++) {
+                    dev_total.stats[t].size_hist[b] = 0;
+                }
             }
 
             unsigned long long total_any_io = 0;
@@ -86,6 +90,10 @@ int main(int argc, char **argv) {
                     if (cpu_st->io_count > 0) {
                         tot_st->io_count += cpu_st->io_count;
                         tot_st->total_bytes += cpu_st->total_bytes;
+                        
+                        for (int b = 0; b < MAX_SIZE_BUCKETS; b++) {
+                            tot_st->size_hist[b] += cpu_st->size_hist[b];
+                        }
                         
                         tot_st->q2d.total += cpu_st->q2d.total;
                         if (cpu_st->q2d.max > tot_st->q2d.max) tot_st->q2d.max = cpu_st->q2d.max;
@@ -116,6 +124,12 @@ int main(int argc, char **argv) {
                         printf("        \"%s\": {\n", type_names[t]);
                         printf("          \"total_count\": %llu,\n", dev_total.stats[t].io_count);
                         printf("          \"total_bytes\": %llu,\n", dev_total.stats[t].total_bytes);
+                        
+                        printf("          \"size_hist\": [%llu, %llu, %llu, %llu],\n", 
+                               dev_total.stats[t].size_hist[0],
+                               dev_total.stats[t].size_hist[1],
+                               dev_total.stats[t].size_hist[2],
+                               dev_total.stats[t].size_hist[3]);
                         
                         printf("          \"q2d\": {\n");
                         printf("            \"total_lat_ns\": %llu,\n", dev_total.stats[t].q2d.total);

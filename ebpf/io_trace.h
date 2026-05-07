@@ -16,6 +16,8 @@ enum io_req_type {
     IO_MAX_TYPES
 };
 
+#define MAX_SIZE_BUCKETS 4
+
 struct lat_stats {
     unsigned long long total;
     unsigned long long max;
@@ -25,8 +27,9 @@ struct lat_stats {
 struct rw_stats {
     unsigned long long io_count;
     unsigned long long total_bytes;
-    struct lat_stats q2d; // Queue to Dispatch
-    struct lat_stats d2c; // Dispatch to Complete
+    struct lat_stats q2d; 
+    struct lat_stats d2c; 
+    unsigned long long size_hist[MAX_SIZE_BUCKETS];
 };
 
 struct io_stats {
@@ -34,11 +37,9 @@ struct io_stats {
 };
 
 struct libaio_stats {
-    // 1. U2Q: 개별 IO 단위의 Submit Latency (Tail-biting)
     unsigned long long u2q_count;
     unsigned long long u2q_lat_total;
 
-    // 4. C2A (Complete to AIO): FS End-IO 메타데이터 처리 지연
     unsigned long long c2a_read_count;
     unsigned long long c2a_read_total;
     unsigned long long c2a_write_count;
@@ -46,7 +47,6 @@ struct libaio_stats {
     unsigned long long c2a_flush_count;
     unsigned long long c2a_flush_total;
 
-    // 5. A2U (AIO to User): User Wakeup 지연
     unsigned long long a2u_read_count;
     unsigned long long a2u_read_total;
     unsigned long long a2u_write_count;

@@ -42,14 +42,20 @@ struct libaio_stats {
     unsigned long long getevents_count;
     unsigned long long wakeup_lat_total;
     unsigned long long wakeup_lat_max;
+
+    // 명령어(Opcode)별 C2U 분리 추적
+    unsigned long long c2u_read_count;
+    unsigned long long c2u_read_total;
+    unsigned long long c2u_write_count;
+    unsigned long long c2u_write_total;
+    unsigned long long c2u_flush_count;
+    unsigned long long c2u_flush_total;
 };
 
-// BPF 컴파일 환경에서는 vmlinux.h의 구조체를 사용하도록 예외 처리
 #ifndef __BPF__
-// libaio io_event 구조체 (userspace ABI)
 struct io_event {
     __u64 data;
-    __u64 obj;  // 이게 커널의 struct kiocb * 포인터와 동일함
+    __u64 obj;  
     __s64 res;
     __s64 res2;
 };

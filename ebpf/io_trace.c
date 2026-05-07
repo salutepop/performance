@@ -25,6 +25,8 @@ int main(int argc, char **argv) {
     struct io_trace_bpf *skel;
     int err, nr_cpus;
     struct io_stats *stats_array;
+    struct bpf_map *device_stats_map;
+    struct bpf_map *sys_stats_map;
 
     const char *type_names[IO_MAX_TYPES] = {"read", "read_ahead", "write", "flush", "discard"};
 
@@ -40,12 +42,15 @@ int main(int argc, char **argv) {
 
     nr_cpus = libbpf_num_possible_cpus();
     stats_array = calloc(nr_cpus, sizeof(struct io_stats));
+    
+    device_stats_map = bpf_object__find_map_by_name(skel->obj, "device_stats");
+    sys_stats_map = bpf_object__find_map_by_name(skel->obj, "sys_stats_map");
 
     printf("[PID: %d] io_trace is running (Q2I + D2C + U2Q + C2U Libaio Mode)...\n", getpid());
 
     while (!stop) {
         if (reset_flag) {
-            clear_stats_map(bpf_map__fd(skel->maps.device_stats));
+            clear_stats_map(bpf_map__fd(device_stats_map));
             reset_flag = 0;
         }
         sleep(1);
@@ -54,7 +59,7 @@ int main(int argc, char **argv) {
     printf("\n---JSON_START---\n{\n  \"devices\": [\n");
 
     unsigned int key = 0, next_key;
-    int fd = bpf_map__fd(skel->maps.device_stats);
+    int fd = bpf_map__fd(device_stats_map);
     int first_dev = 1;
 
     while (bpf_map_get_next_key(fd, &key, &next_key) == 0) {
@@ -82,12 +87,10 @@ int main(int argc, char **argv) {
                         tot_st->io_count += cpu_st->io_count;
                         tot_st->total_bytes += cpu_st->total_bytes;
                         
-                        // Q2I 합산
                         tot_st->q2i.total += cpu_st->q2i.total;
                         if (cpu_st->q2i.max > tot_st->q2i.max) tot_st->q2i.max = cpu_st->q2i.max;
                         if (cpu_st->q2i.min < tot_st->q2i.min) tot_st->q2i.min = cpu_st->q2i.min;
                         
-                        // D2C 합산
                         tot_st->d2c.total += cpu_st->d2c.total;
                         if (cpu_st->d2c.max > tot_st->d2c.max) tot_st->d2c.max = cpu_st->d2c.max;
                         if (cpu_st->d2c.min < tot_st->d2c.min) tot_st->d2c.min = cpu_st->d2c.min;
@@ -140,7 +143,10 @@ int main(int argc, char **argv) {
 
     struct libaio_stats sys_st = {0};
     unsigned int sys_key = 0;
-    bpf_map_lookup_elem(bpf_map__fd(skel->maps.sys_stats_map), &sys_key, &sys_st);
+    
+    if (sys_stats_map) {
+        bpf_map_lookup_elem(bpf_map__fd(sys_stats_map), &sys_key, &sys_st);
+    }
 
     printf("  \"libaio_overhead\": {\n");
     printf("    \"submit_count\": %llu,\n", sys_st.submit_count);
@@ -148,7 +154,15 @@ int main(int argc, char **argv) {
     printf("    \"submit_max_ns\": %llu,\n", sys_st.submit_lat_max);
     printf("    \"getevents_count\": %llu,\n", sys_st.getevents_count);
     printf("    \"wakeup_lat_ns\": %llu,\n", sys_st.wakeup_lat_total);
-    printf("    \"wakeup_max_ns\": %llu\n", sys_st.wakeup_lat_max);
+    printf("    \"wakeup_max_ns\": %llu,\n", sys_st.wakeup_lat_max);
+    
+    // 명령어별 C2U 출력
+    printf("    \"c2u_read_count\": %llu,\n", sys_st.c2u_read_count);
+    printf("    \"c2u_read_total\": %llu,\n", sys_st.c2u_read_total);
+    printf("    \"c2u_write_count\": %llu,\n", sys_st.c2u_write_count);
+    printf("    \"c2u_write_total\": %llu,\n", sys_st.c2u_write_total);
+    printf("    \"c2u_flush_count\": %llu,\n", sys_st.c2u_flush_count);
+    printf("    \"c2u_flush_total\": %llu\n", sys_st.c2u_flush_total);
     printf("  }\n");
 
     printf("}\n---JSON_END---\n");

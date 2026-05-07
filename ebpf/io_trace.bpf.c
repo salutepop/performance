@@ -8,7 +8,7 @@ char LICENSE[] SEC("license") = "GPL";
 #define BPF_REQ_RAHEAD (1ULL << 19)
 
 /* ====================================================
- * 블록 레이어 Q2I & D2C 맵
+ * 블록 레이어 맵 및 libaio 맵
  * ==================================================== */
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
@@ -35,30 +35,25 @@ struct {
     __type(value, struct io_stats);
 } device_stats SEC(".maps");
 
-/* ====================================================
- * libaio U2Q & C2U 맵 (개별 iocb 단위 추적)
- * ==================================================== */
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 10240);
-    __type(key, u64); // pid_tgid
-    __type(value, u64); // ts
+    __type(key, u64); 
+    __type(value, u64); 
 } pid_submit_start SEC(".maps");
 
-// io_getevents 진입 시 events 배열 포인터 저장
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 10240);
-    __type(key, u64); // pid_tgid
-    __type(value, u64); // events_ptr (userspace address)
+    __type(key, u64); 
+    __type(value, u64); 
 } active_getevents_events SEC(".maps");
 
-// iocb 포인터별 하드웨어 완료 시간 (핵심 수정)
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 1048576);
-    __type(key, u64); // iocb pointer
-    __type(value, u64); // completion ts
+    __type(key, u64); 
+    __type(value, u64); 
 } iocb_complete_ts SEC(".maps");
 
 struct {
@@ -68,9 +63,8 @@ struct {
     __type(value, struct libaio_stats);
 } sys_stats_map SEC(".maps");
 
-
 /* ====================================================
- * HOOK: Libaio 상단 (U2Q - 제출 오버헤드 측정)
+ * HOOK: Libaio 상단 (U2Q) & Block Layer (Q2I, D2C)
  * ==================================================== */
 SEC("tracepoint/syscalls/sys_enter_io_submit")
 int trace_submit_enter(void *ctx) {
@@ -100,9 +94,6 @@ int trace_submit_exit(void *ctx) {
     return 0;
 }
 
-/* ====================================================
- * HOOK: Block Layer (Q2I, D2C)
- * ==================================================== */
 SEC("tp_btf/block_bio_queue")
 int BPF_PROG(block_bio_queue, struct bio *bio) {
     u64 ts = bpf_ktime_get_ns();
@@ -164,7 +155,6 @@ int BPF_PROG(block_rq_complete, struct request *rq, int error, unsigned int nr_b
                     new_s.stats[i].d2c.min = (unsigned long long)-1;
                 }
             }
-
             struct rw_stats *target = s ? &s->stats[type] : &new_s.stats[type];
             target->io_count++;
             target->total_bytes += nr_bytes;
@@ -178,7 +168,6 @@ int BPF_PROG(block_rq_complete, struct request *rq, int error, unsigned int nr_b
                 if (q2i_lat > target->q2i.max) target->q2i.max = q2i_lat;
                 if (target->q2i.min == (unsigned long long)-1 || q2i_lat < target->q2i.min) target->q2i.min = q2i_lat;
             }
-
             if (!s) bpf_map_update_elem(&device_stats, &dev, &new_s, BPF_ANY);
         }
     }
@@ -189,16 +178,10 @@ int BPF_PROG(block_rq_complete, struct request *rq, int error, unsigned int nr_b
 /* ====================================================
  * HOOK: Libaio 하단 (C2U - 개별 iocb consume 레이턴시)
  * ==================================================== */
-
-// BPF_KPROBE 대신 표준 인자 추출 방식으로 우회 (구문 에러 방지)
 SEC("kprobe/aio_complete")
 int trace_aio_complete(struct pt_regs *ctx) {
-    // 커널의 aio_kiocb 구조체를 가져옵니다.
     struct aio_kiocb *iocb = (struct aio_kiocb *)PT_REGS_PARM1(ctx);
-    
-    // vmlinux.h 기반으로 구조체 내부에 있는 userspace 포인터(ev.obj 와 동일한 값)를 읽어옵니다.
     u64 key = BPF_CORE_READ(iocb, ki_res.obj);
-    
     if (key) {
         u64 ts = bpf_ktime_get_ns();
         bpf_map_update_elem(&iocb_complete_ts, &key, &ts, BPF_ANY);
@@ -208,11 +191,8 @@ int trace_aio_complete(struct pt_regs *ctx) {
 
 SEC("kprobe/aio_complete_rw")
 int trace_aio_complete_rw(struct pt_regs *ctx) {
-    // kiocb가 aio_kiocb의 첫 번째 멤버이므로 포인터 캐스팅이 가능합니다.
     struct aio_kiocb *iocb = (struct aio_kiocb *)PT_REGS_PARM1(ctx);
-    
     u64 key = BPF_CORE_READ(iocb, ki_res.obj);
-    
     if (key) {
         u64 ts = bpf_ktime_get_ns();
         bpf_map_update_elem(&iocb_complete_ts, &key, &ts, BPF_ANY);
@@ -220,7 +200,6 @@ int trace_aio_complete_rw(struct pt_regs *ctx) {
     return 0;
 }
 
-// args[3] 이 struct io_event __user *events 임
 SEC("tracepoint/syscalls/sys_enter_io_getevents")
 int trace_getevents_enter(struct trace_event_raw_sys_enter *ctx) {
     u64 pid_tgid = bpf_get_current_pid_tgid();
@@ -232,7 +211,7 @@ int trace_getevents_enter(struct trace_event_raw_sys_enter *ctx) {
 SEC("tracepoint/syscalls/sys_exit_io_getevents")
 int trace_getevents_exit(struct trace_event_raw_sys_exit *ctx) {
     long ret = ctx->ret;
-    if (ret <= 0) return 0; // 반환된 이벤트가 없으면 무시
+    if (ret <= 0) return 0; 
 
     u64 ts = bpf_ktime_get_ns();
     u64 pid_tgid = bpf_get_current_pid_tgid();
@@ -249,14 +228,12 @@ int trace_getevents_exit(struct trace_event_raw_sys_exit *ctx) {
 
     struct io_event ev;
     
-    // 최대 256개 루프 제한 (fio iodepth=128 커버)
     #pragma unroll
     for (int i = 0; i < 256; i++) {
-        if (i >= ret) break; // 반환된 개수만큼만 처리
+        if (i >= ret) break; 
         
-        // userspace에 있는 io_event 구조체를 읽어옴
         if (bpf_probe_read_user(&ev, sizeof(ev), (void *)(events_ptr + i * sizeof(ev))) == 0) {
-            u64 iocb_ptr = ev.obj; // io_event.obj 가 커널의 iocb 포인터임
+            u64 iocb_ptr = ev.obj; 
             u64 *last_ts = bpf_map_lookup_elem(&iocb_complete_ts, &iocb_ptr);
             
             if (last_ts && *last_ts > 0 && ts > *last_ts) {
@@ -264,15 +241,32 @@ int trace_getevents_exit(struct trace_event_raw_sys_exit *ctx) {
                 __sync_fetch_and_add(&st->getevents_count, 1);
                 __sync_fetch_and_add(&st->wakeup_lat_total, wakeup_lat);
                 if (wakeup_lat > st->wakeup_lat_max) st->wakeup_lat_max = wakeup_lat;
+
+                // Userspace의 iocb 구조체에서 16번째 바이트(aio_lio_opcode)를 추출하여 명령어 판별
+                u16 opcode = 0;
+                bpf_probe_read_user(&opcode, sizeof(opcode), (void *)(iocb_ptr + 16));
+
+                // 0: PREAD, 7: PREADV
+                if (opcode == 0 || opcode == 7) {
+                    __sync_fetch_and_add(&st->c2u_read_count, 1);
+                    __sync_fetch_and_add(&st->c2u_read_total, wakeup_lat);
+                // 1: PWRITE, 8: PWRITEV
+                } else if (opcode == 1 || opcode == 8) {
+                    __sync_fetch_and_add(&st->c2u_write_count, 1);
+                    __sync_fetch_and_add(&st->c2u_write_total, wakeup_lat);
+                // 2: FSYNC, 3: FDSYNC
+                } else if (opcode == 2 || opcode == 3) {
+                    __sync_fetch_and_add(&st->c2u_flush_count, 1);
+                    __sync_fetch_and_add(&st->c2u_flush_total, wakeup_lat);
+                }
             }
-            // 처리된 IO는 맵에서 삭제하여 메모리 누수 방지
             bpf_map_delete_elem(&iocb_complete_ts, &iocb_ptr);
         }
     }
     return 0;
 }
 
-// pgetevents 대비용 (ARM64 등)
+// pgetevents용 백업 루틴
 SEC("tracepoint/syscalls/sys_enter_io_pgetevents")
 int trace_pgetevents_enter(struct trace_event_raw_sys_enter *ctx) {
     u64 pid_tgid = bpf_get_current_pid_tgid();
@@ -314,6 +308,20 @@ int trace_pgetevents_exit(struct trace_event_raw_sys_exit *ctx) {
                 __sync_fetch_and_add(&st->getevents_count, 1);
                 __sync_fetch_and_add(&st->wakeup_lat_total, wakeup_lat);
                 if (wakeup_lat > st->wakeup_lat_max) st->wakeup_lat_max = wakeup_lat;
+
+                u16 opcode = 0;
+                bpf_probe_read_user(&opcode, sizeof(opcode), (void *)(iocb_ptr + 16));
+
+                if (opcode == 0 || opcode == 7) {
+                    __sync_fetch_and_add(&st->c2u_read_count, 1);
+                    __sync_fetch_and_add(&st->c2u_read_total, wakeup_lat);
+                } else if (opcode == 1 || opcode == 8) {
+                    __sync_fetch_and_add(&st->c2u_write_count, 1);
+                    __sync_fetch_and_add(&st->c2u_write_total, wakeup_lat);
+                } else if (opcode == 2 || opcode == 3) {
+                    __sync_fetch_and_add(&st->c2u_flush_count, 1);
+                    __sync_fetch_and_add(&st->c2u_flush_total, wakeup_lat);
+                }
             }
             bpf_map_delete_elem(&iocb_complete_ts, &iocb_ptr);
         }

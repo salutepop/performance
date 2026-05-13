@@ -249,9 +249,7 @@ def run_benchmark(mode="generic", cmd=None, script_file=None):
 
         table_width = 100
         print("-" * table_width)
-        print(
-            f" {'[ FULL STACK LATENCY BREAKDOWN (Target Dev + Libaio) ]':^{table_width - 2}}"
-        )
+        print(f" {'[ FULL STACK LATENCY BREAKDOWN ]':^{table_width - 2}}")
         print("-" * table_width)
         print(
             f" {'Phase':<18} | {'Metric':<10} | {'Total':>12} | {'READ':>12} | {'WRITE':>12} | {'READ-AHEAD':>10} | {'FLUSH':>8}"

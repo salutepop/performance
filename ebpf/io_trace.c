@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <signal.h>
 #include <unistd.h>
+#include <dirent.h>
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
 #include "io_trace.h"
@@ -32,11 +33,9 @@ int main(int argc, char **argv) {
 
     const char *type_names[IO_MAX_TYPES] = {"read", "read_ahead", "write", "flush", "discard"};
 
-    // 모드 플래그 (기본: 범용 모드)
     bool mode_libaio = false;
-    bool mode_iouring = false; // 향후 확장을 위한 플래그
+    bool mode_iouring = false;
 
-    // 인자 파싱 (-m <mode> 또는 --mode=<mode>)
     for (int i = 1; i < argc; i++) {
         const char *mode_str = NULL;
 
@@ -62,7 +61,6 @@ int main(int argc, char **argv) {
             } else if (strcmp(mode_str, "iouring") == 0) {
                 mode_iouring = true;
             } else if (strcmp(mode_str, "generic") == 0) {
-                // Default mode, no flags to set
             } else {
                 fprintf(stderr, "Unknown mode: %s\n", mode_str);
                 return 1;
@@ -74,18 +72,14 @@ int main(int argc, char **argv) {
     signal(SIGTERM, sig_handler);
     signal(SIGUSR1, reset_handler);
 
-    // 1. Open (커널 로드 전)
     skel = io_trace_bpf__open();
     if (!skel) {
         fprintf(stderr, "Failed to open BPF skeleton\n");
         return 1;
     }
 
-    // 2. Global Variable (rodata) 설정
     skel->rodata->opt_trace_libaio = mode_libaio;
-    // skel->rodata->opt_trace_iouring = mode_iouring; // 나중에 bpf.c에 추가 시 주석 해제
 
-    // 3. Auto-attach 제어
     if (!mode_libaio) {
         bpf_program__set_autoattach(skel->progs.trace_submit_enter, false);
         bpf_program__set_autoattach(skel->progs.trace_submit_exit, false);
@@ -96,14 +90,36 @@ int main(int argc, char **argv) {
         bpf_program__set_autoattach(skel->progs.trace_pgetevents_exit, false);
     }
     
-    // if (!mode_iouring) {
-    //     // io_uring 관련 bpf_program__set_autoattach(..., false) 추가 예정
-    // }
-
-    // 4. Load
     err = io_trace_bpf__load(skel);
+    if (err) {
+        fprintf(stderr, "Failed to load BPF skeleton\n");
+        goto cleanup;
+    }
 
-    // 5. Attach
+    // 디바이스 전체 용량 기록
+    DIR *d = opendir("/sys/dev/block");
+    if (d) {
+        struct dirent *dir;
+        int cap_fd = bpf_map__fd(skel->maps.dev_capacity_map);
+        while ((dir = readdir(d)) != NULL) {
+            unsigned int maj, min;
+            if (sscanf(dir->d_name, "%u:%u", &maj, &min) == 2) {
+                char path[512];
+                snprintf(path, sizeof(path), "/sys/dev/block/%s/size", dir->d_name);
+                FILE *f = fopen(path, "r");
+                if (f) {
+                    unsigned long long size_sectors;
+                    if (fscanf(f, "%llu", &size_sectors) == 1) {
+                        unsigned int dev_key = (maj << 20) | min;
+                        bpf_map_update_elem(cap_fd, &dev_key, &size_sectors, BPF_ANY);
+                    }
+                    fclose(f);
+                }
+            }
+        }
+        closedir(d);
+    }
+
     err = io_trace_bpf__attach(skel);
     if (err) {
         fprintf(stderr, "Failed to attach BPF skeleton\n");
@@ -127,7 +143,6 @@ int main(int argc, char **argv) {
         sleep(1);
     }
 
-    // JSON 출력 로직 (동일)
     printf("\n---JSON_START---\n{\n  \"devices\": [\n");
 
     unsigned int key = 0, next_key;
@@ -150,6 +165,9 @@ int main(int argc, char **argv) {
                 for (int b = 0; b < MAX_SIZE_BUCKETS; b++) {
                     dev_total.stats[t].size_hist[b] = 0;
                 }
+                for (int b = 0; b < LBA_BUCKETS; b++) {
+                    dev_total.stats[t].lba_hist[b] = 0;
+                }
             }
 
             unsigned long long total_any_io = 0;
@@ -165,6 +183,9 @@ int main(int argc, char **argv) {
                         
                         for (int b = 0; b < MAX_SIZE_BUCKETS; b++) {
                             tot_st->size_hist[b] += cpu_st->size_hist[b];
+                        }
+                        for (int b = 0; b < LBA_BUCKETS; b++) {
+                            tot_st->lba_hist[b] += cpu_st->lba_hist[b];
                         }
                         
                         tot_st->q2d.total += cpu_st->q2d.total;
@@ -198,10 +219,14 @@ int main(int argc, char **argv) {
                         printf("          \"total_bytes\": %llu,\n", dev_total.stats[t].total_bytes);
                         
                         printf("          \"size_hist\": [%llu, %llu, %llu, %llu],\n", 
-                               dev_total.stats[t].size_hist[0],
-                               dev_total.stats[t].size_hist[1],
-                               dev_total.stats[t].size_hist[2],
-                               dev_total.stats[t].size_hist[3]);
+                               dev_total.stats[t].size_hist[0], dev_total.stats[t].size_hist[1],
+                               dev_total.stats[t].size_hist[2], dev_total.stats[t].size_hist[3]);
+                        
+                        printf("          \"lba_hist\": [");
+                        for (int b = 0; b < LBA_BUCKETS; b++) {
+                            printf("%u%s", dev_total.stats[t].lba_hist[b], (b == LBA_BUCKETS - 1) ? "" : ",");
+                        }
+                        printf("],\n");
                         
                         printf("          \"q2d\": {\n");
                         printf("            \"total_lat_ns\": %llu,\n", dev_total.stats[t].q2d.total);

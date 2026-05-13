@@ -7,9 +7,7 @@
 char LICENSE[] SEC("license") = "GPL";
 #define BPF_REQ_RAHEAD (1ULL << 19)
 
-// [추가] 유저스페이스에서 제어할 모드 스위치 (기본값 false)
 const volatile bool opt_trace_libaio = false;
-// const volatile bool opt_trace_other = false; // 향후 다른 모드 추가 시 사용
 
 struct bio_start_ctx {
     u64 ts;
@@ -92,7 +90,13 @@ struct {
     __type(value, struct io_stats);
 } scratch_stats SEC(".maps");
 
-// ========== Libaio 전용 트레이스포인트 ==========
+// 디바이스 전체 용량(섹터 수)을 유저스페이스로부터 전달받는 맵
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 256);
+    __type(key, u32); 
+    __type(value, u64); 
+} dev_capacity_map SEC(".maps");
 
 SEC("tracepoint/syscalls/sys_enter_io_submit")
 int trace_submit_enter(void *ctx) {
@@ -269,15 +273,11 @@ int trace_pgetevents_exit(struct trace_event_raw_sys_exit *ctx) {
     return 0;
 }
 
-
-// ========== 범용 블록 트레이스포인트 (모든 모드에서 실행) ==========
-
 SEC("tp_btf/block_bio_queue")
 int BPF_PROG(block_bio_queue, struct bio *bio) {
     u64 ts = bpf_ktime_get_ns();
     u64 pid_tgid = bpf_get_current_pid_tgid();
     
-    // [수정] libaio 모드가 켜져 있을 때만 u2q 측정 수행
     if (opt_trace_libaio) {
         u64 *submit_ts = bpf_map_lookup_elem(&pid_submit_start, &pid_tgid);
         if (submit_ts) {
@@ -349,6 +349,7 @@ int BPF_PROG(block_rq_complete, struct request *rq, int error, unsigned int nr_b
                 u32 zero_key = 0;
                 struct io_stats *init_s = bpf_map_lookup_elem(&scratch_stats, &zero_key);
                 if (init_s) {
+                    // [수정] __builtin_memset 제거 및 수동 초기화
                     for(int i=0; i<IO_MAX_TYPES; i++) {
                         init_s->stats[i].io_count = 0;
                         init_s->stats[i].total_bytes = 0;
@@ -360,6 +361,9 @@ int BPF_PROG(block_rq_complete, struct request *rq, int error, unsigned int nr_b
                         init_s->stats[i].d2c.min = (unsigned long long)-1;
                         for(int b=0; b<MAX_SIZE_BUCKETS; b++) {
                             init_s->stats[i].size_hist[b] = 0;
+                        }
+                        for(int b=0; b<LBA_BUCKETS; b++) {
+                            init_s->stats[i].lba_hist[b] = 0;
                         }
                     }
                     bpf_map_update_elem(&device_stats, &dev, init_s, BPF_ANY);
@@ -378,6 +382,7 @@ int BPF_PROG(block_rq_complete, struct request *rq, int error, unsigned int nr_b
                 else if (nr_bytes <= 131072) target->size_hist[2]++;
                 else target->size_hist[3]++;
                 
+                // 레이턴시 추적 로직 (온전히 유지)
                 target->d2c.total += d2c_lat;
                 if (d2c_lat > target->d2c.max) target->d2c.max = d2c_lat;
                 if (target->d2c.min == (unsigned long long)-1 || d2c_lat < target->d2c.min) target->d2c.min = d2c_lat;
@@ -387,11 +392,19 @@ int BPF_PROG(block_rq_complete, struct request *rq, int error, unsigned int nr_b
                     if (q2d_lat > target->q2d.max) target->q2d.max = q2d_lat;
                     if (target->q2d.min == (unsigned long long)-1 || q2d_lat < target->q2d.min) target->q2d.min = q2d_lat;
                 }
+
+                // LBA 접근 버킷 매핑
+                u64 sector = BPF_CORE_READ(rq, __sector);
+                u64 *cap_ptr = bpf_map_lookup_elem(&dev_capacity_map, &dev);
+                if (cap_ptr && *cap_ptr > 0) {
+                    u64 bucket = (sector * LBA_BUCKETS) / (*cap_ptr);
+                    if (bucket >= LBA_BUCKETS) bucket = LBA_BUCKETS - 1;
+                    target->lba_hist[bucket]++;
+                }
             }
         }
     }
     
-    // [수정] libaio 모드가 활성화되어 있을 때만 관련 구조체 파싱 및 맵 업데이트
     if (opt_trace_libaio && type != -1) {
         struct bio *bio = BPF_CORE_READ(rq, bio);
         if (bio) {

@@ -17,6 +17,7 @@ enum io_req_type {
 };
 
 #define MAX_SIZE_BUCKETS 4
+#define LBA_BUCKETS 64
 
 struct lat_stats {
     unsigned long long total;
@@ -30,6 +31,7 @@ struct rw_stats {
     struct lat_stats q2d; 
     struct lat_stats d2c; 
     unsigned long long size_hist[MAX_SIZE_BUCKETS];
+    unsigned int lba_hist[LBA_BUCKETS]; // LBA 접근 빈도 버킷
 };
 
 struct io_stats {

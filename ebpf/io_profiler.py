@@ -56,13 +56,30 @@ def print_op_stats(op_name, bpf_stats, c2a_data, a2u_data, duration):
             bar = "█" * int(ratio / 5)
             print(f"      {labels[i]:>10} : [{bar:<20}] {ratio:>5.1f}% ({count:,})")
 
+    # LBA Heatmap (커널에서 받아온 64 버킷을 바로 시각화)
+    lba_hist = bpf_stats.get("lba_hist", [])
+    if cnt > 0 and len(lba_hist) == 64 and sum(lba_hist) > 0:
+        max_val = max(lba_hist)
+
+        spark_chars = [" ", " ", "▂", "▃", "▄", "▅", "▆", "▇", "█"]
+        sparkline = ""
+        for val in lba_hist:
+            if val == 0:
+                sparkline += spark_chars[0]
+            else:
+                idx = int((val / max_val) * 8)
+                if idx == 0:
+                    idx = 1
+                sparkline += spark_chars[idx]
+
+        print(f"  - LBA Heatmap  : [{sparkline}] (Scale: 0 ~ Max)")
+
     print()
 
     return cnt, q2d_ms, d2c_ms, c2a_cnt, c2a_ms
 
 
 def run_benchmark(mode="generic", cmd=None, script_file=None):
-    # 1. 모니터링 시작 (eBPF Tracer 구동)
     trace_cmd = ["sudo", "./io_trace"]
     if mode != "generic":
         trace_cmd.extend(["-m", mode])
@@ -71,45 +88,35 @@ def run_benchmark(mode="generic", cmd=None, script_file=None):
         print("[*] eBPF Tracer starting in: Generic Block Mode (Default)")
 
     trace_proc = subprocess.Popen(trace_cmd, stdout=subprocess.PIPE, text=True)
-    time.sleep(1.5)  # eBPF 맵 로드 대기
+    time.sleep(1.5)
 
-    # 캐시 비우기
     subprocess.run(
         "echo 3 | sudo tee /proc/sys/vm/drop_caches",
         shell=True,
         stdout=subprocess.DEVNULL,
     )
-    os.kill(trace_proc.pid, signal.SIGUSR1)  # 맵 초기화 시그널 전송
+    os.kill(trace_proc.pid, signal.SIGUSR1)
     time.sleep(0.1)
 
     t0 = time.time()
 
-    # 2. 평가 시작
     try:
         if cmd:
             print(f"[*] Executing custom command: {cmd}\n")
-            # 쉘 환경에서 직접 문자열 명령어 실행
             subprocess.run(cmd, shell=True)
-
         elif script_file:
             print(f"[*] Executing script file: {script_file}\n")
-            # 스크립트 파일 실행 (bash 환경)
             subprocess.run(f"bash {script_file}", shell=True)
-
         else:
             print("[*] No workload command provided.")
             print("[*] Monitoring in background... (Press Ctrl+C to stop)\n")
-            # 명령어가 없으면 백그라운드 무한 대기
             while True:
                 time.sleep(1)
-
     except KeyboardInterrupt:
-        # 3. 강제 중단 시 안전하게 캐치
         print("\n[*] Workload or monitoring forcefully stopped by user.")
     except Exception as e:
         print(f"\n[-] Error running workload: {e}")
 
-    # 4. 모니터링 종료 및 데이터 파싱
     t1 = time.time()
     effective_duration = t1 - t0
 
@@ -118,7 +125,7 @@ def run_benchmark(mode="generic", cmd=None, script_file=None):
     bpf_output, _ = trace_proc.communicate()
 
     if effective_duration <= 0:
-        effective_duration = 1.0  # Divide by zero 방지
+        effective_duration = 1.0
 
     try:
         raw_json = (
@@ -160,7 +167,6 @@ def run_benchmark(mode="generic", cmd=None, script_file=None):
         phase_stats = {"U2Q": {}, "Q2D": {}, "D2C": {}, "C2A": {}, "A2U": {}}
         tot_q2d_cnt = tot_q2d_ms = tot_d2c_ms = 0
 
-        # 전체 IO 수 파악
         total_sys_ios = 0
         for dev in bpf_data["devices"]:
             total_sys_ios += sum(op["total_count"] for op in dev["operations"].values())
@@ -169,7 +175,6 @@ def run_benchmark(mode="generic", cmd=None, script_file=None):
             ops = dev["operations"]
             bpf_total_cnt = sum(op["total_count"] for op in ops.values())
 
-            # 노이즈 필터링 (5% 이상)
             if bpf_total_cnt > 0 and bpf_total_cnt > (total_sys_ios * 0.05):
                 real_name = get_real_dev_name(dev["dev_name"])
                 print(f" Target Device: {dev['dev_name']} [{real_name}]\n")
@@ -307,7 +312,6 @@ if __name__ == "__main__":
         description="Universal eBPF I/O Monitor & Profiler"
     )
 
-    # 1. 모드 선택 (기존과 동일)
     parser.add_argument(
         "-m",
         "--mode",
@@ -317,7 +321,6 @@ if __name__ == "__main__":
         help="Select tracing mode: generic (default), libaio, iouring",
     )
 
-    # 2. 명령어 또는 파일 입력 (둘 중 하나만 사용 가능하도록 제한)
     group = parser.add_mutually_exclusive_group()
     group.add_argument(
         "-c",
@@ -333,5 +336,4 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
-
     run_benchmark(mode=args.mode, cmd=args.cmd, script_file=args.file)

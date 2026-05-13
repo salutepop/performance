@@ -1,5 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <stdbool.h>
 #include <signal.h>
 #include <unistd.h>
 #include <bpf/libbpf.h>
@@ -30,15 +32,83 @@ int main(int argc, char **argv) {
 
     const char *type_names[IO_MAX_TYPES] = {"read", "read_ahead", "write", "flush", "discard"};
 
+    // 모드 플래그 (기본: 범용 모드)
+    bool mode_libaio = false;
+    bool mode_iouring = false; // 향후 확장을 위한 플래그
+
+    // 인자 파싱 (-m <mode> 또는 --mode=<mode>)
+    for (int i = 1; i < argc; i++) {
+        const char *mode_str = NULL;
+
+        if (strncmp(argv[i], "--mode=", 7) == 0) {
+            mode_str = argv[i] + 7;
+        } else if (strcmp(argv[i], "-m") == 0 && i + 1 < argc) {
+            mode_str = argv[++i];
+        } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+            printf("Usage: %s [-m|--mode <mode>]\n", argv[0]);
+            printf("  Modes:\n");
+            printf("    generic  : Generic Block Trace Mode (U2Q, Q2D, D2C) - Default\n");
+            printf("    libaio   : Enable libaio Trace Mode (+ C2A, A2U)\n");
+            printf("    iouring  : Enable io_uring Trace Mode (Placeholder)\n");
+            return 0;
+        } else {
+            fprintf(stderr, "Unknown option: %s\n", argv[i]);
+            return 1;
+        }
+
+        if (mode_str) {
+            if (strcmp(mode_str, "libaio") == 0) {
+                mode_libaio = true;
+            } else if (strcmp(mode_str, "iouring") == 0) {
+                mode_iouring = true;
+            } else if (strcmp(mode_str, "generic") == 0) {
+                // Default mode, no flags to set
+            } else {
+                fprintf(stderr, "Unknown mode: %s\n", mode_str);
+                return 1;
+            }
+        }
+    }
+
     signal(SIGINT, sig_handler);
     signal(SIGTERM, sig_handler);
     signal(SIGUSR1, reset_handler);
 
-    skel = io_trace_bpf__open_and_load();
-    if (!skel) return 1;
+    // 1. Open (커널 로드 전)
+    skel = io_trace_bpf__open();
+    if (!skel) {
+        fprintf(stderr, "Failed to open BPF skeleton\n");
+        return 1;
+    }
 
+    // 2. Global Variable (rodata) 설정
+    skel->rodata->opt_trace_libaio = mode_libaio;
+    // skel->rodata->opt_trace_iouring = mode_iouring; // 나중에 bpf.c에 추가 시 주석 해제
+
+    // 3. Auto-attach 제어
+    if (!mode_libaio) {
+        bpf_program__set_autoattach(skel->progs.trace_submit_enter, false);
+        bpf_program__set_autoattach(skel->progs.trace_submit_exit, false);
+        bpf_program__set_autoattach(skel->progs.trace_aio_complete, false);
+        bpf_program__set_autoattach(skel->progs.trace_getevents_enter, false);
+        bpf_program__set_autoattach(skel->progs.trace_getevents_exit, false);
+        bpf_program__set_autoattach(skel->progs.trace_pgetevents_enter, false);
+        bpf_program__set_autoattach(skel->progs.trace_pgetevents_exit, false);
+    }
+    
+    // if (!mode_iouring) {
+    //     // io_uring 관련 bpf_program__set_autoattach(..., false) 추가 예정
+    // }
+
+    // 4. Load
+    err = io_trace_bpf__load(skel);
+
+    // 5. Attach
     err = io_trace_bpf__attach(skel);
-    if (err) goto cleanup;
+    if (err) {
+        fprintf(stderr, "Failed to attach BPF skeleton\n");
+        goto cleanup;
+    }
 
     nr_cpus = libbpf_num_possible_cpus();
     stats_array = calloc(nr_cpus, sizeof(struct io_stats));
@@ -46,7 +116,8 @@ int main(int argc, char **argv) {
     device_stats_map = bpf_object__find_map_by_name(skel->obj, "device_stats");
     sys_stats_map = bpf_object__find_map_by_name(skel->obj, "sys_stats_map");
 
-    printf("[PID: %d] io_trace is running (U2Q + Q2D + D2C + C2A + A2U Mode)...\n", getpid());
+    printf("[PID: %d] io_trace is running (Modes: Generic%s)...\n", 
+           getpid(), mode_libaio ? " + Libaio" : "");
 
     while (!stop) {
         if (reset_flag) {
@@ -56,6 +127,7 @@ int main(int argc, char **argv) {
         sleep(1);
     }
 
+    // JSON 출력 로직 (동일)
     printf("\n---JSON_START---\n{\n  \"devices\": [\n");
 
     unsigned int key = 0, next_key;

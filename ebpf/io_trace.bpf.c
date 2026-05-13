@@ -7,6 +7,10 @@
 char LICENSE[] SEC("license") = "GPL";
 #define BPF_REQ_RAHEAD (1ULL << 19)
 
+// [추가] 유저스페이스에서 제어할 모드 스위치 (기본값 false)
+const volatile bool opt_trace_libaio = false;
+// const volatile bool opt_trace_other = false; // 향후 다른 모드 추가 시 사용
+
 struct bio_start_ctx {
     u64 ts;
     u64 pid_tgid;
@@ -81,13 +85,14 @@ struct {
     __type(value, struct libaio_stats);
 } sys_stats_map SEC(".maps");
 
-// [새로 추가] 스택 사이즈 초과 우회를 위한 임시(Scratch) 맵
 struct {
     __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
     __uint(max_entries, 1);
     __type(key, u32);
     __type(value, struct io_stats);
 } scratch_stats SEC(".maps");
+
+// ========== Libaio 전용 트레이스포인트 ==========
 
 SEC("tracepoint/syscalls/sys_enter_io_submit")
 int trace_submit_enter(void *ctx) {
@@ -101,146 +106,6 @@ SEC("tracepoint/syscalls/sys_exit_io_submit")
 int trace_submit_exit(void *ctx) {
     u64 pid_tgid = bpf_get_current_pid_tgid();
     bpf_map_delete_elem(&pid_submit_start, &pid_tgid);
-    return 0;
-}
-
-SEC("tp_btf/block_bio_queue")
-int BPF_PROG(block_bio_queue, struct bio *bio) {
-    u64 ts = bpf_ktime_get_ns();
-    u64 pid_tgid = bpf_get_current_pid_tgid();
-    
-    u64 *submit_ts = bpf_map_lookup_elem(&pid_submit_start, &pid_tgid);
-    if (submit_ts) {
-        u64 u2q_lat = ts - *submit_ts;
-        u32 key = 0;
-        struct libaio_stats *st = bpf_map_lookup_elem(&sys_stats_map, &key);
-        if (st) {
-            __sync_fetch_and_add(&st->u2q_count, 1);
-            __sync_fetch_and_add(&st->u2q_lat_total, u2q_lat);
-        }
-    }
-
-    u64 bio_ptr = (u64)bio;
-    struct bio_start_ctx bctx = { .ts = ts, .pid_tgid = pid_tgid };
-    bpf_map_update_elem(&bio_start, &bio_ptr, &bctx, BPF_ANY);
-    return 0;
-}
-
-SEC("tp_btf/block_rq_issue")
-int BPF_PROG(block_rq_issue, struct request *rq) {
-    u64 ts = bpf_ktime_get_ns();
-    u64 req_ptr = (u64)rq;
-    struct bio *bio = BPF_CORE_READ(rq, bio);
-    u64 bio_ptr = (u64)bio;
-    
-    u64 q2d_lat = 0;
-    u64 pid_tgid = 0;
-    if (bio_ptr != 0) {
-        struct bio_start_ctx *bctx = bpf_map_lookup_elem(&bio_start, &bio_ptr);
-        if (bctx) {
-            q2d_lat = ts - bctx->ts;
-            pid_tgid = bctx->pid_tgid;
-            bpf_map_delete_elem(&bio_start, &bio_ptr);
-        }
-    }
-
-    struct trace_ctx tctx = { .issue_ts = ts, .q2d_lat = q2d_lat, .pid_tgid = pid_tgid };
-    bpf_map_update_elem(&req_start, &req_ptr, &tctx, BPF_ANY);
-    return 0;
-}
-
-SEC("tp_btf/block_rq_complete")
-int BPF_PROG(block_rq_complete, struct request *rq, int error, unsigned int nr_bytes) {
-u64 end_ts = bpf_ktime_get_ns();
-    u64 req_ptr = (u64)rq;
-    
-    struct trace_ctx *tctx = bpf_map_lookup_elem(&req_start, &req_ptr);
-    if (!tctx) return 0;
-
-    int type = -1;
-    struct gendisk *disk = BPF_CORE_READ(rq, q, disk);
-    if (disk) {
-        u32 dev = (BPF_CORE_READ(disk, major) << 20) | BPF_CORE_READ(disk, first_minor);
-        struct io_stats *s = bpf_map_lookup_elem(&device_stats, &dev);
-        u64 d2c_lat = end_ts - tctx->issue_ts;
-        u64 q2d_lat = tctx->q2d_lat;
-
-        u64 cmd_flags = BPF_CORE_READ(rq, cmd_flags);
-        u32 op = cmd_flags & 255; 
-
-        if (op == 0) type = (cmd_flags & BPF_REQ_RAHEAD) ? IO_READ_AHEAD : IO_READ;
-        else if (op == 1) type = IO_WRITE;
-        else if (op == 2) type = IO_FLUSH;
-        else if (op == 3) type = IO_DISCARD;
-
-        if (type != -1) {
-            // [수정된 부분] 맵에 데이터가 없을 때 스택 대신 임시 맵 활용
-            if (!s) {
-                u32 zero_key = 0;
-                struct io_stats *init_s = bpf_map_lookup_elem(&scratch_stats, &zero_key);
-                if (init_s) {
-                    // 메모리 안전하게 초기화
-                    for(int i=0; i<IO_MAX_TYPES; i++) {
-                        init_s->stats[i].io_count = 0;
-                        init_s->stats[i].total_bytes = 0;
-                        init_s->stats[i].q2d.total = 0;
-                        init_s->stats[i].q2d.max = 0;
-                        init_s->stats[i].q2d.min = (unsigned long long)-1;
-                        init_s->stats[i].d2c.total = 0;
-                        init_s->stats[i].d2c.max = 0;
-                        init_s->stats[i].d2c.min = (unsigned long long)-1;
-                        for(int b=0; b<MAX_SIZE_BUCKETS; b++) {
-                            init_s->stats[i].size_hist[b] = 0;
-                        }
-                    }
-                    // 초기화된 구조체를 실제 사용할 device_stats에 업데이트
-                    bpf_map_update_elem(&device_stats, &dev, init_s, BPF_ANY);
-                    // 업데이트 후 다시 포인터 획득
-                    s = bpf_map_lookup_elem(&device_stats, &dev);
-                }
-            }
-
-            // s가 정상적으로 존재하면 카운트 증가 로직 수행
-            if (s) {
-                struct rw_stats *target = &s->stats[type];
-                
-                target->io_count++;
-                target->total_bytes += nr_bytes;
-                
-                if (nr_bytes <= 4096) target->size_hist[0]++;
-                else if (nr_bytes <= 32768) target->size_hist[1]++;
-                else if (nr_bytes <= 131072) target->size_hist[2]++;
-                else target->size_hist[3]++;
-                
-                target->d2c.total += d2c_lat;
-                if (d2c_lat > target->d2c.max) target->d2c.max = d2c_lat;
-                if (target->d2c.min == (unsigned long long)-1 || d2c_lat < target->d2c.min) target->d2c.min = d2c_lat;
-
-                if (q2d_lat > 0) {
-                    target->q2d.total += q2d_lat;
-                    if (q2d_lat > target->q2d.max) target->q2d.max = q2d_lat;
-                    if (target->q2d.min == (unsigned long long)-1 || q2d_lat < target->q2d.min) target->q2d.min = q2d_lat;
-                }
-            }
-        }
-    }
-    
-    if (type != -1) {
-        struct bio *bio = BPF_CORE_READ(rq, bio);
-        if (bio) {
-            void *bi_private = BPF_CORE_READ(bio, bi_private);
-            if (bi_private) {
-                struct kiocb *iocb_ptr = BPF_CORE_READ((struct iomap_dio *)bi_private, iocb);
-                if (iocb_ptr) {
-                    u64 key = (u64)iocb_ptr;
-                    struct c2a_ctx cctx = { .ts = end_ts, .type = type, .pid_tgid = tctx->pid_tgid };
-                    bpf_map_update_elem(&iocb_c2a_start, &key, &cctx, BPF_ANY);
-                }
-            }
-        }
-    }
-    
-    bpf_map_delete_elem(&req_start, &req_ptr);
     return 0;
 }
 
@@ -401,5 +266,147 @@ int trace_pgetevents_exit(struct trace_event_raw_sys_exit *ctx) {
             bpf_map_delete_elem(&iocb_complete_ts, &akey);
         }
     }
+    return 0;
+}
+
+
+// ========== 범용 블록 트레이스포인트 (모든 모드에서 실행) ==========
+
+SEC("tp_btf/block_bio_queue")
+int BPF_PROG(block_bio_queue, struct bio *bio) {
+    u64 ts = bpf_ktime_get_ns();
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    
+    // [수정] libaio 모드가 켜져 있을 때만 u2q 측정 수행
+    if (opt_trace_libaio) {
+        u64 *submit_ts = bpf_map_lookup_elem(&pid_submit_start, &pid_tgid);
+        if (submit_ts) {
+            u64 u2q_lat = ts - *submit_ts;
+            u32 key = 0;
+            struct libaio_stats *st = bpf_map_lookup_elem(&sys_stats_map, &key);
+            if (st) {
+                __sync_fetch_and_add(&st->u2q_count, 1);
+                __sync_fetch_and_add(&st->u2q_lat_total, u2q_lat);
+            }
+        }
+    }
+
+    u64 bio_ptr = (u64)bio;
+    struct bio_start_ctx bctx = { .ts = ts, .pid_tgid = pid_tgid };
+    bpf_map_update_elem(&bio_start, &bio_ptr, &bctx, BPF_ANY);
+    return 0;
+}
+
+SEC("tp_btf/block_rq_issue")
+int BPF_PROG(block_rq_issue, struct request *rq) {
+    u64 ts = bpf_ktime_get_ns();
+    u64 req_ptr = (u64)rq;
+    struct bio *bio = BPF_CORE_READ(rq, bio);
+    u64 bio_ptr = (u64)bio;
+    
+    u64 q2d_lat = 0;
+    u64 pid_tgid = 0;
+    if (bio_ptr != 0) {
+        struct bio_start_ctx *bctx = bpf_map_lookup_elem(&bio_start, &bio_ptr);
+        if (bctx) {
+            q2d_lat = ts - bctx->ts;
+            pid_tgid = bctx->pid_tgid;
+            bpf_map_delete_elem(&bio_start, &bio_ptr);
+        }
+    }
+
+    struct trace_ctx tctx = { .issue_ts = ts, .q2d_lat = q2d_lat, .pid_tgid = pid_tgid };
+    bpf_map_update_elem(&req_start, &req_ptr, &tctx, BPF_ANY);
+    return 0;
+}
+
+SEC("tp_btf/block_rq_complete")
+int BPF_PROG(block_rq_complete, struct request *rq, int error, unsigned int nr_bytes) {
+    u64 end_ts = bpf_ktime_get_ns();
+    u64 req_ptr = (u64)rq;
+    
+    struct trace_ctx *tctx = bpf_map_lookup_elem(&req_start, &req_ptr);
+    if (!tctx) return 0;
+
+    int type = -1;
+    struct gendisk *disk = BPF_CORE_READ(rq, q, disk);
+    if (disk) {
+        u32 dev = (BPF_CORE_READ(disk, major) << 20) | BPF_CORE_READ(disk, first_minor);
+        struct io_stats *s = bpf_map_lookup_elem(&device_stats, &dev);
+        u64 d2c_lat = end_ts - tctx->issue_ts;
+        u64 q2d_lat = tctx->q2d_lat;
+
+        u64 cmd_flags = BPF_CORE_READ(rq, cmd_flags);
+        u32 op = cmd_flags & 255; 
+
+        if (op == 0) type = (cmd_flags & BPF_REQ_RAHEAD) ? IO_READ_AHEAD : IO_READ;
+        else if (op == 1) type = IO_WRITE;
+        else if (op == 2) type = IO_FLUSH;
+        else if (op == 3) type = IO_DISCARD;
+
+        if (type != -1) {
+            if (!s) {
+                u32 zero_key = 0;
+                struct io_stats *init_s = bpf_map_lookup_elem(&scratch_stats, &zero_key);
+                if (init_s) {
+                    for(int i=0; i<IO_MAX_TYPES; i++) {
+                        init_s->stats[i].io_count = 0;
+                        init_s->stats[i].total_bytes = 0;
+                        init_s->stats[i].q2d.total = 0;
+                        init_s->stats[i].q2d.max = 0;
+                        init_s->stats[i].q2d.min = (unsigned long long)-1;
+                        init_s->stats[i].d2c.total = 0;
+                        init_s->stats[i].d2c.max = 0;
+                        init_s->stats[i].d2c.min = (unsigned long long)-1;
+                        for(int b=0; b<MAX_SIZE_BUCKETS; b++) {
+                            init_s->stats[i].size_hist[b] = 0;
+                        }
+                    }
+                    bpf_map_update_elem(&device_stats, &dev, init_s, BPF_ANY);
+                    s = bpf_map_lookup_elem(&device_stats, &dev);
+                }
+            }
+
+            if (s) {
+                struct rw_stats *target = &s->stats[type];
+                
+                target->io_count++;
+                target->total_bytes += nr_bytes;
+                
+                if (nr_bytes <= 4096) target->size_hist[0]++;
+                else if (nr_bytes <= 32768) target->size_hist[1]++;
+                else if (nr_bytes <= 131072) target->size_hist[2]++;
+                else target->size_hist[3]++;
+                
+                target->d2c.total += d2c_lat;
+                if (d2c_lat > target->d2c.max) target->d2c.max = d2c_lat;
+                if (target->d2c.min == (unsigned long long)-1 || d2c_lat < target->d2c.min) target->d2c.min = d2c_lat;
+
+                if (q2d_lat > 0) {
+                    target->q2d.total += q2d_lat;
+                    if (q2d_lat > target->q2d.max) target->q2d.max = q2d_lat;
+                    if (target->q2d.min == (unsigned long long)-1 || q2d_lat < target->q2d.min) target->q2d.min = q2d_lat;
+                }
+            }
+        }
+    }
+    
+    // [수정] libaio 모드가 활성화되어 있을 때만 관련 구조체 파싱 및 맵 업데이트
+    if (opt_trace_libaio && type != -1) {
+        struct bio *bio = BPF_CORE_READ(rq, bio);
+        if (bio) {
+            void *bi_private = BPF_CORE_READ(bio, bi_private);
+            if (bi_private) {
+                struct kiocb *iocb_ptr = BPF_CORE_READ((struct iomap_dio *)bi_private, iocb);
+                if (iocb_ptr) {
+                    u64 key = (u64)iocb_ptr;
+                    struct c2a_ctx cctx = { .ts = end_ts, .type = type, .pid_tgid = tctx->pid_tgid };
+                    bpf_map_update_elem(&iocb_c2a_start, &key, &cctx, BPF_ANY);
+                }
+            }
+        }
+    }
+    
+    bpf_map_delete_elem(&req_start, &req_ptr);
     return 0;
 }

@@ -32,6 +32,8 @@ struct rw_stats {
     struct lat_stats d2c; 
     unsigned long long size_hist[MAX_SIZE_BUCKETS];
     unsigned int lba_hist[LBA_BUCKETS]; // LBA 접근 빈도 버킷
+    int current_qd;        
+    unsigned int max_qd;
 };
 
 struct io_stats {

@@ -90,7 +90,6 @@ struct {
     __type(value, struct io_stats);
 } scratch_stats SEC(".maps");
 
-// 디바이스 전체 용량(섹터 수)을 유저스페이스로부터 전달받는 맵
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 256);
@@ -98,6 +97,7 @@ struct {
     __type(value, u64); 
 } dev_capacity_map SEC(".maps");
 
+// Libaio Tracepoints 생략 (이전 코드와 동일, 분량관계상 주요 함수만 배치)
 SEC("tracepoint/syscalls/sys_enter_io_submit")
 int trace_submit_enter(void *ctx) {
     u64 ts = bpf_ktime_get_ns();
@@ -163,38 +163,27 @@ SEC("tracepoint/syscalls/sys_exit_io_getevents")
 int trace_getevents_exit(struct trace_event_raw_sys_exit *ctx) {
     long ret = ctx->ret;
     if (ret <= 0) return 0; 
-
     u64 ts = bpf_ktime_get_ns();
     u64 pid_tgid = bpf_get_current_pid_tgid();
-    
     u64 *events_ptr_p = bpf_map_lookup_elem(&active_getevents_events, &pid_tgid);
     if (!events_ptr_p) return 0;
-    
     u64 events_ptr = *events_ptr_p;
     bpf_map_delete_elem(&active_getevents_events, &pid_tgid);
-
     u32 key = 0;
     struct libaio_stats *st = bpf_map_lookup_elem(&sys_stats_map, &key);
     if (!st) return 0;
-
     struct io_event ev;
-    
     #pragma unroll
     for (int i = 0; i < 256; i++) {
         if (i >= ret) break; 
-        
         if (bpf_probe_read_user(&ev, sizeof(ev), (void *)(events_ptr + i * sizeof(ev))) == 0) {
             u64 iocb_ptr = ev.obj; 
-            
             struct a2u_key akey = { .pid_tgid = pid_tgid, .iocb_ptr = iocb_ptr };
             u64 *last_ts = bpf_map_lookup_elem(&iocb_complete_ts, &akey);
-            
             if (last_ts && *last_ts > 0 && ts > *last_ts) {
                 u64 wakeup_lat = ts - *last_ts;
-
                 u16 opcode = 0;
                 bpf_probe_read_user(&opcode, sizeof(opcode), (void *)(iocb_ptr + 16));
-
                 if (opcode == 0 || opcode == 7) {
                     __sync_fetch_and_add(&st->a2u_read_count, 1);
                     __sync_fetch_and_add(&st->a2u_read_total, wakeup_lat);
@@ -224,38 +213,27 @@ SEC("tracepoint/syscalls/sys_exit_io_pgetevents")
 int trace_pgetevents_exit(struct trace_event_raw_sys_exit *ctx) {
     long ret = ctx->ret;
     if (ret <= 0) return 0;
-
     u64 ts = bpf_ktime_get_ns();
     u64 pid_tgid = bpf_get_current_pid_tgid();
-    
     u64 *events_ptr_p = bpf_map_lookup_elem(&active_getevents_events, &pid_tgid);
     if (!events_ptr_p) return 0;
-    
     u64 events_ptr = *events_ptr_p;
     bpf_map_delete_elem(&active_getevents_events, &pid_tgid);
-
     u32 key = 0;
     struct libaio_stats *st = bpf_map_lookup_elem(&sys_stats_map, &key);
     if (!st) return 0;
-
     struct io_event ev;
-    
     #pragma unroll
     for (int i = 0; i < 256; i++) {
         if (i >= ret) break;
-        
         if (bpf_probe_read_user(&ev, sizeof(ev), (void *)(events_ptr + i * sizeof(ev))) == 0) {
             u64 iocb_ptr = ev.obj;
-            
             struct a2u_key akey = { .pid_tgid = pid_tgid, .iocb_ptr = iocb_ptr };
             u64 *last_ts = bpf_map_lookup_elem(&iocb_complete_ts, &akey);
-            
             if (last_ts && *last_ts > 0 && ts > *last_ts) {
                 u64 wakeup_lat = ts - *last_ts;
-
                 u16 opcode = 0;
                 bpf_probe_read_user(&opcode, sizeof(opcode), (void *)(iocb_ptr + 16));
-
                 if (opcode == 0 || opcode == 7) {
                     __sync_fetch_and_add(&st->a2u_read_count, 1);
                     __sync_fetch_and_add(&st->a2u_read_total, wakeup_lat);
@@ -277,7 +255,6 @@ SEC("tp_btf/block_bio_queue")
 int BPF_PROG(block_bio_queue, struct bio *bio) {
     u64 ts = bpf_ktime_get_ns();
     u64 pid_tgid = bpf_get_current_pid_tgid();
-    
     if (opt_trace_libaio) {
         u64 *submit_ts = bpf_map_lookup_elem(&pid_submit_start, &pid_tgid);
         if (submit_ts) {
@@ -290,7 +267,6 @@ int BPF_PROG(block_bio_queue, struct bio *bio) {
             }
         }
     }
-
     u64 bio_ptr = (u64)bio;
     struct bio_start_ctx bctx = { .ts = ts, .pid_tgid = pid_tgid };
     bpf_map_update_elem(&bio_start, &bio_ptr, &bctx, BPF_ANY);
@@ -317,6 +293,55 @@ int BPF_PROG(block_rq_issue, struct request *rq) {
 
     struct trace_ctx tctx = { .issue_ts = ts, .q2d_lat = q2d_lat, .pid_tgid = pid_tgid };
     bpf_map_update_elem(&req_start, &req_ptr, &tctx, BPF_ANY);
+
+    // [QD 추적 로직 추가] Issue 될 때 증가
+    struct gendisk *disk = BPF_CORE_READ(rq, q, disk);
+    if (disk) {
+        u32 dev = (BPF_CORE_READ(disk, major) << 20) | BPF_CORE_READ(disk, first_minor);
+        struct io_stats *s = bpf_map_lookup_elem(&device_stats, &dev);
+        if (!s) {
+            u32 zero_key = 0;
+            struct io_stats *init_s = bpf_map_lookup_elem(&scratch_stats, &zero_key);
+            if (init_s) {
+                for(int i=0; i<IO_MAX_TYPES; i++) {
+                    init_s->stats[i].io_count = 0;
+                    init_s->stats[i].total_bytes = 0;
+                    init_s->stats[i].q2d.total = 0;
+                    init_s->stats[i].q2d.max = 0;
+                    init_s->stats[i].q2d.min = (unsigned long long)-1;
+                    init_s->stats[i].d2c.total = 0;
+                    init_s->stats[i].d2c.max = 0;
+                    init_s->stats[i].d2c.min = (unsigned long long)-1;
+                    init_s->stats[i].current_qd = 0;
+                    init_s->stats[i].max_qd = 0;
+                    for(int b=0; b<MAX_SIZE_BUCKETS; b++) init_s->stats[i].size_hist[b] = 0;
+                    for(int b=0; b<LBA_BUCKETS; b++) init_s->stats[i].lba_hist[b] = 0;
+                }
+                bpf_map_update_elem(&device_stats, &dev, init_s, BPF_ANY);
+                s = bpf_map_lookup_elem(&device_stats, &dev);
+            }
+        }
+        if (s) {
+            u64 cmd_flags = BPF_CORE_READ(rq, cmd_flags);
+            u32 op = cmd_flags & 255; 
+            int type = -1;
+            if (op == 0) type = (cmd_flags & BPF_REQ_RAHEAD) ? IO_READ_AHEAD : IO_READ;
+            else if (op == 1) type = IO_WRITE;
+            else if (op == 2) type = IO_FLUSH;
+            else if (op == 3) type = IO_DISCARD;
+
+            if (type != -1) {
+                // 1. 값만 원자적으로 증가시킴 (반환값 무시)
+                __sync_fetch_and_add(&s->stats[type].current_qd, 1);
+                
+                // 2. 증가된 값을 다시 읽어옴
+                int qd = s->stats[type].current_qd;
+                if (qd > (int)s->stats[type].max_qd) {
+                    s->stats[type].max_qd = qd;
+                }
+            }
+        }
+    }
     return 0;
 }
 
@@ -349,7 +374,6 @@ int BPF_PROG(block_rq_complete, struct request *rq, int error, unsigned int nr_b
                 u32 zero_key = 0;
                 struct io_stats *init_s = bpf_map_lookup_elem(&scratch_stats, &zero_key);
                 if (init_s) {
-                    // [수정] __builtin_memset 제거 및 수동 초기화
                     for(int i=0; i<IO_MAX_TYPES; i++) {
                         init_s->stats[i].io_count = 0;
                         init_s->stats[i].total_bytes = 0;
@@ -359,12 +383,10 @@ int BPF_PROG(block_rq_complete, struct request *rq, int error, unsigned int nr_b
                         init_s->stats[i].d2c.total = 0;
                         init_s->stats[i].d2c.max = 0;
                         init_s->stats[i].d2c.min = (unsigned long long)-1;
-                        for(int b=0; b<MAX_SIZE_BUCKETS; b++) {
-                            init_s->stats[i].size_hist[b] = 0;
-                        }
-                        for(int b=0; b<LBA_BUCKETS; b++) {
-                            init_s->stats[i].lba_hist[b] = 0;
-                        }
+                        init_s->stats[i].current_qd = 0;
+                        init_s->stats[i].max_qd = 0;
+                        for(int b=0; b<MAX_SIZE_BUCKETS; b++) init_s->stats[i].size_hist[b] = 0;
+                        for(int b=0; b<LBA_BUCKETS; b++) init_s->stats[i].lba_hist[b] = 0;
                     }
                     bpf_map_update_elem(&device_stats, &dev, init_s, BPF_ANY);
                     s = bpf_map_lookup_elem(&device_stats, &dev);
@@ -382,7 +404,6 @@ int BPF_PROG(block_rq_complete, struct request *rq, int error, unsigned int nr_b
                 else if (nr_bytes <= 131072) target->size_hist[2]++;
                 else target->size_hist[3]++;
                 
-                // 레이턴시 추적 로직 (온전히 유지)
                 target->d2c.total += d2c_lat;
                 if (d2c_lat > target->d2c.max) target->d2c.max = d2c_lat;
                 if (target->d2c.min == (unsigned long long)-1 || d2c_lat < target->d2c.min) target->d2c.min = d2c_lat;
@@ -393,7 +414,6 @@ int BPF_PROG(block_rq_complete, struct request *rq, int error, unsigned int nr_b
                     if (target->q2d.min == (unsigned long long)-1 || q2d_lat < target->q2d.min) target->q2d.min = q2d_lat;
                 }
 
-                // LBA 접근 버킷 매핑
                 u64 sector = BPF_CORE_READ(rq, __sector);
                 u64 *cap_ptr = bpf_map_lookup_elem(&dev_capacity_map, &dev);
                 if (cap_ptr && *cap_ptr > 0) {
@@ -401,6 +421,9 @@ int BPF_PROG(block_rq_complete, struct request *rq, int error, unsigned int nr_b
                     if (bucket >= LBA_BUCKETS) bucket = LBA_BUCKETS - 1;
                     target->lba_hist[bucket]++;
                 }
+
+                // [QD 추적 로직 추가] 완료 시 감소
+                __sync_fetch_and_add(&target->current_qd, -1);
             }
         }
     }

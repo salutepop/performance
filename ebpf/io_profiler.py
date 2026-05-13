@@ -4,6 +4,15 @@ import os
 import signal
 import time
 import argparse
+import threading
+import csv
+from datetime import datetime
+
+OUTPUT_DIR = "./csv_results"
+SESSION_ID = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+prev_metrics = {}
+csv_buffers = {}
 
 
 def get_real_dev_name(dev_id_str):
@@ -14,7 +23,146 @@ def get_real_dev_name(dev_id_str):
             return os.path.basename(os.path.realpath(sysfs_path))
     except Exception:
         pass
-    return "unknown"
+    return dev_id_str.replace("(", "_").replace(")", "_").replace(":", "_")
+
+
+def save_csv_buffers():
+    global csv_buffers
+    if not csv_buffers:
+        return
+
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    keys = [
+        "timestamp",
+        "operation",
+        "iops_interval",
+        "bandwidth_mb_s_interval",
+        "q2d_avg_us_interval",
+        "d2c_avg_us_interval",
+        "current_qd",
+        "max_qd",
+        "total_io_count",
+        "total_bytes",
+        "q2d_total_ns",
+        "q2d_min_ns",
+        "q2d_max_ns",
+        "d2c_total_ns",
+        "d2c_min_ns",
+        "d2c_max_ns",
+        "size_hist_4k",
+        "size_hist_32k",
+        "size_hist_128k",
+        "size_hist_large",
+    ] + [f"lba_{i}" for i in range(64)]
+
+    for dev_name, rows in csv_buffers.items():
+        if not rows:
+            continue
+
+        filename = os.path.join(OUTPUT_DIR, f"{dev_name}_{SESSION_ID}.csv")
+        file_exists = os.path.isfile(filename)
+
+        try:
+            with open(filename, "a", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=keys)
+                if not file_exists:
+                    writer.writeheader()
+                writer.writerows(rows)
+            rows.clear()
+        except Exception as e:
+            print(f" [-] Failed to save CSV for {dev_name}: {e}")
+
+
+def parse_and_store_metrics(json_str):
+    global prev_metrics, csv_buffers
+    try:
+        bpf_data = json.loads(json_str)
+        timestamp = datetime.now().strftime("%H:%M:%S")
+
+        for dev in bpf_data.get("devices", []):
+            dev_name_raw = dev["dev_name"]
+            real_name = get_real_dev_name(dev_name_raw)
+
+            if real_name not in csv_buffers:
+                csv_buffers[real_name] = []
+
+            for op, stats in dev.get("operations", {}).items():
+                curr_count = stats.get("total_count", 0)
+                if curr_count == 0:
+                    continue
+
+                key = f"{real_name}_{op}"
+                curr_bytes = stats.get("total_bytes", 0)
+                curr_q2d_tot = stats.get("q2d", {}).get("total_lat_ns", 0)
+                curr_d2c_tot = stats.get("d2c", {}).get("total_lat_ns", 0)
+
+                prev = prev_metrics.get(
+                    key, {"count": 0, "bytes": 0, "q2d_tot": 0, "d2c_tot": 0}
+                )
+
+                delta_count = curr_count - prev["count"]
+                delta_bytes = curr_bytes - prev["bytes"]
+                delta_q2d = curr_q2d_tot - prev["q2d_tot"]
+                delta_d2c = curr_d2c_tot - prev["d2c_tot"]
+
+                iops = delta_count
+                bw_mb = delta_bytes / (1024.0 * 1024.0)
+                q2d_avg_us = (
+                    (delta_q2d / delta_count / 1000.0) if delta_count > 0 else 0.0
+                )
+                d2c_avg_us = (
+                    (delta_d2c / delta_count / 1000.0) if delta_count > 0 else 0.0
+                )
+
+                current_qd = stats.get("current_qd", 0)
+                max_qd = stats.get("max_qd", 0)
+
+                if delta_count > 0:
+                    print(
+                        f" [{timestamp}] {real_name:<10} {op:<7} | IOPS: {iops:>6,} | BW: {bw_mb:>8.2f} MB/s | QD: {current_qd:>4} (Max: {max_qd:>4})"
+                    )
+
+                size_hist = stats.get("size_hist", [0, 0, 0, 0])
+                lba_hist = stats.get("lba_hist", [0] * 64)
+
+                row = {
+                    "timestamp": timestamp,
+                    "operation": op,
+                    "iops_interval": iops,
+                    "bandwidth_mb_s_interval": round(bw_mb, 4),
+                    "q2d_avg_us_interval": round(q2d_avg_us, 2),
+                    "d2c_avg_us_interval": round(d2c_avg_us, 2),
+                    "current_qd": current_qd,
+                    "max_qd": max_qd,
+                    "total_io_count": curr_count,
+                    "total_bytes": curr_bytes,
+                    "q2d_total_ns": curr_q2d_tot,
+                    "q2d_min_ns": stats.get("q2d", {}).get("min_lat_ns", 0),
+                    "q2d_max_ns": stats.get("q2d", {}).get("max_lat_ns", 0),
+                    "d2c_total_ns": curr_d2c_tot,
+                    "d2c_min_ns": stats.get("d2c", {}).get("min_lat_ns", 0),
+                    "d2c_max_ns": stats.get("d2c", {}).get("max_lat_ns", 0),
+                    "size_hist_4k": size_hist[0],
+                    "size_hist_32k": size_hist[1],
+                    "size_hist_128k": size_hist[2],
+                    "size_hist_large": size_hist[3],
+                }
+
+                for i, lba_val in enumerate(lba_hist):
+                    row[f"lba_{i}"] = lba_val
+
+                csv_buffers[real_name].append(row)
+
+                prev_metrics[key] = {
+                    "count": curr_count,
+                    "bytes": curr_bytes,
+                    "q2d_tot": curr_q2d_tot,
+                    "d2c_tot": curr_d2c_tot,
+                }
+
+    except json.JSONDecodeError:
+        pass
 
 
 def print_op_stats(op_name, bpf_stats, c2a_data, a2u_data, duration):
@@ -43,7 +191,10 @@ def print_op_stats(op_name, bpf_stats, c2a_data, a2u_data, duration):
     print(f"  - Total Bytes : {bpf_bytes:,} B")
     print(f"  - Bandwidth   : {bpf_bw_mb:>10.2f} MB/s")
     print(
-        f"  - Full Stack (Run) : Sum = {ebpf_sum_ms:>10.2f} ms | Avg = {ebpf_avg_us:>8.2f} us (Q2D+D2C+C2A+A2U)"
+        f"  - QD          : Curr={bpf_stats.get('current_qd', 0)}, Max={bpf_stats.get('max_qd', 0)}"
+    )
+    print(
+        f"  - Full Stack (Run) : Sum = {ebpf_sum_ms:>10.2f} ms | Avg = {ebpf_avg_us:>8.2f} us"
     )
 
     hist = bpf_stats.get("size_hist", [0, 0, 0, 0])
@@ -56,11 +207,9 @@ def print_op_stats(op_name, bpf_stats, c2a_data, a2u_data, duration):
             bar = "█" * int(ratio / 5)
             print(f"      {labels[i]:>10} : [{bar:<20}] {ratio:>5.1f}% ({count:,})")
 
-    # LBA Heatmap (커널에서 받아온 64 버킷을 바로 시각화)
     lba_hist = bpf_stats.get("lba_hist", [])
     if cnt > 0 and len(lba_hist) == 64 and sum(lba_hist) > 0:
         max_val = max(lba_hist)
-
         spark_chars = [" ", " ", "▂", "▃", "▄", "▅", "▆", "▇", "█"]
         sparkline = ""
         for val in lba_hist:
@@ -71,70 +220,18 @@ def print_op_stats(op_name, bpf_stats, c2a_data, a2u_data, duration):
                 if idx == 0:
                     idx = 1
                 sparkline += spark_chars[idx]
-
         print(f"  - LBA Heatmap  : [{sparkline}] (Scale: 0 ~ Max)")
-
     print()
-
     return cnt, q2d_ms, d2c_ms, c2a_cnt, c2a_ms
 
 
-def run_benchmark(mode="generic", cmd=None, script_file=None):
-    trace_cmd = ["sudo", "./io_trace"]
-    if mode != "generic":
-        trace_cmd.extend(["-m", mode])
-        print(f"[*] eBPF Tracer starting in: {mode.upper()} Mode")
-    else:
-        print("[*] eBPF Tracer starting in: Generic Block Mode (Default)")
-
-    trace_proc = subprocess.Popen(trace_cmd, stdout=subprocess.PIPE, text=True)
-    time.sleep(1.5)
-
-    subprocess.run(
-        "echo 3 | sudo tee /proc/sys/vm/drop_caches",
-        shell=True,
-        stdout=subprocess.DEVNULL,
-    )
-    os.kill(trace_proc.pid, signal.SIGUSR1)
-    time.sleep(0.1)
-
-    t0 = time.time()
-
+def print_final_summary(raw_json, effective_duration, mode):
     try:
-        if cmd:
-            print(f"[*] Executing custom command: {cmd}\n")
-            subprocess.run(cmd, shell=True)
-        elif script_file:
-            print(f"[*] Executing script file: {script_file}\n")
-            subprocess.run(f"bash {script_file}", shell=True)
-        else:
-            print("[*] No workload command provided.")
-            print("[*] Monitoring in background... (Press Ctrl+C to stop)\n")
-            while True:
-                time.sleep(1)
-    except KeyboardInterrupt:
-        print("\n[*] Workload or monitoring forcefully stopped by user.")
-    except Exception as e:
-        print(f"\n[-] Error running workload: {e}")
-
-    t1 = time.time()
-    effective_duration = t1 - t0
-
-    print("\n[*] Stopping eBPF tracer and collecting data...")
-    os.kill(trace_proc.pid, signal.SIGINT)
-    bpf_output, _ = trace_proc.communicate()
-
-    if effective_duration <= 0:
-        effective_duration = 1.0
-
-    try:
-        raw_json = (
-            bpf_output.split("---JSON_START---")[1].split("---JSON_END---")[0].strip()
-        )
         bpf_data = json.loads(raw_json)
-
-        print("=" * 100)
-        print(f" [ I/O PROFILING REPORT | Duration: {effective_duration:.2f} seconds ]")
+        print("\n" + "=" * 100)
+        print(
+            f" [ FIO PROFILING FINAL REPORT | Duration: {effective_duration:.2f} seconds ]"
+        )
         print("=" * 100)
 
         sys_stats = bpf_data.get("libaio_overhead", {})
@@ -150,7 +247,6 @@ def run_benchmark(mode="generic", cmd=None, script_file=None):
             sys_stats.get("c2a_flush_count", 0),
             sys_stats.get("c2a_flush_total", 0) / 1000000.0,
         )
-
         a2u_read = (
             sys_stats.get("a2u_read_count", 0),
             sys_stats.get("a2u_read_total", 0) / 1000000.0,
@@ -167,14 +263,14 @@ def run_benchmark(mode="generic", cmd=None, script_file=None):
         phase_stats = {"U2Q": {}, "Q2D": {}, "D2C": {}, "C2A": {}, "A2U": {}}
         tot_q2d_cnt = tot_q2d_ms = tot_d2c_ms = 0
 
-        total_sys_ios = 0
-        for dev in bpf_data["devices"]:
-            total_sys_ios += sum(op["total_count"] for op in dev["operations"].values())
+        total_sys_ios = sum(
+            sum(op["total_count"] for op in dev["operations"].values())
+            for dev in bpf_data["devices"]
+        )
 
         for dev in bpf_data["devices"]:
             ops = dev["operations"]
             bpf_total_cnt = sum(op["total_count"] for op in ops.values())
-
             if bpf_total_cnt > 0 and bpf_total_cnt > (total_sys_ios * 0.05):
                 real_name = get_real_dev_name(dev["dev_name"])
                 print(f" Target Device: {dev['dev_name']} [{real_name}]\n")
@@ -189,11 +285,9 @@ def run_benchmark(mode="generic", cmd=None, script_file=None):
                         q_cnt, q_ms, d_ms, c_cnt, c_ms = print_op_stats(
                             op_name, bpf_src, c2a_data, a2u_data, effective_duration
                         )
-
                         tot_q2d_cnt += q_cnt
                         tot_q2d_ms += q_ms
                         tot_d2c_ms += d_ms
-
                         phase_stats["Q2D"][op_name] = (
                             q_cnt,
                             q_ms,
@@ -204,16 +298,12 @@ def run_benchmark(mode="generic", cmd=None, script_file=None):
                             d_ms,
                             (d_ms * 1000.0 / q_cnt) if q_cnt > 0 else 0,
                         )
-
                         if c2a_data:
                             phase_stats["C2A"][op_name] = (
                                 c_cnt,
                                 c_ms,
                                 (c_ms * 1000.0 / c_cnt) if c_cnt > 0 else 0,
                             )
-                        else:
-                            phase_stats["C2A"][op_name] = (0, 0, 0)
-
                         if a2u_data:
                             a_cnt, a_ms = a2u_data
                             phase_stats["A2U"][op_name] = (
@@ -221,36 +311,45 @@ def run_benchmark(mode="generic", cmd=None, script_file=None):
                                 a_ms,
                                 (a_ms * 1000.0 / a_cnt) if a_cnt > 0 else 0,
                             )
-                        else:
-                            phase_stats["A2U"][op_name] = (0, 0, 0)
-            else:
-                if bpf_total_cnt > 0:
-                    print(
-                        f" [Background Device: {dev['dev_name']}] Handled {bpf_total_cnt:,} IOs (Skipped)\n"
-                    )
 
         u2q_cnt = sys_stats.get("u2q_count", 0)
         u2q_sum_ms = sys_stats.get("u2q_lat_total", 0) / 1000000.0
-        u2q_avg_us = (
-            (sys_stats.get("u2q_lat_total", 0) / 1000.0 / u2q_cnt) if u2q_cnt > 0 else 0
+        phase_stats["U2Q"]["Total"] = (
+            u2q_cnt,
+            u2q_sum_ms,
+            (
+                (sys_stats.get("u2q_lat_total", 0) / 1000.0 / u2q_cnt)
+                if u2q_cnt > 0
+                else 0
+            ),
         )
-        phase_stats["U2Q"]["Total"] = (u2q_cnt, u2q_sum_ms, u2q_avg_us)
 
         tot_c2a_cnt = c2a_read[0] + c2a_write[0] + c2a_flush[0]
         tot_c2a_ms = c2a_read[1] + c2a_write[1] + c2a_flush[1]
-        tot_c2a_avg = (tot_c2a_ms * 1000.0 / tot_c2a_cnt) if tot_c2a_cnt > 0 else 0
-        phase_stats["C2A"]["Total"] = (tot_c2a_cnt, tot_c2a_ms, tot_c2a_avg)
+        phase_stats["C2A"]["Total"] = (
+            tot_c2a_cnt,
+            tot_c2a_ms,
+            (tot_c2a_ms * 1000.0 / tot_c2a_cnt) if tot_c2a_cnt > 0 else 0,
+        )
 
         tot_a2u_cnt = a2u_read[0] + a2u_write[0] + a2u_flush[0]
         tot_a2u_ms = a2u_read[1] + a2u_write[1] + a2u_flush[1]
-        tot_a2u_avg = (tot_a2u_ms * 1000.0 / tot_a2u_cnt) if tot_a2u_cnt > 0 else 0
-        phase_stats["A2U"]["Total"] = (tot_a2u_cnt, tot_a2u_ms, tot_a2u_avg)
+        phase_stats["A2U"]["Total"] = (
+            tot_a2u_cnt,
+            tot_a2u_ms,
+            (tot_a2u_ms * 1000.0 / tot_a2u_cnt) if tot_a2u_cnt > 0 else 0,
+        )
 
-        tot_q2d_avg_us = (tot_q2d_ms * 1000.0 / tot_q2d_cnt) if tot_q2d_cnt > 0 else 0
-        tot_d2c_avg_us = (tot_d2c_ms * 1000.0 / tot_q2d_cnt) if tot_q2d_cnt > 0 else 0
-
-        phase_stats["Q2D"]["Total"] = (tot_q2d_cnt, tot_q2d_ms, tot_q2d_avg_us)
-        phase_stats["D2C"]["Total"] = (tot_q2d_cnt, tot_d2c_ms, tot_d2c_avg_us)
+        phase_stats["Q2D"]["Total"] = (
+            tot_q2d_cnt,
+            tot_q2d_ms,
+            (tot_q2d_ms * 1000.0 / tot_q2d_cnt) if tot_q2d_cnt > 0 else 0,
+        )
+        phase_stats["D2C"]["Total"] = (
+            tot_q2d_cnt,
+            tot_d2c_ms,
+            (tot_d2c_ms * 1000.0 / tot_q2d_cnt) if tot_q2d_cnt > 0 else 0,
+        )
 
         table_width = 100
         print("-" * table_width)
@@ -265,33 +364,55 @@ def run_benchmark(mode="generic", cmd=None, script_file=None):
             stats = phase_stats.get(phase_key, {})
 
             def get_val(op, idx):
-                if op not in stats or stats[op][0] == 0:
+                if op not in stats or stats.get(op, (0, 0, 0))[0] == 0:
                     return "-"
                 val = stats[op][idx]
-                if idx == 0:
-                    return f"{int(val):,}"
-                else:
-                    return f"{val:.2f}"
+                return f"{int(val):,}" if idx == 0 else f"{val:.2f}"
 
-            def format_row(phase_name_str, metric_name, idx):
-                tot = get_val("Total", idx)
-                r = get_val("READ", idx)
-                w = get_val("WRITE", idx)
-                ra = get_val("READ-AHEAD", idx)
-                fl = get_val("FLUSH", idx)
+            tot, r, w, ra, fl = (
+                get_val("Total", 0),
+                get_val("READ", 0),
+                get_val("WRITE", 0),
+                get_val("READ-AHEAD", 0),
+                get_val("FLUSH", 0),
+            )
+            if phase_key == "U2Q":
+                r = w = ra = fl = "-"
+            if phase_key in ["C2A", "A2U"]:
+                ra = "-"
+            print(
+                f" {phase_name:<18} | Call Count | {tot:>12} | {r:>12} | {w:>12} | {ra:>10} | {fl:>8}"
+            )
 
-                if phase_key == "U2Q":
-                    r = w = ra = fl = "-"
-                if phase_key in ["C2A", "A2U"]:
-                    ra = "-"
+            tot, r, w, ra, fl = (
+                get_val("Total", 1),
+                get_val("READ", 1),
+                get_val("WRITE", 1),
+                get_val("READ-AHEAD", 1),
+                get_val("FLUSH", 1),
+            )
+            if phase_key == "U2Q":
+                r = w = ra = fl = "-"
+            if phase_key in ["C2A", "A2U"]:
+                ra = "-"
+            print(
+                f" {'':<18} | Sum (ms)   | {tot:>12} | {r:>12} | {w:>12} | {ra:>10} | {fl:>8}"
+            )
 
-                print(
-                    f" {phase_name_str:<18} | {metric_name:<10} | {tot:>12} | {r:>12} | {w:>12} | {ra:>10} | {fl:>8}"
-                )
-
-            format_row(phase_name, "Call Count", 0)
-            format_row("", "Sum (ms)", 1)
-            format_row("", "Avg (us)", 2)
+            tot, r, w, ra, fl = (
+                get_val("Total", 2),
+                get_val("READ", 2),
+                get_val("WRITE", 2),
+                get_val("READ-AHEAD", 2),
+                get_val("FLUSH", 2),
+            )
+            if phase_key == "U2Q":
+                r = w = ra = fl = "-"
+            if phase_key in ["C2A", "A2U"]:
+                ra = "-"
+            print(
+                f" {'':<18} | Avg (us)   | {tot:>12} | {r:>12} | {w:>12} | {ra:>10} | {fl:>8}"
+            )
             print("-" * table_width)
 
         print_phase("U2Q (User->BLK_Q)", "U2Q")
@@ -301,24 +422,132 @@ def run_benchmark(mode="generic", cmd=None, script_file=None):
             print_phase("C2A (Compl->AIO)", "C2A")
             print_phase("A2U (AIO->User)", "A2U")
         print("=" * table_width)
-
     except Exception as e:
-        print(f"[-] Parsing Error: {e}")
-        print(f"Raw Output Snippet:\n{bpf_output[:500]}...")
+        print(f"[-] Parsing Error in Final Summary: {e}")
+
+
+def run_workload_thread(cmd, script_file):
+    try:
+        if cmd:
+            subprocess.run(cmd, shell=True)
+        elif script_file:
+            subprocess.run(f"bash {script_file}", shell=True)
+        else:
+            while True:
+                time.sleep(1)
+    except Exception as e:
+        print(f"\n[-] Error running workload: {e}")
+    finally:
+        os.kill(os.getpid(), signal.SIGINT)
+
+
+def run_benchmark(mode="generic", cmd=None, script_file=None, interval=1):
+    trace_cmd = ["sudo", "./io_trace", "-i", str(interval)]
+    if mode != "generic":
+        trace_cmd.extend(["-m", mode])
+        print(f"[*] eBPF Tracer starting in: {mode.upper()} Mode")
+    else:
+        print("[*] eBPF Tracer starting in: Generic Block Mode")
+
+    trace_proc = subprocess.Popen(trace_cmd, stdout=subprocess.PIPE, text=True)
+    time.sleep(1.5)
+
+    subprocess.run(
+        "echo 3 | sudo tee /proc/sys/vm/drop_caches",
+        shell=True,
+        stdout=subprocess.DEVNULL,
+    )
+    os.kill(trace_proc.pid, signal.SIGUSR1)
+    time.sleep(0.1)
+
+    if interval > 0:
+        print(
+            f"[*] Timeseries logging ENABLED (interval: {interval}s) -> {OUTPUT_DIR}/<device>_*.csv"
+        )
+    else:
+        print(
+            "[*] Timeseries logging DISABLED (interval: 0). Collecting only final summary."
+        )
+
+    print("[*] Executing workload...\n")
+
+    t0 = time.time()
+    workload_thread = threading.Thread(
+        target=run_workload_thread, args=(cmd, script_file), daemon=True
+    )
+    workload_thread.start()
+
+    json_buffer = []
+    in_json = False
+    last_csv_save_time = time.time()
+    last_valid_json = "{}"
+
+    try:
+        while True:
+            line = trace_proc.stdout.readline()
+            if not line and trace_proc.poll() is not None:
+                break
+
+            if "---JSON_START---" in line:
+                json_buffer = []
+                in_json = True
+            elif "---JSON_END---" in line:
+                in_json = False
+                raw_json = "\n".join(json_buffer).strip()
+                last_valid_json = raw_json
+
+                if interval > 0:
+                    parse_and_store_metrics(raw_json)
+                    if time.time() - last_csv_save_time >= 5:
+                        save_csv_buffers()
+                        last_csv_save_time = time.time()
+            elif in_json:
+                json_buffer.append(line)
+
+    except KeyboardInterrupt:
+        print("\n[*] Stopping monitoring gracefully...")
+
+    effective_duration = time.time() - t0
+    if effective_duration <= 0:
+        effective_duration = 1.0
+
+    if trace_proc.poll() is None:
+        os.kill(trace_proc.pid, signal.SIGINT)
+        bpf_output, _ = trace_proc.communicate()
+        if "---JSON_START---" in bpf_output:
+            last_valid_json = (
+                bpf_output.split("---JSON_START---")[-1]
+                .split("---JSON_END---")[0]
+                .strip()
+            )
+
+    if interval > 0:
+        save_csv_buffers()
+        print(
+            f"\n -> Timeseries data saved to directory: {os.path.abspath(OUTPUT_DIR)}"
+        )
+
+    if last_valid_json != "{}":
+        print_final_summary(last_valid_json, effective_duration, mode)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Universal eBPF I/O Monitor & Profiler"
     )
-
     parser.add_argument(
         "-m",
         "--mode",
         type=str,
         default="generic",
         choices=["generic", "libaio", "iouring"],
-        help="Select tracing mode: generic (default), libaio, iouring",
+    )
+    parser.add_argument(
+        "-i",
+        "--interval",
+        type=int,
+        default=1,
+        help="Logging interval in seconds (0 = Disable CSV)",
     )
 
     group = parser.add_mutually_exclusive_group()
@@ -326,14 +555,16 @@ if __name__ == "__main__":
         "-c",
         "--cmd",
         type=str,
-        help="Command string to execute (e.g., -c 'fio --name=test --size=1G')",
+        help="Command string to execute (e.g., -c 'fio --name=test')",
     )
     group.add_argument(
         "-f",
         "--file",
         type=str,
-        help="Shell script file to execute (e.g., -f ./run_workload.sh)",
+        help="Shell script file to execute (e.g., -f ./fio.sh)",
     )
 
     args = parser.parse_args()
-    run_benchmark(mode=args.mode, cmd=args.cmd, script_file=args.file)
+    run_benchmark(
+        mode=args.mode, cmd=args.cmd, script_file=args.file, interval=args.interval
+    )

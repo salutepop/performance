@@ -5,9 +5,6 @@ import signal
 import time
 import argparse
 
-FILE_SIZE_GB = 1
-RUNTIME = 5.0
-
 
 def get_real_dev_name(dev_id_str):
     try:
@@ -20,31 +17,19 @@ def get_real_dev_name(dev_id_str):
     return "unknown"
 
 
-def print_op_stats(op_name, fio_job, bpf_stats, c2a_data, a2u_data, duration):
+def print_op_stats(op_name, bpf_stats, c2a_data, a2u_data, duration):
     c2a_cnt, c2a_ms = c2a_data if c2a_data else (0, 0)
     a2u_cnt, a2u_ms = a2u_data if a2u_data else (0, 0)
 
     if bpf_stats.get("total_count", 0) == 0:
         return 0, 0, 0, 0, 0
 
-    # eBPF Metrics
     cnt = bpf_stats["total_count"]
     bpf_bytes = bpf_stats.get("total_bytes", 0)
     bpf_bw_mb = (bpf_bytes / (1024.0 * 1024.0)) / duration if duration > 0 else 0
 
     q2d_ms = bpf_stats.get("q2d", {}).get("total_lat_ns", 0) / 1000000.0
     d2c_ms = bpf_stats.get("d2c", {}).get("total_lat_ns", 0) / 1000000.0
-
-    # fio Metrics
-    fio_cnt = fio_job["total_ios"] if fio_job else 0
-    fio_bytes = fio_job.get("io_bytes", 0) if fio_job else 0
-    fio_bw_mb = 0
-
-    if fio_job:
-        if "bw_bytes" in fio_job:
-            fio_bw_mb = fio_job["bw_bytes"] / (1024.0 * 1024.0)
-        elif "bw" in fio_job:
-            fio_bw_mb = fio_job["bw"] / 1024.0  # KB/s to MB/s
 
     q2d_avg_us = (q2d_ms * 1000.0 / cnt) if cnt > 0 else 0
     d2c_avg_us = (d2c_ms * 1000.0 / cnt) if cnt > 0 else 0
@@ -54,39 +39,12 @@ def print_op_stats(op_name, fio_job, bpf_stats, c2a_data, a2u_data, duration):
     ebpf_sum_ms = q2d_ms + d2c_ms + c2a_ms + a2u_ms
     ebpf_avg_us = q2d_avg_us + d2c_avg_us + c2a_avg_us + a2u_avg_us
 
+    print(f" [{op_name}] IO Count : {cnt:,} (C2A={c2a_cnt:,}, A2U={a2u_cnt:,})")
+    print(f"  - Total Bytes : {bpf_bytes:,} B")
+    print(f"  - Bandwidth   : {bpf_bw_mb:>10.2f} MB/s")
     print(
-        f" [{op_name}] IO Count : fio = {fio_cnt:,} | eBPF = {cnt:,} (C2A={c2a_cnt:,}, A2U={a2u_cnt:,})"
+        f"  - Full Stack (Run) : Sum = {ebpf_sum_ms:>10.2f} ms | Avg = {ebpf_avg_us:>8.2f} us (Q2D+D2C+C2A+A2U)"
     )
-    print(f"  - Total Bytes : fio = {fio_bytes:,} B | eBPF = {bpf_bytes:,} B")
-    print(
-        f"  - Bandwidth   : fio = {fio_bw_mb:>10.2f} MB/s | eBPF = {bpf_bw_mb:>10.2f} MB/s"
-    )
-
-    if fio_job and fio_cnt > 0:
-        lat_ns = fio_job.get("lat_ns", {}).get("mean", 0)
-        slat_ns = fio_job.get("slat_ns", {}).get("mean", 0)
-        clat_ns = fio_job.get("clat_ns", {}).get("mean", 0)
-
-        lat_avg_us = lat_ns / 1000.0
-        slat_avg_us = slat_ns / 1000.0
-        clat_avg_us = clat_ns / 1000.0
-
-        lat_sum_ms = (lat_ns * fio_cnt) / 1000000.0
-        slat_sum_ms = (slat_ns * fio_cnt) / 1000000.0
-        clat_sum_ms = (clat_ns * fio_cnt) / 1000000.0
-
-        print(
-            f"  - fio  lat  (Total): Sum = {lat_sum_ms:>10.2f} ms | Avg = {lat_avg_us:>8.2f} us"
-        )
-        print(
-            f"  - fio  slat (Wait) : Sum = {slat_sum_ms:>10.2f} ms | Avg = {slat_avg_us:>8.2f} us"
-        )
-        print(
-            f"  - fio  clat (Run)  : Sum = {clat_sum_ms:>10.2f} ms | Avg = {clat_avg_us:>8.2f} us"
-        )
-        print(
-            f"  - eBPF HW+OS (Run) : Sum = {ebpf_sum_ms:>10.2f} ms | Avg = {ebpf_avg_us:>8.2f} us (Q2D+D2C+C2A+A2U)"
-        )
 
     hist = bpf_stats.get("size_hist", [0, 0, 0, 0])
     if cnt > 0 and sum(hist) > 0:
@@ -103,8 +61,8 @@ def print_op_stats(op_name, fio_job, bpf_stats, c2a_data, a2u_data, duration):
     return cnt, q2d_ms, d2c_ms, c2a_cnt, c2a_ms
 
 
-def run_benchmark(mode="generic"):
-    # 인자에 따라 io_trace 실행 명령어 구성
+def run_benchmark(mode="generic", cmd=None, script_file=None):
+    # 1. 모니터링 시작 (eBPF Tracer 구동)
     trace_cmd = ["sudo", "./io_trace"]
     if mode != "generic":
         trace_cmd.extend(["-m", mode])
@@ -113,92 +71,64 @@ def run_benchmark(mode="generic"):
         print("[*] eBPF Tracer starting in: Generic Block Mode (Default)")
 
     trace_proc = subprocess.Popen(trace_cmd, stdout=subprocess.PIPE, text=True)
-    time.sleep(1.5)
+    time.sleep(1.5)  # eBPF 맵 로드 대기
 
+    # 캐시 비우기
     subprocess.run(
         "echo 3 | sudo tee /proc/sys/vm/drop_caches",
         shell=True,
         stdout=subprocess.DEVNULL,
     )
-    os.kill(trace_proc.pid, signal.SIGUSR1)
+    os.kill(trace_proc.pid, signal.SIGUSR1)  # 맵 초기화 시그널 전송
     time.sleep(0.1)
 
-    print(f"[*] Running fio (RandRW 50:50) for {RUNTIME} seconds...\n")
-
-    fio_cmd = [
-        "sudo",
-        "fio",
-        "--name=testfile_",
-        f"--size={FILE_SIZE_GB}G",
-        "--direct=1",
-        "--rw=randrw",
-        "--rwmixread=50",
-        "--bs=4k",
-        "--ioengine=libaio",
-        "--iodepth=128",
-        "--numjobs=8",
-        f"--runtime={int(RUNTIME)}",
-        "--time_based",
-        "--group_reporting",
-        "--output-format=json",
-    ]
-
     t0 = time.time()
-    fio_result = subprocess.run(fio_cmd, capture_output=True, text=True)
-    t1 = time.time()
-    trace_exec_time = t1 - t0
 
+    # 2. 평가 시작
+    try:
+        if cmd:
+            print(f"[*] Executing custom command: {cmd}\n")
+            # 쉘 환경에서 직접 문자열 명령어 실행
+            subprocess.run(cmd, shell=True)
+
+        elif script_file:
+            print(f"[*] Executing script file: {script_file}\n")
+            # 스크립트 파일 실행 (bash 환경)
+            subprocess.run(f"bash {script_file}", shell=True)
+
+        else:
+            print("[*] No workload command provided.")
+            print("[*] Monitoring in background... (Press Ctrl+C to stop)\n")
+            # 명령어가 없으면 백그라운드 무한 대기
+            while True:
+                time.sleep(1)
+
+    except KeyboardInterrupt:
+        # 3. 강제 중단 시 안전하게 캐치
+        print("\n[*] Workload or monitoring forcefully stopped by user.")
+    except Exception as e:
+        print(f"\n[-] Error running workload: {e}")
+
+    # 4. 모니터링 종료 및 데이터 파싱
+    t1 = time.time()
+    effective_duration = t1 - t0
+
+    print("\n[*] Stopping eBPF tracer and collecting data...")
     os.kill(trace_proc.pid, signal.SIGINT)
     bpf_output, _ = trace_proc.communicate()
 
+    if effective_duration <= 0:
+        effective_duration = 1.0  # Divide by zero 방지
+
     try:
-        fio_data = json.loads(fio_result.stdout)
-        job_info = fio_data["jobs"][0]
-        job_read = job_info["read"]
-        job_write = job_info["write"]
-        job_trim = job_info.get("trim", None)
-        fio_total_ios = job_read["total_ios"] + job_write["total_ios"]
-
-        fio_runtime_ms = max(job_read.get("runtime", 0), job_write.get("runtime", 0))
-        effective_duration = (
-            (fio_runtime_ms / 1000.0) if fio_runtime_ms > 0 else trace_exec_time
-        )
-
-        if effective_duration <= 0:
-            effective_duration = RUNTIME
-
         raw_json = (
             bpf_output.split("---JSON_START---")[1].split("---JSON_END---")[0].strip()
         )
         bpf_data = json.loads(raw_json)
 
         print("=" * 100)
-        print(" [ I/O PROFILING REPORT (Perfect Tail-Biting Trace) ]")
+        print(f" [ I/O PROFILING REPORT | Duration: {effective_duration:.2f} seconds ]")
         print("=" * 100)
-
-        if fio_data and "jobs" in fio_data and len(fio_data["jobs"]) > 0:
-            job_opts = job_info.get("job options", {})
-
-            ioengine = job_opts.get("ioengine", "-")
-            rw = job_opts.get("rw", "-")
-            rwmixread = job_opts.get("rwmixread", "-")
-            bs = job_opts.get("bs", "-")
-            iodepth = job_opts.get("iodepth", "-")
-            numjobs = job_opts.get("numjobs", "-")
-            direct = job_opts.get("direct", "-")
-            size = job_opts.get("size", "-")
-            runtime_val = job_opts.get("runtime", "-")
-
-            print(" [ fio Evaluation Conditions ]")
-            print(f"  - IO Engine  : {ioengine}")
-            print(f"  - RW Pattern : {rw} (Read {rwmixread}%)")
-            print(f"  - Block Size : {bs}")
-            print(f"  - IO Depth   : {iodepth}")
-            print(f"  - Num Jobs   : {numjobs}")
-            print(f"  - Direct IO  : {direct}")
-            print(f"  - Target Size: {size}")
-            print(f"  - Runtime    : {runtime_val}s")
-            print("-" * 100)
 
         sys_stats = bpf_data.get("libaio_overhead", {})
         c2a_read = (
@@ -230,28 +160,29 @@ def run_benchmark(mode="generic"):
         phase_stats = {"U2Q": {}, "Q2D": {}, "D2C": {}, "C2A": {}, "A2U": {}}
         tot_q2d_cnt = tot_q2d_ms = tot_d2c_ms = 0
 
+        # 전체 IO 수 파악
+        total_sys_ios = 0
+        for dev in bpf_data["devices"]:
+            total_sys_ios += sum(op["total_count"] for op in dev["operations"].values())
+
         for dev in bpf_data["devices"]:
             ops = dev["operations"]
             bpf_total_cnt = sum(op["total_count"] for op in ops.values())
 
-            if bpf_total_cnt > (fio_total_ios * 0.1):
+            # 노이즈 필터링 (5% 이상)
+            if bpf_total_cnt > 0 and bpf_total_cnt > (total_sys_ios * 0.05):
                 real_name = get_real_dev_name(dev["dev_name"])
                 print(f" Target Device: {dev['dev_name']} [{real_name}]\n")
 
-                for op_name, fio_src, bpf_src, c2a_data, a2u_data in [
-                    ("READ", job_read, ops.get("read", {}), c2a_read, a2u_read),
-                    ("WRITE", job_write, ops.get("write", {}), c2a_write, a2u_write),
-                    ("READ-AHEAD", None, ops.get("read_ahead", {}), None, None),
-                    ("FLUSH", None, ops.get("flush", {}), c2a_flush, a2u_flush),
+                for op_name, bpf_src, c2a_data, a2u_data in [
+                    ("READ", ops.get("read", {}), c2a_read, a2u_read),
+                    ("WRITE", ops.get("write", {}), c2a_write, a2u_write),
+                    ("READ-AHEAD", ops.get("read_ahead", {}), None, None),
+                    ("FLUSH", ops.get("flush", {}), c2a_flush, a2u_flush),
                 ]:
                     if bpf_src:
                         q_cnt, q_ms, d_ms, c_cnt, c_ms = print_op_stats(
-                            op_name,
-                            fio_src,
-                            bpf_src,
-                            c2a_data,
-                            a2u_data,
-                            effective_duration,
+                            op_name, bpf_src, c2a_data, a2u_data, effective_duration
                         )
 
                         tot_q2d_cnt += q_cnt
@@ -288,9 +219,10 @@ def run_benchmark(mode="generic"):
                         else:
                             phase_stats["A2U"][op_name] = (0, 0, 0)
             else:
-                print(
-                    f" [Background Device: {dev['dev_name']}] Handled {bpf_total_cnt:,} IOs (Skipped)\n"
-                )
+                if bpf_total_cnt > 0:
+                    print(
+                        f" [Background Device: {dev['dev_name']}] Handled {bpf_total_cnt:,} IOs (Skipped)\n"
+                    )
 
         u2q_cnt = sys_stats.get("u2q_count", 0)
         u2q_sum_ms = sys_stats.get("u2q_lat_total", 0) / 1000000.0
@@ -362,17 +294,22 @@ def run_benchmark(mode="generic"):
         print_phase("U2Q (User->BLK_Q)", "U2Q")
         print_phase("Q2D (BLK_Q->Disp)", "Q2D")
         print_phase("D2C (Disp->Compl)", "D2C")
-        print_phase("C2A (Compl->AIO)", "C2A")
-        print_phase("A2U (AIO->User)", "A2U")
+        if mode != "generic":
+            print_phase("C2A (Compl->AIO)", "C2A")
+            print_phase("A2U (AIO->User)", "A2U")
         print("=" * table_width)
 
     except Exception as e:
         print(f"[-] Parsing Error: {e}")
+        print(f"Raw Output Snippet:\n{bpf_output[:500]}...")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run I/O Benchmark with eBPF Tracing")
+    parser = argparse.ArgumentParser(
+        description="Universal eBPF I/O Monitor & Profiler"
+    )
 
+    # 1. 모드 선택 (기존과 동일)
     parser.add_argument(
         "-m",
         "--mode",
@@ -382,6 +319,21 @@ if __name__ == "__main__":
         help="Select tracing mode: generic (default), libaio, iouring",
     )
 
+    # 2. 명령어 또는 파일 입력 (둘 중 하나만 사용 가능하도록 제한)
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "-c",
+        "--cmd",
+        type=str,
+        help="Command string to execute (e.g., -c 'fio --name=test --size=1G')",
+    )
+    group.add_argument(
+        "-f",
+        "--file",
+        type=str,
+        help="Shell script file to execute (e.g., -f ./run_workload.sh)",
+    )
+
     args = parser.parse_args()
 
-    run_benchmark(mode=args.mode)
+    run_benchmark(mode=args.mode, cmd=args.cmd, script_file=args.file)

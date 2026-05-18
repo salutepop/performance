@@ -76,10 +76,6 @@
 
 ### Infrastructure
 
-- [ ] **P0** quick smoke script as ci-baseline
-  - `scripts/smoke_quick.sh`: 이미 1차 버전 있음. 더 빡세게: 종료 코드 0 보장 + CSV row count > 0 + GPU 컬럼 있는지 체크 (있는 시스템에서)
-  - 매 BPF/sysmon 커밋 전 자동 실행 (DEV_RULES에 명시)
-
 - [ ] **P1** root-level cli entry
   - `pmon.py` (or `tools/pmon.py`) — io_profiler.py + report 통합 진입점
   - `pmon run --fio "..."` → 측정 후 자동으로 리포트 생성
@@ -112,6 +108,13 @@
   - 검증: 프로젝트 루트에서 `python3 ebpf/io_profiler.py ...` 호출이 동작
 
 ## Done (newest first)
+
+- [x] **P0** quick smoke script as ci-baseline (강화판)
+  - 7단계 검증으로 확장:
+    1) BPF 빌드, 2) io_profiler smoke, 3) 산출물 존재/행수, 4) topology JSON 스키마,
+    5) conditional GPU 컬럼 (topology에 GPU 있으면 sys CSV에도 있어야), 6) QD sanity,
+    7) report 생성 (HTML+MD) — HTML에 canvas + chart.js script 필수
+  - 검증: 7/7 단계 PASS, has_gpu=1 시 GPU 컬럼 확인됨
 
 - [x] **P0** markdown summary report
   - `report/md_report.py` 신규. html_report와 같은 loader 재사용

@@ -180,7 +180,7 @@ specs.forEach(function(spec) {{
 
 
 def _build_device_series(header, rows):
-    """device CSV → (labels[], series{op:{iops,bw,d2c}}). 모든 op timestamp 통합·정렬."""
+    """device CSV → (labels[], series{op:{iops,bw,d2c,p50,p99}}). 모든 op timestamp 통합·정렬."""
     if not header or not rows:
         return [], {}
     try:
@@ -191,6 +191,8 @@ def _build_device_series(header, rows):
         d2c_i = header.index("d2c_avg_us_interval")
     except ValueError:
         return [], {}
+    p50_i = header.index("d2c_p50_us") if "d2c_p50_us" in header else -1
+    p99_i = header.index("d2c_p99_us") if "d2c_p99_us" in header else -1
 
     def _f(v):
         try:
@@ -211,6 +213,8 @@ def _build_device_series(header, rows):
             "iops": _f(row[iops_i]) if iops_i < len(row) else None,
             "bw":   _f(row[bw_i])   if bw_i < len(row) else None,
             "d2c":  _f(row[d2c_i])  if d2c_i < len(row) else None,
+            "p50":  _f(row[p50_i])  if 0 <= p50_i < len(row) else None,
+            "p99":  _f(row[p99_i])  if 0 <= p99_i < len(row) else None,
         }
     series = {}
     for op, by_ts in op_data.items():
@@ -218,6 +222,8 @@ def _build_device_series(header, rows):
             "iops": [by_ts.get(t, {}).get("iops") for t in labels],
             "bw":   [by_ts.get(t, {}).get("bw")   for t in labels],
             "d2c":  [by_ts.get(t, {}).get("d2c")  for t in labels],
+            "p50":  [by_ts.get(t, {}).get("p50")  for t in labels],
+            "p99":  [by_ts.get(t, {}).get("p99")  for t in labels],
         }
     return labels, series
 
@@ -326,11 +332,17 @@ def _render_device_charts(dname, header, rows):
     if not labels or not series:
         return ""
     safe = re.sub(r"[^a-zA-Z0-9]", "_", dname)
+    # p50/p99 시리즈가 모두 None이면 제외 (구버전 CSV 호환).
+    has_p = any(any(v is not None for v in (s.get("p50") or []) + (s.get("p99") or []))
+                for s in series.values())
     charts = [
-        ("iops", "IOPS",      "ops/s"),
-        ("bw",   "Bandwidth", "MB/s"),
-        ("d2c",  "D2C Latency", "us"),
+        ("iops", "IOPS",        "ops/s"),
+        ("bw",   "Bandwidth",   "MB/s"),
+        ("d2c",  "D2C avg",     "us"),
     ]
+    if has_p:
+        charts.append(("p50", "D2C p50", "us"))
+        charts.append(("p99", "D2C p99 (tail latency)", "us"))
     parts = ["<div class='chart-row'>"]
     for metric, _, _ in charts:
         parts.append(f"<div class='chart-cell'><canvas id='chart_{safe}_{metric}'></canvas></div>")

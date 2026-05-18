@@ -27,6 +27,7 @@ prev_metrics = {}
 csv_buffers = {}
 prev_libaio = {}  # {key: count or total_ns}, per-interval delta 계산용 (u2q_count/lat, c2a_*, a2u_*)
 prev_sqcq = {}    # {dev_name: (same, diff)}, SQ↔CQ 일치 카운터의 인터벌 delta 계산용
+prev_hists = {}   # {(dev,op,'q2d'|'d2c'): [32 buckets]} — 인터벌 히스토그램 delta 계산
 
 
 # BPF op 이름 → libaio_overhead 필드 prefix 매핑. read_ahead/discard는 libaio 경로가 없어 None.
@@ -105,6 +106,9 @@ def save_csv_buffers():
         "c2a_avg_us_interval",
         "a2u_avg_us_interval",
         "sq_cq_diff_ratio",
+        "d2c_p50_us",
+        "d2c_p99_us",
+        "q2d_p99_us",
         "current_qd",
         "max_qd",
         "total_io_count",
@@ -140,7 +144,7 @@ def save_csv_buffers():
 
 
 def parse_and_store_metrics(json_str):
-    global prev_metrics, csv_buffers, prev_libaio
+    global prev_metrics, csv_buffers, prev_libaio, prev_hists
     try:
         bpf_data = json.loads(json_str)
         timestamp = datetime.now().strftime("%H:%M:%S")
@@ -239,6 +243,20 @@ def parse_and_store_metrics(json_str):
 
                 op_libaio = op_libaio_avg.get(op, {"c2a": 0.0, "a2u": 0.0})
 
+                # 인터벌 히스토그램 delta → 백분위 (32-bucket log2(ns))
+                curr_q2d_hist = stats.get("q2d_hist") or [0] * LAT_HIST_BUCKETS
+                curr_d2c_hist = stats.get("d2c_hist") or [0] * LAT_HIST_BUCKETS
+                pkey_q = (real_name, op, "q2d")
+                pkey_d = (real_name, op, "d2c")
+                prev_q = prev_hists.get(pkey_q, [0] * LAT_HIST_BUCKETS)
+                prev_d = prev_hists.get(pkey_d, [0] * LAT_HIST_BUCKETS)
+                delta_q = [max(0, curr_q2d_hist[i] - prev_q[i]) for i in range(LAT_HIST_BUCKETS)]
+                delta_d = [max(0, curr_d2c_hist[i] - prev_d[i]) for i in range(LAT_HIST_BUCKETS)]
+                prev_hists[pkey_q] = curr_q2d_hist
+                prev_hists[pkey_d] = curr_d2c_hist
+                q2d_pcts = compute_percentiles(delta_q, (99,))
+                d2c_pcts = compute_percentiles(delta_d, (50, 99))
+
                 row = {
                     "timestamp": timestamp,
                     "operation": op,
@@ -250,6 +268,9 @@ def parse_and_store_metrics(json_str):
                     "c2a_avg_us_interval": round(op_libaio["c2a"], 2),
                     "a2u_avg_us_interval": round(op_libaio["a2u"], 2),
                     "sq_cq_diff_ratio": round(sq_cq_diff_ratio, 4),
+                    "d2c_p50_us": round(d2c_pcts[50], 2) if d2c_pcts.get(50) is not None else None,
+                    "d2c_p99_us": round(d2c_pcts[99], 2) if d2c_pcts.get(99) is not None else None,
+                    "q2d_p99_us": round(q2d_pcts[99], 2) if q2d_pcts.get(99) is not None else None,
                     "current_qd": current_qd,
                     "max_qd": max_qd,
                     "total_io_count": curr_count,

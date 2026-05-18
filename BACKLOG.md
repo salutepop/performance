@@ -39,10 +39,6 @@
 
 ### Visualization (단일 HTML 리포트 우선)
 
-- [ ] **P1** latency percentile rendering
-  - p50/p95/p99/p99.9 시계열 line (A1/A2 완료 의존)
-  - 같은 HTML 리포트에 통합
-
 - [ ] **P2** multi-device comparison view
   - 한 세션에 N개 NVMe 있으면 device별 차트를 하나의 그리드에
   - 또는 normalized 한 패널에 overlay
@@ -100,6 +96,15 @@
   - 검증: 프로젝트 루트에서 `python3 ebpf/io_profiler.py ...` 호출이 동작
 
 ## Done (newest first)
+
+- [x] **P1** latency percentile rendering
+  - io_profiler.py: prev_hists dict로 (dev,op,phase)별 누적 histogram 추적,
+    인터벌 delta에 compute_percentiles 적용. CSV 신규 컬럼 d2c_p50_us,
+    d2c_p99_us, q2d_p99_us 추가
+  - html_report.py: device 차트 spec에 p50/p99 추가 (총 5개 차트:
+    iops/bw/d2c avg/p50/p99). p50/p99 데이터 없는 구버전 CSV는 자동 생략
+  - 검증: 4K randrw → 정상 인터벌 read p99=256us, write p99=150us
+    (첫 baseline은 preconditioning outlier로 16ms)
 
 - [x] **P1** lba heatmap chart
   - Device별 (LBA bucket × timestamp) 2D heatmap. HTML5 canvas 직접 그림 (Chart.js

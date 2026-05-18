@@ -155,6 +155,30 @@ class SystemMonitor:
                 self._numa_meminfo_paths[node] = p
         self._has_numa_meminfo = bool(self._numa_meminfo_paths)
 
+        # NVMe controller → PCI AER counter 파일 경로 매핑. 디바이스가 AER 미지원이면 skip.
+        ctrl_addrs = {}  # {ctrl_name: pci_addr} from discovered.nvme_ctrls
+        for c in self.sys_info.get("discovered", self.sys_info).get("nvme_ctrls", []) or []:
+            name = c.get("name")
+            addr = c.get("address")
+            if name and addr:
+                ctrl_addrs[name] = addr
+        self._aer_paths = {}  # {ctrl: {'cor': path, 'fatal': path, 'nonfatal': path}}
+        for ctrl in self._nvme_controllers:
+            addr = ctrl_addrs.get(ctrl)
+            if not addr:
+                continue
+            base = f"/sys/bus/pci/devices/{addr}"
+            paths = {}
+            for kind, fname in (("cor", "aer_dev_correctable"),
+                                ("fatal", "aer_dev_fatal"),
+                                ("nonfatal", "aer_dev_nonfatal")):
+                p = os.path.join(base, fname)
+                if os.path.exists(p):
+                    paths[kind] = p
+            if paths:
+                self._aer_paths[ctrl] = paths
+        self._has_aer = bool(self._aer_paths)
+
     def _dump_topology(self):
         path = os.path.join(self.output_dir, f"topology_{self.session_id}.json")
         with open(path, "w") as f:
@@ -185,6 +209,9 @@ class SystemMonitor:
         if self._has_numa_meminfo:
             for node in self._numa_meminfo_paths:
                 cols += [f"node{node}_mem_free_mb", f"node{node}_mem_used_mb"]
+        if self._has_aer:
+            for ctrl in self._aer_paths:
+                cols += [f"{ctrl}_aer_cor", f"{ctrl}_aer_fatal", f"{ctrl}_aer_nonfatal"]
         for idx in self._gpu_indices:
             cols += [
                 f"gpu{idx}_pwr_w", f"gpu{idx}_temp_c",
@@ -269,6 +296,30 @@ class SystemMonitor:
                 return float(f.read().split()[0])
         except Exception:
             return 0.0
+
+    def _read_aer(self):
+        """{ctrl: {cor, fatal, nonfatal}} - PCI AER TOTAL counters (raw 누적값).
+        파일 마지막 라인이 'TOTAL_ERR_<KIND> <N>' 형식."""
+        out = {}
+        for ctrl, paths in self._aer_paths.items():
+            vals = {}
+            for kind, p in paths.items():
+                try:
+                    with open(p) as f:
+                        last = 0
+                        for line in f:
+                            parts = line.split()
+                            if len(parts) >= 2 and parts[0].startswith("TOTAL_ERR_"):
+                                try:
+                                    last = int(parts[1])
+                                except ValueError:
+                                    pass
+                        vals[kind] = last
+                except Exception:
+                    pass
+            if vals:
+                out[ctrl] = vals
+        return out
 
     def _read_numa_meminfo_mb(self):
         """{node_id: {'free_mb': float, 'used_mb': float}}. 노드별 없으면 빈 dict."""
@@ -485,6 +536,14 @@ class SystemMonitor:
         row["pswpin_per_s"] = round(pswpin / elapsed, 1)
         row["pswpout_per_s"] = round(pswpout / elapsed, 1)
         row["loadavg_1m"] = load1
+
+        if self._has_aer:
+            aer = self._read_aer()
+            for ctrl in self._aer_paths:
+                v = aer.get(ctrl, {})
+                row[f"{ctrl}_aer_cor"] = v.get("cor", 0)
+                row[f"{ctrl}_aer_fatal"] = v.get("fatal", 0)
+                row[f"{ctrl}_aer_nonfatal"] = v.get("nonfatal", 0)
 
         if self._has_numa_meminfo:
             numa_mem = self._read_numa_meminfo_mb()

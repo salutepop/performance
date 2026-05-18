@@ -19,11 +19,6 @@
 
 ### System extensions
 
-- [ ] **P2** pcie aer counters (per-device)
-  - `/sys/bus/pci/devices/*/aer_dev_correctable`, `aer_dev_fatal` 등
-  - 활성화돼 있는 디바이스만 (대부분 0). NVMe 컨트롤러 대상으로만 노출
-  - 컬럼: `nvme{N}_aer_correctable, nvme{N}_aer_fatal`
-
 - [ ] **P2** smartctl integration (optional, if smartctl exists)
   - 1회성 metadata + 끝나고 1회 smart attributes dump
   - `which smartctl` 없으면 skip
@@ -78,6 +73,13 @@
   - 검증: 프로젝트 루트에서 `python3 ebpf/io_profiler.py ...` 호출이 동작
 
 ## Done (newest first)
+
+- [x] **P2** pcie aer counters (per-device)
+  - core/monitor.py: discovered.nvme_ctrls의 address로 PCI sysfs path 매핑.
+    aer_dev_{correctable,fatal,nonfatal} 파일 존재 검사 후 self._aer_paths
+  - 컬럼: {ctrl}_aer_{cor,fatal,nonfatal} (각 파일의 TOTAL_ERR_* 라인 raw 누적값)
+  - 없는 시스템/디바이스는 silent skip (컬럼 미생성)
+  - 검증: GB10 nvme0 → 모든 카운터 0 (정상), 컬럼 3개 정상 추가
 
 - [x] **P2** nvme controller sysfs stats
   - core/discovery.py에 `_discover_nvme_ctrls` 추가. 10개 attr 수집:

@@ -28,6 +28,22 @@ NVMe raw 디바이스에 직접 쓰는 워크로드가 많아 root/sudo 권한�
 
 > eBPF 서브시스템은 별도 문서가 있다: [`ebpf/CLAUDE.md`](./ebpf/CLAUDE.md). 이 폴더 코드를 만질 때는 그 문서를 먼저 읽을 것.
 
+### 시나리오 framework (scenarios/)
+
+새 scenario 베이스 클래스 (기존 `test_cases/*.py`는 deprecated, framework `main.py`에서 호출). 하위 클래스가 `fio_cmd()`와 (선택) `analyze(summary_json)`을 override. `.run()`은 pmon.py를 subprocess로 호출 후 summary.json을 분석해 `{pass: bool, ...}` 반환.
+
+```python
+from scenarios.base import Scenario
+class MyTest(Scenario):
+    name = "my_test"
+    def fio_cmd(self): return "fio --name=... ..."
+    def analyze(self, summary):
+        d2c = summary["devices"]["nvme0n1"]["ops"]["read"]["d2c_us_avg"]
+        return {"pass": d2c < 200}
+```
+
+실행: `python3 -m scenarios.<module>`. 종료 코드는 `analyze()`의 `pass` 키 따라감 (CI 친화). 예시: `scenarios/sample_randread.py`.
+
 ### 통합 CLI: `pmon.py`
 
 프로젝트 루트의 `pmon.py`가 모든 흐름을 묶는 진입점.

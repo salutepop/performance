@@ -33,11 +33,6 @@
 
 ### Test framework rewrite
 
-- [ ] **P2** new tc framework draft
-  - 기존 `test_cases/*.py` 다 ignore (한 번 backup 후 deprecated/ 로 이동)
-  - 신규 `scenarios/` (또는 `test_cases/` 재활용) — 새 SystemMonitor + 통합 리포트 활용하는 베이스 클래스
-  - 예시 시나리오 1~2개
-
 - [ ] **P3** scenario: pcie contention (fio + gpu workload)
   - GPU에 가벼운 매트릭스 곱 thread + 동시에 fio → PCIe band 경합 측정
 
@@ -50,6 +45,14 @@
   - 검증: 프로젝트 루트에서 `python3 ebpf/io_profiler.py ...` 호출이 동작
 
 ## Done (newest first)
+
+- [x] **P2** new tc framework draft
+  - 신규 `scenarios/` 디렉터리. 기존 test_cases/*.py는 그대로 유지 (deprecated).
+  - `scenarios/base.py`: `Scenario` 베이스 — `fio_cmd()` + `analyze()` override.
+    내부적으로 `pmon.py run` 호출 후 summary_<sid>.json 분석.
+    `analyze()` 반환의 `pass: bool`이 종료 코드에 반영 (CI 친화).
+  - `scenarios/sample_randread.py`: 5s 4K randread → d2c_avg < 1ms + total_io > 1000 검증.
+  - 검증: `python3 -m scenarios.sample_randread` → total_io=264K, d2c=110us, pass=True, exit=0
 
 - [x] **P2** ci-friendly smoke parameters
   - smoke_quick.sh: SIZE 256M → 64M 기본값, env로 override 가능 (SIZE/NUMJOBS/TMP_FIO/RUNTIME)

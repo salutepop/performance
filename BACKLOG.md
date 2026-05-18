@@ -8,11 +8,6 @@
 
 ### Foundation — eBPF / I/O 정확도 향상
 
-- [ ] **P0** add latency log2 histograms to BPF (q2d, d2c per type)
-  - `io_trace.h`: `struct lat_hist { unsigned long long buckets[32]; }` (1us~16ms log2). `rw_stats`에 `lat_hist q2d_hist`, `lat_hist d2c_hist` 추가
-  - `io_trace.bpf.c::block_rq_complete`: bucket = `log2(ns)`, 클램프, 해당 bucket++
-  - 검증: smoke 후 JSON에 `q2d_hist[32]`, `d2c_hist[32]` 컬럼 보이는지
-
 - [ ] **P0** expose latency histograms in JSON + python percentile calc
   - `io_trace.c::print_json_report`: histogram 배열 출력
   - `io_profiler.py`: `compute_percentiles(hist, [50,95,99,99.9])` 헬퍼, 최종 리포트에 p50/p95/p99/p99.9 행 추가
@@ -157,5 +152,9 @@
   - Preconditioning → mixed workload → p99 tail 변화 시각화
 
 ## Done (newest first)
+
+- [x] **P0** add latency log2 histograms to BPF (q2d, d2c per type)
+  - LAT_HIST_BUCKETS=32, `__builtin_clzll` 대신 수동 unroll loop (BPF target 호환)
+  - JSON에 `q2d_hist[32]`, `d2c_hist[32]` 출력 확인 (read d2c bucket 15-17 집중, bucket 23 꼬리 관찰됨)
 
 <!-- 루프가 완료한 task가 여기로 옮겨진다 -->

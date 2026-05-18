@@ -18,6 +18,7 @@ enum io_req_type {
 
 #define MAX_SIZE_BUCKETS 4
 #define LBA_BUCKETS 64
+#define LAT_HIST_BUCKETS 32   // log2(ns) buckets: 0=[1,2)ns ... 30=~1s. clamp to 31.
 
 struct lat_stats {
     unsigned long long total;
@@ -32,6 +33,8 @@ struct rw_stats {
     struct lat_stats d2c;
     unsigned long long size_hist[MAX_SIZE_BUCKETS];
     unsigned int lba_hist[LBA_BUCKETS]; // LBA 접근 빈도 버킷
+    unsigned long long q2d_hist[LAT_HIST_BUCKETS]; // log2(ns) latency 히스토그램 (percentile 계산용)
+    unsigned long long d2c_hist[LAT_HIST_BUCKETS];
 };
 
 struct io_stats {

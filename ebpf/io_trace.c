@@ -50,6 +50,10 @@ void print_json_report(struct bpf_map *device_stats_map, struct bpf_map *sys_sta
                 dev_total.stats[t].d2c.min = (unsigned long long)-1;
                 for (int b = 0; b < MAX_SIZE_BUCKETS; b++) dev_total.stats[t].size_hist[b] = 0;
                 for (int b = 0; b < LBA_BUCKETS; b++) dev_total.stats[t].lba_hist[b] = 0;
+                for (int b = 0; b < LAT_HIST_BUCKETS; b++) {
+                    dev_total.stats[t].q2d_hist[b] = 0;
+                    dev_total.stats[t].d2c_hist[b] = 0;
+                }
             }
 
             unsigned long long total_any_io = 0;
@@ -63,6 +67,10 @@ void print_json_report(struct bpf_map *device_stats_map, struct bpf_map *sys_sta
 
                         for (int b = 0; b < MAX_SIZE_BUCKETS; b++) tot_st->size_hist[b] += cpu_st->size_hist[b];
                         for (int b = 0; b < LBA_BUCKETS; b++) tot_st->lba_hist[b] += cpu_st->lba_hist[b];
+                        for (int b = 0; b < LAT_HIST_BUCKETS; b++) {
+                            tot_st->q2d_hist[b] += cpu_st->q2d_hist[b];
+                            tot_st->d2c_hist[b] += cpu_st->d2c_hist[b];
+                        }
                         tot_st->q2d.total += cpu_st->q2d.total;
                         if (cpu_st->q2d.max > tot_st->q2d.max) tot_st->q2d.max = cpu_st->q2d.max;
                         if (cpu_st->q2d.min < tot_st->q2d.min) tot_st->q2d.min = cpu_st->q2d.min;
@@ -119,7 +127,19 @@ void print_json_report(struct bpf_map *device_stats_map, struct bpf_map *sys_sta
                         printf("            \"total_lat_ns\": %llu,\n", dev_total.stats[t].d2c.total);
                         printf("            \"min_lat_ns\": %llu,\n", dev_total.stats[t].d2c.min == (unsigned long long)-1 ? 0 : dev_total.stats[t].d2c.min);
                         printf("            \"max_lat_ns\": %llu\n", dev_total.stats[t].d2c.max);
-                        printf("          }\n");
+                        printf("          },\n");
+
+                        printf("          \"q2d_hist\": [");
+                        for (int b = 0; b < LAT_HIST_BUCKETS; b++) {
+                            printf("%llu%s", dev_total.stats[t].q2d_hist[b], (b == LAT_HIST_BUCKETS - 1) ? "" : ",");
+                        }
+                        printf("],\n");
+
+                        printf("          \"d2c_hist\": [");
+                        for (int b = 0; b < LAT_HIST_BUCKETS; b++) {
+                            printf("%llu%s", dev_total.stats[t].d2c_hist[b], (b == LAT_HIST_BUCKETS - 1) ? "" : ",");
+                        }
+                        printf("]\n");
                         printf("        }");
                         first_op = 0;
                     }

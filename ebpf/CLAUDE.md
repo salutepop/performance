@@ -74,7 +74,7 @@ Maps (전부 `io_trace.bpf.c`의 `SEC(".maps")`에서 선언):
 
 핵심 데이터 구조 (`io_trace.h`):
 - `io_req_type`: READ=0, READ_AHEAD=1, WRITE=2, FLUSH=3, DISCARD=4 — 이 순서는 C와 Python 양쪽이 의존한다.
-- `rw_stats`: io_count, total_bytes, q2d(lat_stats), d2c(lat_stats), size_hist[4], lba_hist[64], current_qd, max_qd.
+- `rw_stats`: io_count, total_bytes, q2d/d2c(lat_stats), size_hist[4], lba_hist[64], **q2d_hist[32], d2c_hist[32]** (log2(ns) latency buckets — bucket b = `floor(log2(ns))`, b=0이 1~2ns, b=10이 ~1us, b=20이 ~1ms, b=30이 ~1s; LAT_HIST_BUCKETS-1로 clamp). QD는 별도 `device_qd` 맵.
 - `lat_stats`: total/max/min (ns 단위).
 - 디바이스 키 인코딩: `(major << 20) | minor`. unpack은 `major = key >> 20`, `minor = key & 0xFFFFF`.
 - 사이즈 히스토그램 버킷: `<=4K | 4K~32K | 32K~128K | >128K` (4-bucket, `block_rq_complete`에서 분류).
@@ -107,7 +107,9 @@ JSON 스키마 (이게 layer 사이 contract):
           "size_hist": [u64, u64, u64, u64],
           "lba_hist": [u32 × 64],
           "q2d": {"total_lat_ns": u64, "min_lat_ns": u64, "max_lat_ns": u64},
-          "d2c": {"total_lat_ns": u64, "min_lat_ns": u64, "max_lat_ns": u64}
+          "d2c": {"total_lat_ns": u64, "min_lat_ns": u64, "max_lat_ns": u64},
+          "q2d_hist": [u64 × 32],  // log2(ns) latency buckets
+          "d2c_hist": [u64 × 32]
         }
       }
     }

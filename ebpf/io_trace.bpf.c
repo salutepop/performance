@@ -7,6 +7,18 @@
 char LICENSE[] SEC("license") = "GPL";
 #define BPF_REQ_RAHEAD (1ULL << 19)
 
+/* log2(ns) bucket index. ns==0이면 0, 그 외는 floor(log2(ns)). clamp [0, LAT_HIST_BUCKETS-1].
+ * BPF target에 __builtin_clzll 미구현 → 수동 shift 루프 (bounded, verifier-friendly). */
+static __always_inline u32 lat_bucket(u64 ns) {
+    if (ns == 0) return 0;
+    u32 b = 0;
+    #pragma unroll
+    for (u32 i = 1; i < LAT_HIST_BUCKETS; i++) {
+        if (ns >> i) b = i;
+    }
+    return b;
+}
+
 const volatile bool opt_trace_libaio = false;
 
 struct bio_start_ctx {
@@ -382,6 +394,10 @@ int BPF_PROG(block_rq_complete, struct request *rq, int error, unsigned int nr_b
                         init_s->stats[i].d2c.min = (unsigned long long)-1;
                         for(int b=0; b<MAX_SIZE_BUCKETS; b++) init_s->stats[i].size_hist[b] = 0;
                         for(int b=0; b<LBA_BUCKETS; b++) init_s->stats[i].lba_hist[b] = 0;
+                        for(int b=0; b<LAT_HIST_BUCKETS; b++) {
+                            init_s->stats[i].q2d_hist[b] = 0;
+                            init_s->stats[i].d2c_hist[b] = 0;
+                        }
                     }
                     bpf_map_update_elem(&device_stats, &dev, init_s, BPF_ANY);
                     s = bpf_map_lookup_elem(&device_stats, &dev);
@@ -402,11 +418,13 @@ int BPF_PROG(block_rq_complete, struct request *rq, int error, unsigned int nr_b
                 target->d2c.total += d2c_lat;
                 if (d2c_lat > target->d2c.max) target->d2c.max = d2c_lat;
                 if (target->d2c.min == (unsigned long long)-1 || d2c_lat < target->d2c.min) target->d2c.min = d2c_lat;
+                target->d2c_hist[lat_bucket(d2c_lat)]++;
 
                 if (q2d_lat > 0) {
                     target->q2d.total += q2d_lat;
                     if (q2d_lat > target->q2d.max) target->q2d.max = q2d_lat;
                     if (target->q2d.min == (unsigned long long)-1 || q2d_lat < target->q2d.min) target->q2d.min = q2d_lat;
+                    target->q2d_hist[lat_bucket(q2d_lat)]++;
                 }
 
                 u64 sector = BPF_CORE_READ(rq, __sector);

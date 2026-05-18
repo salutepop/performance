@@ -36,6 +36,7 @@ struct trace_ctx {
     u64 issue_ts;
     u64 q2d_lat;
     u64 pid_tgid;
+    u32 issue_cpu;
 };
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
@@ -322,7 +323,8 @@ int BPF_PROG(block_rq_issue, struct request *rq) {
         }
     }
 
-    struct trace_ctx tctx = { .issue_ts = ts, .q2d_lat = q2d_lat, .pid_tgid = pid_tgid };
+    u32 issue_cpu = bpf_get_smp_processor_id();
+    struct trace_ctx tctx = { .issue_ts = ts, .q2d_lat = q2d_lat, .pid_tgid = pid_tgid, .issue_cpu = issue_cpu };
     bpf_map_update_elem(&req_start, &req_ptr, &tctx, BPF_ANY);
 
     // QD 추적: device_qd(글로벌 HASH)에 cross-CPU atomic으로 증감.
@@ -437,9 +439,16 @@ int BPF_PROG(block_rq_complete, struct request *rq, int error, unsigned int nr_b
             }
 
             // QD 추적: 완료 시 글로벌 카운터에서 감소 (cross-CPU atomic).
+            // SQ(issue CPU) vs CQ(현재 CPU) 일치 여부도 동시 집계 — NVMe 큐 affinity 진단용.
             struct dev_qd *qd = bpf_map_lookup_elem(&device_qd, &dev);
             if (qd) {
                 __sync_fetch_and_add(&qd->current_qd[type], -1);
+                u32 cq_cpu = bpf_get_smp_processor_id();
+                if (cq_cpu == tctx->issue_cpu) {
+                    __sync_fetch_and_add(&qd->sq_cq_same, 1);
+                } else {
+                    __sync_fetch_and_add(&qd->sq_cq_diff, 1);
+                }
             }
         }
     }

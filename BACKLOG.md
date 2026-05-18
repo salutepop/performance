@@ -8,11 +8,6 @@
 
 ### Foundation — eBPF / I/O 정확도 향상
 
-- [ ] **P1** record per-request issue cpu + complete cpu (sq/cq divergence stat)
-  - BPF: `req_start` ctx에 `issue_cpu`, `block_rq_complete`에서 현재 CPU 비교
-  - 통계: `sq_cq_same_count`, `sq_cq_diff_count` 글로벌 카운터 (또는 device_qd 옆)
-  - JSON / CSV에 비율 노출
-
 - [ ] **P1** sub-second sampling support
   - `io_trace.c`: `sleep(1)` 고정 루프 → `usleep(opt_interval * 1000000)` 으로 변경 (단, `opt_interval` float 받도록)
   - argparse도 float 허용
@@ -148,6 +143,12 @@
   - 검증: 프로젝트 루트에서 `python3 ebpf/io_profiler.py ...` 호출이 동작
 
 ## Done (newest first)
+
+- [x] **P1** record per-request issue cpu + complete cpu (sq/cq divergence stat)
+  - `trace_ctx`에 issue_cpu 추가, `block_rq_issue`에서 `bpf_get_smp_processor_id()` 저장
+  - `block_rq_complete`에서 현재 CPU 비교 → `device_qd.sq_cq_same`/`sq_cq_diff` atomic 증가
+  - JSON에 device-level `sqcq` 객체, CSV에 `sq_cq_diff_ratio` 컬럼, final report에 same/diff% 라인 + NUMA 진단 안내
+  - 검증: 4K randread → same 68.9% / diff 31.1% 관찰 (워크로드와 NVMe IRQ CPU 다름)
 
 - [x] **P0** per-interval libaio overhead in csv
   - `prev_libaio` 모듈 dict로 인터벌 delta 추적, `_LIBAIO_OP_KEY` 매핑으로 BPF op↔libaio 필드 연결

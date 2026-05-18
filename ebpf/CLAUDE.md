@@ -111,7 +111,8 @@ JSON 스키마 (이게 layer 사이 contract):
           "q2d_hist": [u64 × 32],  // log2(ns) latency buckets
           "d2c_hist": [u64 × 32]
         }
-      }
+      },
+      "sqcq": {"same": u64, "diff": u64}    // device-level: SQ(issue) CPU == CQ(complete) CPU 여부 누적
     }
   ],
   "libaio_overhead": {
@@ -138,7 +139,7 @@ JSON 스키마 (이게 layer 사이 contract):
 
 CSV 출력 위치: `./csv_results/{real_dev_name}_{SESSION_ID}.csv` (SESSION_ID는 모듈 로드 시 한 번 생성). 디바이스 이름은 `dev(maj:min)` → `/sys/dev/block/maj:min` realpath로 `nvme0n1` 같은 실명으로 변환.
 
-CSV 컬럼: timestamp, operation, iops_interval, bandwidth_mb_s_interval, q2d_avg_us_interval, d2c_avg_us_interval, **u2q_avg_us_interval, c2a_avg_us_interval, a2u_avg_us_interval** (libaio 모드에서만 0 이상 값), current_qd, max_qd, total_io_count, total_bytes, q2d/d2c {total,min,max}_ns, size_hist_{4k,32k,128k,large}, lba_0 … lba_63. u2q는 글로벌(같은 인터벌 내 모든 행 동일). c2a/a2u는 op별이며 read_ahead/discard는 libaio 경로 없어 0.
+CSV 컬럼: timestamp, operation, iops_interval, bandwidth_mb_s_interval, q2d_avg_us_interval, d2c_avg_us_interval, **u2q_avg_us_interval, c2a_avg_us_interval, a2u_avg_us_interval** (libaio 모드에서만 0 이상 값), **sq_cq_diff_ratio** (디바이스 단위, 같은 인터벌의 모든 op row에 동일), current_qd, max_qd, total_io_count, total_bytes, q2d/d2c {total,min,max}_ns, size_hist_{4k,32k,128k,large}, lba_0 … lba_63. u2q는 글로벌(같은 인터벌 내 모든 행 동일). c2a/a2u는 op별이며 read_ahead/discard는 libaio 경로 없어 0.
 
 ## Build / Run
 

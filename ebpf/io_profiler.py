@@ -26,6 +26,7 @@ SESSION_ID = datetime.now().strftime("%Y%m%d_%H%M%S")
 prev_metrics = {}
 csv_buffers = {}
 prev_libaio = {}  # {key: count or total_ns}, per-interval delta 계산용 (u2q_count/lat, c2a_*, a2u_*)
+prev_sqcq = {}    # {dev_name: (same, diff)}, SQ↔CQ 일치 카운터의 인터벌 delta 계산용
 
 
 # BPF op 이름 → libaio_overhead 필드 prefix 매핑. read_ahead/discard는 libaio 경로가 없어 None.
@@ -103,6 +104,7 @@ def save_csv_buffers():
         "u2q_avg_us_interval",
         "c2a_avg_us_interval",
         "a2u_avg_us_interval",
+        "sq_cq_diff_ratio",
         "current_qd",
         "max_qd",
         "total_io_count",
@@ -186,6 +188,16 @@ def parse_and_store_metrics(json_str):
             if real_name not in csv_buffers:
                 csv_buffers[real_name] = []
 
+            # SQ/CQ divergence delta (디바이스 단위, 인터벌 내 비율로 변환).
+            sqcq = dev.get("sqcq", {}) or {}
+            curr_same = sqcq.get("same", 0)
+            curr_diff = sqcq.get("diff", 0)
+            prev_same, prev_diff = prev_sqcq.get(real_name, (0, 0))
+            prev_sqcq[real_name] = (curr_same, curr_diff)
+            ds = max(0, curr_same - prev_same)
+            dd = max(0, curr_diff - prev_diff)
+            sq_cq_diff_ratio = (dd / (ds + dd)) if (ds + dd) > 0 else 0.0
+
             for op, stats in dev.get("operations", {}).items():
                 curr_count = stats.get("total_count", 0)
                 if curr_count == 0:
@@ -237,6 +249,7 @@ def parse_and_store_metrics(json_str):
                     "u2q_avg_us_interval": round(u2q_avg_us_interval, 2),
                     "c2a_avg_us_interval": round(op_libaio["c2a"], 2),
                     "a2u_avg_us_interval": round(op_libaio["a2u"], 2),
+                    "sq_cq_diff_ratio": round(sq_cq_diff_ratio, 4),
                     "current_qd": current_qd,
                     "max_qd": max_qd,
                     "total_io_count": curr_count,
@@ -393,7 +406,15 @@ def print_final_summary(raw_json, effective_duration, mode):
             bpf_total_cnt = sum(op["total_count"] for op in ops.values())
             if bpf_total_cnt > 0 and bpf_total_cnt > (total_sys_ios * 0.05):
                 real_name = get_real_dev_name(dev["dev_name"])
-                print(f" Target Device: {dev['dev_name']} [{real_name}]\n")
+                print(f" Target Device: {dev['dev_name']} [{real_name}]")
+                sqcq = dev.get("sqcq", {}) or {}
+                _same = sqcq.get("same", 0)
+                _diff = sqcq.get("diff", 0)
+                _tot = _same + _diff
+                if _tot > 0:
+                    print(f"   SQ↔CQ same={_same:,} ({_same/_tot*100:.1f}%) | diff={_diff:,} ({_diff/_tot*100:.1f}%) "
+                          f"→ {'NUMA-local OK' if _diff/_tot < 0.05 else 'CROSS-CPU completion (IRQ affinity 확인)'}")
+                print()
 
                 for op_name, bpf_src, c2a_data, a2u_data in [
                     ("READ", ops.get("read", {}), c2a_read, a2u_read),

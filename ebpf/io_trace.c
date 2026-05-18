@@ -144,7 +144,10 @@ void print_json_report(struct bpf_map *device_stats_map, struct bpf_map *sys_sta
                         first_op = 0;
                     }
                 }
-                printf("\n      }\n    }");
+                printf("\n      },\n");
+                printf("      \"sqcq\": {\"same\": %llu, \"diff\": %llu}\n",
+                       qd_data.sq_cq_same, qd_data.sq_cq_diff);
+                printf("    }");
                 first_dev = 0;
             }
         }

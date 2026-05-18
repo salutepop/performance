@@ -50,6 +50,9 @@ struct io_stats {
 struct dev_qd {
     int current_qd[IO_MAX_TYPES];
     unsigned int max_qd[IO_MAX_TYPES];
+    /* SQ(issue) CPU와 CQ(complete) CPU 일치/불일치 카운트. cross-CPU atomic. */
+    unsigned long long sq_cq_same;
+    unsigned long long sq_cq_diff;
 };
 
 struct libaio_stats {

@@ -49,11 +49,6 @@
 
 ### Reporting
 
-- [ ] **P1** session comparison diff
-  - `report/diff.py`: 두 session 디렉터리 입력 → 차이 리포트 (md+html)
-  - IOPS/BW/lat 통계 비교, regression 후보 highlight (>5% 변동)
-  - 검증: 같은 session 두 번 주면 모든 diff가 ~0
-
 - [ ] **P1** json summary export
   - `report/summary.py`: session → `summary_{session}.json` (programmatic consumption)
   - 스키마 평탄화: device별 totals + system 평균/peak + gpu peak
@@ -96,6 +91,14 @@
   - 검증: 프로젝트 루트에서 `python3 ebpf/io_profiler.py ...` 호출이 동작
 
 ## Done (newest first)
+
+- [x] **P1** session comparison diff
+  - `report/diff.py` 신규. md_report의 _device_aggregates/_system_aggregates 재사용
+  - CLI: --baseline / --candidate (SID 또는 폴더 경로). --session-dir 옵션
+  - 출력: op별 IOPS/BW/D2C/peak QD, system per-node CPU%/IRQ rate/GPU peak 변동률.
+    Marker: ⚠ |Δ|≥5%, ⛔ |Δ|≥20%, baseline 0 또는 None은 marker 없음
+  - 검증: same-same → 모든 변동 +0.0% (legend 외 marker 0건);
+    다른 세션 → 10개 marker (read_ahead BW -60%/D2C +470% ⛔ 등 정확히 잡힘)
 
 - [x] **P1** latency percentile rendering
   - io_profiler.py: prev_hists dict로 (dev,op,phase)별 누적 histogram 추적,

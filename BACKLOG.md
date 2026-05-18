@@ -10,6 +10,7 @@
 
 - [ ] **P1** io_uring mode support  **BLOCKED:** 단일 이터레이션 범위 초과 — 신규 BPF 프로그램 2개(io_uring_submit_req/io_uring_complete) + 신규 latency 누적 struct + 신규 글로벌 map + JSON 스키마 확장 + Python parse/리포트 통합 + fio io_uring 검증까지 필요. 아래 sub-task로 분할.
   - 6.11 커널 기준 tracepoint 이름: `io_uring/io_uring_submit_req`(SQE 제출), `io_uring/io_uring_complete`(CQE 푸시), 옵션 `io_uring/io_uring_cqring_wait`.
+- [ ] **P3** md_report: D2C/Q2D avg를 iops 가중평균으로 (현재 단순 mean이 첫 인터벌 outlier에 끌림)
 - [ ] **P2** iouring-1: BPF struct + 2개 tracepoint hook + map
 - [ ] **P2** iouring-2: io_trace.c userspace -m iouring 분기 + iouring_overhead JSON
 - [ ] **P2** iouring-3: io_profiler.py 통합 + fio --ioengine=io_uring 검증
@@ -59,11 +60,6 @@
   - inline SVG (외부 라이브러리 안 씀)
 
 ### Reporting
-
-- [ ] **P0** markdown summary report
-  - `report/md_report.py`: HTML과 동일 입력 → `report_{session}.md`
-  - 표 + 핵심 숫자 (총 IOPS, BW, p99, dirty/iowait, GPU peak)
-  - "Top findings" 자동 추출 (예: top NUMA node CPU%, top IRQ CPU 등)
 
 - [ ] **P1** session comparison diff
   - `report/diff.py`: 두 session 디렉터리 입력 → 차이 리포트 (md+html)
@@ -116,6 +112,13 @@
   - 검증: 프로젝트 루트에서 `python3 ebpf/io_profiler.py ...` 호출이 동작
 
 ## Done (newest first)
+
+- [x] **P0** markdown summary report
+  - `report/md_report.py` 신규. html_report와 같은 loader 재사용
+  - Top findings auto-extract: SQ/CQ diff, iowait peak, dirty mem, GPU 활동, 가장 바쁜 NUMA node
+  - Device I/O aggregate (op별 총 IO/peak BW/avg lat/peak QD), CPU per-node, mem/vm,
+    NVMe IRQ rate, GPU peak — 5 markdown 테이블
+  - 검증: GB10 세션에서 1.5KB MD 출력, 3개 finding 자동 생성
 
 - [x] **P0** time-series charts (chart.js via cdn)
   - 디바이스별 3개 line chart: IOPS / Bandwidth / D2C latency (op 색 분리)

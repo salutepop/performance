@@ -30,7 +30,10 @@ NVMe raw 디바이스에 직접 쓰는 워크로드가 많아 root/sudo 권한�
 
 ### 리포트 생성 (report/)
 
-세션 산출물(topology_*.json, system_metrics_*.csv, <device>_*.csv)을 자기완결 HTML로 변환. 외부 리소스 0 (인터넷 없는 환경에서도 동작). 사용: `python3 -m report.html_report --session-dir <dir> [--session-id SID] [-o out.html]`. session-id 생략 시 가장 최근 topology_*.json 자동 선택. topology 요약 + CSV 테이블 + 디바이스별 시계열 차트 3개 (IOPS/BW/D2C latency, operation 색 분리). 차트는 `<script src="https://cdn.jsdelivr.net/npm/chart.js@4">`를 통한 CDN 로드 — 오프라인 환경에서는 차트 자리에 "Chart.js CDN unreachable" 메시지 표시되고 테이블은 정상 렌더.
+세션 산출물(topology_*.json, system_metrics_*.csv, <device>_*.csv)을 자기완결 리포트로 변환. session-id 생략 시 가장 최근 topology_*.json 자동 선택.
+
+- HTML: `python3 -m report.html_report --session-dir <dir> [--session-id SID] [-o out.html]` — topology 요약 + CSV 테이블 + 디바이스별 시계열 차트 3개 (IOPS/BW/D2C latency, operation 색 분리). 차트는 `<script src="https://cdn.jsdelivr.net/npm/chart.js@4">`를 통한 CDN 로드 — 오프라인 환경에서는 차트 자리에 "Chart.js CDN unreachable" 메시지 표시되고 테이블은 정상 렌더.
+- Markdown: `python3 -m report.md_report ...` — Top findings(SQ/CQ, iowait, GPU 활동, top NUMA node) + Topology/Device aggregate/System aggregate 요약 테이블만 (포터블 텍스트, ~1.5KB).
 
 ```bash
 cd ebpf

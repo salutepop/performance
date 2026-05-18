@@ -12,27 +12,19 @@
   - 6.11 커널 기준 tracepoint 이름: `io_uring/io_uring_submit_req`(SQE 제출), `io_uring/io_uring_complete`(CQE 푸시), 옵션 `io_uring/io_uring_cqring_wait`.
 - [ ] **P3** md_report: D2C/Q2D avg를 iops 가중평균으로 (현재 단순 mean이 첫 인터벌 outlier에 끌림)
 - [ ] **P3** html/md report에 nvme_ctrls 상세(model/firmware/queue_count) 표시 — 데이터는 이미 topology.json에 캡처됨
-- [ ] **P2** iouring-1: BPF struct + 2개 tracepoint hook + map
-- [ ] **P2** iouring-2: io_trace.c userspace -m iouring 분기 + iouring_overhead JSON
-- [ ] **P2** iouring-3: io_profiler.py 통합 + fio --ioengine=io_uring 검증
-  - 셋이 묶음 단위. 한 세션에서 연속 작업하는 게 효율적이라 P2로 demote.
+- [ ] **P2** iouring-1: BPF struct + 2개 tracepoint hook + map  **BLOCKED:** io_uring 워크로드(fio --ioengine=io_uring) 검증 인프라 필요. 셋이 묶음 단위라 연속 작업하는 게 효율적.
+- [ ] **P2** iouring-2: io_trace.c userspace -m iouring 분기 + iouring_overhead JSON  **BLOCKED:** iouring-1 의존
+- [ ] **P2** iouring-3: io_profiler.py 통합 + fio --ioengine=io_uring 검증  **BLOCKED:** iouring-1/2 의존
 
 ### System extensions
 
-- [ ] **P2** smartctl integration (optional, if smartctl exists)
-  - 1회성 metadata + 끝나고 1회 smart attributes dump
-  - `which smartctl` 없으면 skip
-  - 출력: `smart_{session}.json`
+- [ ] **P2** smartctl integration (optional, if smartctl exists)  **BLOCKED:** smartctl가 NVMe 블록 디바이스 접근에 root 필요. 현재 NOPASSWD sudoers에 미포함이라 자율 루프에서 검증 불가.
 
 - [ ] **P3** network stats for nvme-of (if applicable)
   - `/proc/net/dev`, ConnectX nic 같은 게 있으면 잡기
   - 일반 시스템엔 noise이므로 explicit opt-in (config 플래그)
 
 ### Visualization (단일 HTML 리포트 우선)
-
-- [ ] **P2** multi-device comparison view
-  - 한 세션에 N개 NVMe 있으면 device별 차트를 하나의 그리드에
-  - 또는 normalized 한 패널에 overlay
 
 - [ ] **P2** topology svg diagram
   - cpu cores ↔ NUMA nodes ↔ nvme controllers ↔ gpus 단순 SVG
@@ -73,6 +65,11 @@
   - 검증: 프로젝트 루트에서 `python3 ebpf/io_profiler.py ...` 호출이 동작
 
 ## Done (newest first)
+
+- [x] **P2** multi-device comparison view
+  - HTML 리포트 Device I/O 섹션 맨 위에 "Overview" 패널 추가.
+  - 디바이스별 (op 합산) IOPS / BW 시계열을 한 차트에 색 분리해 overlay.
+  - 1 device → 1 line (현 환경), N device → N lines (자동 비교).
 
 - [x] **P2** pcie aer counters (per-device)
   - core/monitor.py: discovered.nvme_ctrls의 address로 PCI sysfs path 매핑.

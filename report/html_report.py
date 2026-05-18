@@ -327,6 +327,81 @@ ctx.fillText(`max ${{mx.toLocaleString()}}`, padL, H - 4);
 }})();</script>"""
 
 
+def _render_multi_device_overview(device_csv_paths):
+    """여러 device CSV를 한 패널에 overlay — 디바이스별 op-합산 IOPS/BW 시계열.
+    1개 device면 자연스럽게 1 line, N개면 N lines (디바이스 비교 가능)."""
+    if not device_csv_paths:
+        return ""
+    # device 단위 합계: 같은 timestamp에서 모든 op iops/bw 합
+    per_dev = {}   # {dname: {ts: {'iops': N, 'bw': N}}}
+    all_ts_order = []
+    seen_ts = set()
+    for dpath in device_csv_paths:
+        h, r = _load_csv(dpath)
+        if not h or not r:
+            continue
+        try:
+            ts_i = h.index("timestamp")
+            iops_i = h.index("iops_interval")
+            bw_i = h.index("bandwidth_mb_s_interval")
+        except ValueError:
+            continue
+        dn = os.path.basename(dpath)
+        dn = re.sub(r"_\d{8}_\d{6}\.csv$", "", dn)
+        bucket = per_dev.setdefault(dn, {})
+        for row in r:
+            ts = row[ts_i] if ts_i < len(row) else ""
+            if not ts:
+                continue
+            if ts not in seen_ts:
+                all_ts_order.append(ts); seen_ts.add(ts)
+            cell = bucket.setdefault(ts, {"iops": 0.0, "bw": 0.0})
+            try:
+                cell["iops"] += float(row[iops_i] or 0)
+                cell["bw"] += float(row[bw_i] or 0)
+            except ValueError:
+                pass
+    if not per_dev:
+        return ""
+
+    series_iops = {dn: [per_dev[dn].get(t, {}).get("iops") for t in all_ts_order] for dn in per_dev}
+    series_bw   = {dn: [per_dev[dn].get(t, {}).get("bw")   for t in all_ts_order] for dn in per_dev}
+    payload = {"labels": all_ts_order, "iops": series_iops, "bw": series_bw}
+    payload_json = json.dumps(payload, separators=(",", ":"))
+    palette = json.dumps(_PALETTE)
+    return f"""<h3>Overview (디바이스 비교)</h3>
+<div class='chart-row'>
+<div class='chart-cell'><canvas id='chart_multi_iops'></canvas></div>
+<div class='chart-cell'><canvas id='chart_multi_bw'></canvas></div>
+</div>
+<script>(function() {{
+if (typeof Chart === 'undefined') {{
+  document.querySelectorAll('[id^="chart_multi_"]').forEach(c => c.parentNode.innerHTML = '<p class=\\'chart-warn\\'>Chart.js CDN unreachable.</p>');
+  return;
+}}
+const p = {payload_json};
+const palette = {palette};
+[['chart_multi_iops','iops','IOPS (per device, ops/s)','ops/s'],
+ ['chart_multi_bw','bw','Bandwidth (per device, MB/s)','MB/s']].forEach(function(spec) {{
+  const cid = spec[0], metric = spec[1], title = spec[2], yl = spec[3];
+  const ctx = document.getElementById(cid);
+  if (!ctx) return;
+  const devNames = Object.keys(p[metric]);
+  const datasets = devNames.map(function(dn, i) {{
+    return {{label: dn, data: p[metric][dn], borderColor: palette[i % palette.length],
+             backgroundColor: 'transparent', pointRadius: 1, tension: 0.2, spanGaps: true}};
+  }});
+  new Chart(ctx.getContext('2d'), {{
+    type: 'line', data: {{labels: p.labels, datasets: datasets}},
+    options: {{responsive: true, maintainAspectRatio: false, animation: false,
+               plugins: {{title: {{display: true, text: title}}, legend: {{position: 'bottom'}}}},
+               scales: {{y: {{title: {{display: true, text: yl}}, beginAtZero: true}},
+                         x: {{ticks: {{maxTicksLimit: 12}}}}}}}}
+  }});
+}});
+}})();</script>"""
+
+
 def _render_device_charts(dname, header, rows):
     labels, series = _build_device_series(header, rows)
     if not labels or not series:
@@ -499,6 +574,7 @@ def build_report(session_dir, sid):
     if not device_csvs:
         parts.append("<p><em>device CSV 없음</em></p>")
     else:
+        parts.append(_render_multi_device_overview(device_csvs))
         for dpath in device_csvs:
             dname = os.path.basename(dpath)
             parts.append(f"<h3>{html.escape(dname)}</h3>")

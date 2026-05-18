@@ -144,6 +144,17 @@ class SystemMonitor:
                 self._cpufreq_paths[cpu_id] = p
         self._has_cpufreq = bool(self._cpufreq_paths)
 
+        # per-NUMA meminfo 존재 여부. 단일 노드 fallback("all")인 경우 글로벌 meminfo 사용
+        # 이미 있으므로 sysfs 확인 안 함.
+        self._numa_meminfo_paths = {}
+        for node in self._nodes:
+            if node == "all":
+                continue
+            p = f"/sys/devices/system/node/node{node}/meminfo"
+            if os.path.exists(p):
+                self._numa_meminfo_paths[node] = p
+        self._has_numa_meminfo = bool(self._numa_meminfo_paths)
+
     def _dump_topology(self):
         path = os.path.join(self.output_dir, f"topology_{self.session_id}.json")
         with open(path, "w") as f:
@@ -171,6 +182,9 @@ class SystemMonitor:
         if self._has_cpufreq:
             for node in self._nodes:
                 cols += [f"node{node}_freq_avg_mhz", f"node{node}_freq_max_mhz"]
+        if self._has_numa_meminfo:
+            for node in self._numa_meminfo_paths:
+                cols += [f"node{node}_mem_free_mb", f"node{node}_mem_used_mb"]
         for idx in self._gpu_indices:
             cols += [
                 f"gpu{idx}_pwr_w", f"gpu{idx}_temp_c",
@@ -255,6 +269,37 @@ class SystemMonitor:
                 return float(f.read().split()[0])
         except Exception:
             return 0.0
+
+    def _read_numa_meminfo_mb(self):
+        """{node_id: {'free_mb': float, 'used_mb': float}}. 노드별 없으면 빈 dict."""
+        out = {}
+        for node, path in self._numa_meminfo_paths.items():
+            free_kb = used_kb = None
+            try:
+                with open(path) as f:
+                    for line in f:
+                        # 형식: "Node <N> MemFree:       <kB> kB"
+                        parts = line.split()
+                        if len(parts) < 5:
+                            continue
+                        key = parts[2].rstrip(":")
+                        try:
+                            val = int(parts[3])
+                        except ValueError:
+                            continue
+                        if key == "MemFree":
+                            free_kb = val
+                        elif key == "MemUsed":
+                            used_kb = val
+                        if free_kb is not None and used_kb is not None:
+                            break
+            except Exception:
+                continue
+            out[node] = {
+                "free_mb": round(free_kb / 1024.0, 1) if free_kb is not None else None,
+                "used_mb": round(used_kb / 1024.0, 1) if used_kb is not None else None,
+            }
+        return out
 
     def _read_cpu_freq_mhz(self):
         """{cpu_id: mhz} — cpufreq 없는 시스템은 빈 dict."""
@@ -440,6 +485,12 @@ class SystemMonitor:
         row["pswpin_per_s"] = round(pswpin / elapsed, 1)
         row["pswpout_per_s"] = round(pswpout / elapsed, 1)
         row["loadavg_1m"] = load1
+
+        if self._has_numa_meminfo:
+            numa_mem = self._read_numa_meminfo_mb()
+            for node, vals in numa_mem.items():
+                row[f"node{node}_mem_free_mb"] = vals.get("free_mb")
+                row[f"node{node}_mem_used_mb"] = vals.get("used_mb")
 
         if self._has_cpufreq:
             freqs = self._read_cpu_freq_mhz()

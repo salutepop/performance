@@ -10,24 +10,12 @@
 
 - [ ] **P1** io_uring mode support  **BLOCKED:** 단일 이터레이션 범위 초과 — 신규 BPF 프로그램 2개(io_uring_submit_req/io_uring_complete) + 신규 latency 누적 struct + 신규 글로벌 map + JSON 스키마 확장 + Python parse/리포트 통합 + fio io_uring 검증까지 필요. 아래 sub-task로 분할.
   - 6.11 커널 기준 tracepoint 이름: `io_uring/io_uring_submit_req`(SQE 제출), `io_uring/io_uring_complete`(CQE 푸시), 옵션 `io_uring/io_uring_cqring_wait`.
-- [ ] **P1** iouring-1: BPF struct + 2개 tracepoint hook + map
-  - `io_trace.h`에 `struct iouring_stats { u2q_count/total, c2a_count/total }` 추가
-  - `opt_trace_iouring` rodata. `tp/io_uring/io_uring_submit_req` → submit_ts에 (pid_tgid, req_ptr) 기록.
-  - `tp/io_uring/io_uring_complete` → match해서 latency 누적
-- [ ] **P1** iouring-2: io_trace.c userspace
-  - `-m iouring` 분기에서 autoattach 토글
-  - print_json_report에 `iouring_overhead` 블록 추가
-- [ ] **P1** iouring-3: io_profiler.py 통합
-  - mode 분기 (현재 generic으로 fall-through)
-  - final report에 io_uring phase 행
-  - 검증: `--ioengine=io_uring` fio로 워크로드 후 평균 latency가 nonzero
+- [ ] **P2** iouring-1: BPF struct + 2개 tracepoint hook + map
+- [ ] **P2** iouring-2: io_trace.c userspace -m iouring 분기 + iouring_overhead JSON
+- [ ] **P2** iouring-3: io_profiler.py 통합 + fio --ioengine=io_uring 검증
+  - 셋이 묶음 단위. 한 세션에서 연속 작업하는 게 효율적이라 P2로 demote.
 
 ### System extensions
-
-- [ ] **P1** per-numa memory stats
-  - `/sys/devices/system/node/node*/meminfo` 에서 MemFree/MemUsed 파싱
-  - 컬럼: `node{N}_mem_free_mb, node{N}_mem_used_mb`
-  - 단일 노드 fallback 처리
 
 - [ ] **P2** nvme controller sysfs stats
   - `/sys/class/nvme/nvme*/model`, `state`, `numa_node`, `queue_count`, `cntrltype`
@@ -141,6 +129,11 @@
   - 검증: 프로젝트 루트에서 `python3 ebpf/io_profiler.py ...` 호출이 동작
 
 ## Done (newest first)
+
+- [x] **P1** per-numa memory stats
+  - `_read_numa_meminfo_mb()` + `/sys/.../node*/meminfo` 의 MemFree/MemUsed 파싱
+  - 컬럼: `node{N}_mem_free_mb`, `node{N}_mem_used_mb` (단일노드(`all`) 시스템은 글로벌 mem으로 충분 → skip)
+  - 검증: GB10 node0 free 106GB / used 16GB 출력
 
 - [x] **P1** cpu frequency tracking (where available)
   - `core/monitor.py`: cpu0..cpuN의 cpufreq sysfs 존재 검사 1회. 있으면 컬럼 `node{N}_freq_{avg,max}_mhz` 추가.

@@ -28,6 +28,10 @@ NVMe raw 디바이스에 직접 쓰는 워크로드가 많아 root/sudo 권한�
 
 > eBPF 서브시스템은 별도 문서가 있다: [`ebpf/CLAUDE.md`](./ebpf/CLAUDE.md). 이 폴더 코드를 만질 때는 그 문서를 먼저 읽을 것.
 
+### 리포트 생성 (report/)
+
+세션 산출물(topology_*.json, system_metrics_*.csv, <device>_*.csv)을 자기완결 HTML로 변환. 외부 리소스 0 (인터넷 없는 환경에서도 동작). 사용: `python3 -m report.html_report --session-dir <dir> [--session-id SID] [-o out.html]`. session-id 생략 시 가장 최근 topology_*.json 자동 선택. baseline 버전은 topology 요약 + CSV 테이블 dump이며, 시계열 차트는 후속 task로 추가 예정.
+
 ```bash
 cd ebpf
 make            # io_trace 바이너리 빌드 (clang + bpftool + libbpf 필요)

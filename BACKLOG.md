@@ -38,13 +38,6 @@
 
 ### Visualization (단일 HTML 리포트 우선)
 
-- [ ] **P0** baseline html report generator
-  - `report/` 디렉터리 신규 (peer to `core/`, `ebpf/`)
-  - `report/html_report.py`: argparse로 session 디렉터리 받음 → `report_{session}.html` 생성
-  - 첫 버전: topology summary + I/O CSV/system CSV 테이블 dump (스타일 단순)
-  - 자기-완결 HTML (외부 리소스 없음)
-  - 검증: 생성된 HTML 브라우저 없이 grep으로 핵심 섹션 확인
-
 - [ ] **P0** time-series charts (chart.js via cdn)
   - `report/html_report.py`: I/O CSV → IOPS/BW/latency 시계열 line chart
   - Chart.js를 CDN 또는 inline으로 embed (인터넷 없어도 동작하려면 inline)
@@ -129,6 +122,13 @@
   - 검증: 프로젝트 루트에서 `python3 ebpf/io_profiler.py ...` 호출이 동작
 
 ## Done (newest first)
+
+- [x] **P0** baseline html report generator
+  - `report/__init__.py` + `report/html_report.py` 신규
+  - `python3 -m report.html_report` 단독 실행, 최신 session_id 자동 탐색
+  - 외부 리소스 0 (인터넷 없는 환경 OK), 자기완결 inline CSS
+  - 출력: topology 요약 + system_metrics CSV table + device CSV table
+  - 검증: 29KB HTML, h1/h2/h3 다 보임, table 정상 렌더
 
 - [x] **P1** per-numa memory stats
   - `_read_numa_meminfo_mb()` + `/sys/.../node*/meminfo` 의 MemFree/MemUsed 파싱

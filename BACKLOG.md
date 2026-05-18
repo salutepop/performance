@@ -27,14 +27,20 @@
 
 ### Test framework rewrite
 
-- [ ] **P3** scenario: pcie contention (fio + gpu workload)
-  - GPU에 가벼운 매트릭스 곱 thread + 동시에 fio → PCIe band 경합 측정
-
 - [ ] **P3** scenario: gc stress with percentile collection
   - Preconditioning → mixed workload → p99 tail 변화 시각화
 
 
 ## Done (newest first)
+
+- [x] **P3** scenario: pcie contention (fio + gpu workload)
+  - scenarios/pcie_contention.py 신규.
+  - inline CUDA src + nvcc compile (실패 시 fio 단독 측정으로 graceful skip)
+  - GPU host↔device cudaMemcpy 256MB bounce를 background로 → 동시에 fio randread
+  - analyze: fio bw/d2c + GPU peak power + GPU 존재 여부 보고
+  - 검증: GB10 → 735 iter × 256MB × 2 = ~376GB GPU traffic / 8s (≈47 GB/s C2C),
+    fio 725 MB/s 정상 측정, pass=True. 다른 시스템에서는 PCIe rxpci/txpci
+    트래픽이 의미있게 잡혀 경합 시각화 가능.
 
 - [x] **P3** network stats for nvme-of (opt-in)
   - core/monitor.py: PMON_ENABLE_NET=1 환경변수로 활성. 기본은 비활성 (일반

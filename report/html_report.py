@@ -605,26 +605,36 @@ def _render_device_charts(dname, header, rows):
     if not labels or not series:
         return ""
     safe = re.sub(r"[^a-zA-Z0-9]", "_", dname)
-    # p50/p99 시리즈가 모두 None이면 제외 (구버전 CSV 호환).
+    # p50/p99 시리즈가 모두 None이면 단순 d2c avg chart만 표시 (구버전 CSV 호환).
     has_p = any(any(v is not None for v in (s.get("p50") or []) + (s.get("p99") or []))
                 for s in series.values())
     charts = [
         ("iops", "IOPS",        "ops/s"),
         ("bw",   "Bandwidth",   "MB/s"),
-        ("d2c",  "D2C avg",     "us"),
     ]
     if has_p:
-        charts.append(("p50", "D2C p50", "us"))
-        charts.append(("p99", "D2C p99 (tail latency)", "us"))
+        # 가장 바쁜 op (총 iops 최대) 자동 선택해 avg/p50/p99 단일 차트로 통합
+        top_op = max(series.keys(),
+                     key=lambda k: sum((v or 0) for v in series[k].get("iops") or []),
+                     default=None)
+        charts.append(("lat", f"D2C latency (avg/p50/p99) — {top_op or 'top op'}", "us"))
+    else:
+        charts.append(("d2c", "D2C avg", "us"))
     parts = ["<div class='chart-row'>"]
     for metric, _, _ in charts:
         parts.append(f"<div class='chart-cell'><canvas id='chart_{safe}_{metric}'></canvas></div>")
     parts.append("</div>")
 
+    top_op_for_lat = None
+    if has_p:
+        top_op_for_lat = max(series.keys(),
+                              key=lambda k: sum((v or 0) for v in series[k].get("iops") or []),
+                              default=None)
     payload = {
         "labels": labels,
         "series": series,
         "colors": _OP_COLORS,
+        "top_op": top_op_for_lat,
     }
     payload_json = json.dumps(payload, separators=(",", ":"))
     chart_specs = json.dumps(charts, separators=(",", ":"))
@@ -635,12 +645,28 @@ if (typeof Chart === 'undefined') {{
 }}
 const payload = {payload_json};
 const charts = {chart_specs};
+const metricColors = {{avg: '#0a84ff', p50: '#30d158', p99: '#ef4444'}};
 charts.forEach(function(spec) {{
   const metric = spec[0], title = spec[1], ylabel = spec[2];
-  const datasets = Object.keys(payload.series).map(function(op) {{
-    return {{label: op, data: payload.series[op][metric], borderColor: payload.colors[op] || '#888',
-             backgroundColor: 'transparent', pointRadius: 1, tension: 0.2, spanGaps: true}};
-  }});
+  let datasets;
+  if (metric === 'lat' && payload.top_op) {{
+    // single-op, 3 metric lines: avg/p50/p99 (consolidated latency view)
+    const op = payload.top_op;
+    const s = payload.series[op] || {{}};
+    datasets = [
+      {{label: 'd2c avg', data: s.d2c, borderColor: metricColors.avg, backgroundColor: 'transparent',
+        pointRadius: 1, tension: 0.2, spanGaps: true}},
+      {{label: 'd2c p50', data: s.p50, borderColor: metricColors.p50, borderDash: [4,2], backgroundColor: 'transparent',
+        pointRadius: 1, tension: 0.2, spanGaps: true}},
+      {{label: 'd2c p99', data: s.p99, borderColor: metricColors.p99, borderWidth: 2, backgroundColor: 'transparent',
+        pointRadius: 1, tension: 0.2, spanGaps: true}}
+    ];
+  }} else {{
+    datasets = Object.keys(payload.series).map(function(op) {{
+      return {{label: op, data: payload.series[op][metric], borderColor: payload.colors[op] || '#888',
+               backgroundColor: 'transparent', pointRadius: 1, tension: 0.2, spanGaps: true}};
+    }});
+  }}
   const cid = 'chart_{safe}_' + metric;
   const ctx = document.getElementById(cid);
   if (!ctx) return;

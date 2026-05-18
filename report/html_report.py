@@ -272,6 +272,111 @@ def _render_summary(dev_aggs, sys_agg):
     return "".join(out)
 
 
+def _render_correlation_chart(sys_header, sys_rows, device_csv_paths):
+    """1개 dual-axis 차트로 I/O와 system load 상관 시각화.
+       왼쪽 Y = device 총 IOPS (디바이스별 색 분리), 오른쪽 Y = sys%/iowait% (점선)."""
+    if not sys_header or not sys_rows or not device_csv_paths:
+        return ""
+    try:
+        ts_i = sys_header.index("timestamp")
+    except ValueError:
+        return ""
+    labels = [r[ts_i] for r in sys_rows if ts_i < len(r)]
+    if not labels:
+        return ""
+
+    # system: iowait 합 + sys% 합 (모든 NUMA 노드)
+    iowait_cols = [c for c in sys_header if c.endswith("_iowait_pct")]
+    sys_cols = [c for c in sys_header if c.endswith("_sys_pct")]
+    iow_idx = [sys_header.index(c) for c in iowait_cols]
+    sys_idx = [sys_header.index(c) for c in sys_cols]
+
+    def _safe_sum(row, idxs):
+        s = 0.0
+        for i in idxs:
+            if i < len(row) and row[i] not in ("", None):
+                try:
+                    s += float(row[i])
+                except ValueError:
+                    pass
+        return s
+
+    iowait_sum = [_safe_sum(r, iow_idx) for r in sys_rows]
+    sys_sum = [_safe_sum(r, sys_idx) for r in sys_rows]
+
+    # device: timestamp별 op 합산 IOPS
+    dev_aligned = {}
+    for dpath in device_csv_paths:
+        h, r = _load_csv(dpath)
+        if not h:
+            continue
+        try:
+            dts_i = h.index("timestamp")
+            iops_i = h.index("iops_interval")
+        except ValueError:
+            continue
+        dname = re.sub(r"_\d{8}_\d{6}\.csv$", "", os.path.basename(dpath))
+        bucket = {}
+        for row in r:
+            ts = row[dts_i] if dts_i < len(row) else ""
+            try:
+                v = float(row[iops_i]) if iops_i < len(row) and row[iops_i] not in ("", None) else 0.0
+            except ValueError:
+                v = 0.0
+            bucket[ts] = bucket.get(ts, 0) + v
+        dev_aligned[dname] = [bucket.get(ts) for ts in labels]
+
+    payload = {
+        "labels": labels,
+        "iowait": iowait_sum,
+        "sys": sys_sum,
+        "devs": dev_aligned,
+    }
+    palette = json.dumps(_PALETTE)
+    payload_json = json.dumps(payload, separators=(",", ":"))
+
+    return f"""<div class='chart-row' style='grid-template-columns: 1fr;'>
+<div class='chart-cell' style='height: 360px;'><canvas id='chart_corr'></canvas></div>
+</div>
+<script>(function() {{
+if (typeof Chart === 'undefined') {{
+  const e = document.getElementById('chart_corr');
+  if (e) e.parentNode.innerHTML = '<p class=\\'chart-warn\\'>Chart.js CDN unreachable.</p>';
+  return;
+}}
+const p = {payload_json};
+const palette = {palette};
+const devDatasets = Object.keys(p.devs).map(function(dn, i) {{
+  return {{label: 'IOPS '+dn, data: p.devs[dn], yAxisID: 'y',
+           borderColor: palette[i % palette.length],
+           backgroundColor: 'transparent', pointRadius: 1, tension: 0.2, spanGaps: true}};
+}});
+const sysDatasets = [
+  {{label: 'iowait % (sum)', data: p.iowait, yAxisID: 'y1',
+    borderColor: '#ef4444', borderDash: [6,3], backgroundColor: 'transparent',
+    pointRadius: 1, tension: 0.2}},
+  {{label: 'sys % (sum)', data: p.sys, yAxisID: 'y1',
+    borderColor: '#f59e0b', borderDash: [2,2], backgroundColor: 'transparent',
+    pointRadius: 1, tension: 0.2}},
+];
+const ctx = document.getElementById('chart_corr');
+if (!ctx) return;
+new Chart(ctx.getContext('2d'), {{
+  type: 'line',
+  data: {{labels: p.labels, datasets: devDatasets.concat(sysDatasets)}},
+  options: {{responsive: true, maintainAspectRatio: false, animation: false,
+    plugins: {{title: {{display: true, text: 'I/O × System correlation (left: IOPS, right: CPU %)'}},
+               legend: {{position: 'bottom'}}}},
+    scales: {{
+      y:  {{type: 'linear', position: 'left',  title: {{display: true, text: 'IOPS'}}, beginAtZero: true}},
+      y1: {{type: 'linear', position: 'right', title: {{display: true, text: '% CPU'}}, beginAtZero: true, grid: {{drawOnChartArea: false}}}},
+      x:  {{ticks: {{maxTicksLimit: 12}}}}
+    }}
+  }}
+}});
+}})();</script>"""
+
+
 def _build_device_series(header, rows):
     """device CSV → (labels[], series{op:{iops,bw,d2c,p50,p99}}). 모든 op timestamp 통합·정렬."""
     if not header or not rows:
@@ -761,6 +866,10 @@ def build_report(session_dir, sid):
                 dn = re.sub(r"_\d{8}_\d{6}\.csv$", "", os.path.basename(dp))
                 dev_aggs[dn] = _device_aggregates(dh, dr)
         parts.append(_render_summary(dev_aggs, sys_agg))
+        # I/O × System 상관 차트 — summary 직후, 어느 섹션보다 위.
+        parts.append("<h2>I/O × System correlation</h2>")
+        parts.append("<p class='meta'>IOPS 변화와 CPU iowait/sys% 변화를 같은 시간축에서 본다. dual y-axis (왼쪽: IOPS, 오른쪽: %).</p>")
+        parts.append(_render_correlation_chart(sys_h_tmp, sys_r_tmp, device_csvs))
     except Exception as e:
         parts.append(f"<p class='meta'>(summary 생성 실패: {html.escape(str(e))})</p>")
 

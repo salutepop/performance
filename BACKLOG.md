@@ -8,11 +8,6 @@
 
 ### Foundation — eBPF / I/O 정확도 향상
 
-- [ ] **P0** expose latency histograms in JSON + python percentile calc
-  - `io_trace.c::print_json_report`: histogram 배열 출력
-  - `io_profiler.py`: `compute_percentiles(hist, [50,95,99,99.9])` 헬퍼, 최종 리포트에 p50/p95/p99/p99.9 행 추가
-  - 검증: fio + 결과에 p99 latency 값 합리적인지
-
 - [ ] **P0** per-interval libaio overhead in csv
   - `io_profiler.py::parse_and_store_metrics`: `libaio_overhead` 필드도 delta 계산해서 CSV에 `u2q_avg_us_interval, c2a_avg_us_interval, a2u_avg_us_interval` 컬럼 추가
   - 검증: libaio 모드 smoke 후 CSV의 새 컬럼이 0이 아닌 값을 가지는지
@@ -151,7 +146,17 @@
 - [ ] **P3** scenario: gc stress with percentile collection
   - Preconditioning → mixed workload → p99 tail 변화 시각화
 
+- [ ] **P2** io_profiler.py: `./io_trace` 상대 경로 → 절대 경로
+  - 현재 `subprocess.Popen(["sudo","./io_trace",...])`라 ebpf/ 디렉터리 cwd에서만 동작
+  - `os.path.join(os.path.dirname(__file__), "io_trace")` 같이 절대경로화
+  - 검증: 프로젝트 루트에서 `python3 ebpf/io_profiler.py ...` 호출이 동작
+
 ## Done (newest first)
+
+- [x] **P0** expose latency histograms in JSON + python percentile calc
+  - `compute_percentiles(hist, [50,95,99,99.9])` 헬퍼 추가 (log2 bucket 선형 보간 → us)
+  - `print_op_stats`에 `Q2D pct` / `D2C pct` 라인 추가 (operation별)
+  - 검증: 4K randread → READ D2C p50=82us, p99=363us, p99.9=685us 출력
 
 - [x] **P0** add latency log2 histograms to BPF (q2d, d2c per type)
   - LAT_HIST_BUCKETS=32, `__builtin_clzll` 대신 수동 unroll loop (BPF target 호환)

@@ -134,7 +134,7 @@ JSON 스키마 (이게 layer 사이 contract):
 3. 워크로드는 별도 thread(`run_workload_thread`)에서 `subprocess.run(cmd_or_bash_script_file)`. 워크로드 종료 시 메인 PID에 `SIGINT`를 쏴서 깨끗하게 정리.
 4. 메인 thread는 trace_proc.stdout을 라인 단위로 읽으며 `---JSON_START---`/`---JSON_END---` 사이를 버퍼링.
 5. 매 JSON마다 `parse_and_store_metrics()`로 누적값을 **delta**로 변환해 IOPS/BW/avg-lat 계산, 5초마다 `save_csv_buffers()`로 flush.
-6. 종료 시 마지막 JSON으로 `print_final_summary()` — phase × {Total, READ, WRITE, READ-AHEAD, FLUSH}의 Call/Sum(ms)/Avg(us) 테이블 출력.
+6. 종료 시 마지막 JSON으로 `print_final_summary()` — phase × {Total, READ, WRITE, READ-AHEAD, FLUSH}의 Call/Sum(ms)/Avg(us) 테이블 출력. operation별 `Q2D pct`, `D2C pct` 라인에 p50/p95/p99/p99.9 (`compute_percentiles(hist)`가 log2 bucket을 선형 보간하여 us로 변환).
 
 CSV 출력 위치: `./csv_results/{real_dev_name}_{SESSION_ID}.csv` (SESSION_ID는 모듈 로드 시 한 번 생성). 디바이스 이름은 `dev(maj:min)` → `/sys/dev/block/maj:min` realpath로 `nvme0n1` 같은 실명으로 변환.
 

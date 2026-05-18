@@ -27,6 +27,45 @@ prev_metrics = {}
 csv_buffers = {}
 
 
+LAT_HIST_BUCKETS = 32
+
+
+def compute_percentiles(hist, pcts=(50, 95, 99, 99.9)):
+    """log2(ns) histogram → {p: us}. 빈 히스토그램이면 None.
+    bucket b는 [2^b, 2^(b+1)) ns 범위. 누적합 기준으로 선형 보간."""
+    total = sum(hist) if hist else 0
+    if total == 0:
+        return {p: None for p in pcts}
+    out = {}
+    pct_queue = sorted(pcts)
+    cum = 0
+    pi = 0
+    for b, count in enumerate(hist):
+        prev_cum = cum
+        cum += count
+        while pi < len(pct_queue) and cum >= total * pct_queue[pi] / 100.0:
+            target = total * pct_queue[pi] / 100.0
+            if count > 0:
+                frac = (target - prev_cum) / count
+                lat_ns = (2 ** b) * (1 + frac)
+            else:
+                lat_ns = 2 ** b
+            out[pct_queue[pi]] = lat_ns / 1000.0  # us
+            pi += 1
+    while pi < len(pct_queue):
+        out[pct_queue[pi]] = (2 ** (LAT_HIST_BUCKETS - 1)) / 1000.0
+        pi += 1
+    return out
+
+
+def _fmt_us(v):
+    if v is None:
+        return "    -  "
+    if v >= 1000:
+        return f"{v/1000:.2f}ms"
+    return f"{v:.2f}us"
+
+
 def get_real_dev_name(dev_id_str):
     try:
         maj_min = dev_id_str.replace("dev(", "").replace(")", "")
@@ -208,6 +247,22 @@ def print_op_stats(op_name, bpf_stats, c2a_data, a2u_data, duration):
     print(
         f"  - Full Stack (Run) : Sum = {ebpf_sum_ms:>10.2f} ms | Avg = {ebpf_avg_us:>8.2f} us"
     )
+
+    q2d_hist = bpf_stats.get("q2d_hist")
+    d2c_hist = bpf_stats.get("d2c_hist")
+    if q2d_hist or d2c_hist:
+        q2d_p = compute_percentiles(q2d_hist or [0] * LAT_HIST_BUCKETS)
+        d2c_p = compute_percentiles(d2c_hist or [0] * LAT_HIST_BUCKETS)
+        print(
+            "  - Q2D pct     : "
+            f"p50={_fmt_us(q2d_p[50])}  p95={_fmt_us(q2d_p[95])}  "
+            f"p99={_fmt_us(q2d_p[99])}  p99.9={_fmt_us(q2d_p[99.9])}"
+        )
+        print(
+            "  - D2C pct     : "
+            f"p50={_fmt_us(d2c_p[50])}  p95={_fmt_us(d2c_p[95])}  "
+            f"p99={_fmt_us(d2c_p[99])}  p99.9={_fmt_us(d2c_p[99.9])}"
+        )
 
     hist = bpf_stats.get("size_hist", [0, 0, 0, 0])
     if cnt > 0 and sum(hist) > 0:

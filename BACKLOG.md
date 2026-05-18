@@ -10,7 +10,6 @@
 
 - [ ] **P1** io_uring mode support  **BLOCKED:** 단일 이터레이션 범위 초과 — 신규 BPF 프로그램 2개(io_uring_submit_req/io_uring_complete) + 신규 latency 누적 struct + 신규 글로벌 map + JSON 스키마 확장 + Python parse/리포트 통합 + fio io_uring 검증까지 필요. 아래 sub-task로 분할.
   - 6.11 커널 기준 tracepoint 이름: `io_uring/io_uring_submit_req`(SQE 제출), `io_uring/io_uring_complete`(CQE 푸시), 옵션 `io_uring/io_uring_cqring_wait`.
-- [ ] **P3** html_report `_render_topology_svg`에서 `raw.discovered.nvme_ctrls` 경로 오류 — 실제 topology.json은 flat (`raw.nvme_ctrls`). 디바이스 NUMA 매핑 lookup 실패로 edge가 그려지지 않을 수 있음. fallback path 추가.
 - [ ] **P2** iouring-1: BPF struct + 2개 tracepoint hook + map  **BLOCKED:** io_uring 워크로드(fio --ioengine=io_uring) 검증 인프라 필요. 셋이 묶음 단위라 연속 작업하는 게 효율적.
 - [ ] **P2** iouring-2: io_trace.c userspace -m iouring 분기 + iouring_overhead JSON  **BLOCKED:** iouring-1 의존
 - [ ] **P2** iouring-3: io_profiler.py 통합 + fio --ioengine=io_uring 검증  **BLOCKED:** iouring-1/2 의존
@@ -39,6 +38,11 @@
 
 
 ## Done (newest first)
+
+- [x] **P3** svg topology nvme_ctrls path fix
+  - `_render_topology_svg`: raw.nvme_ctrls (flat) 우선, raw.discovered.nvme_ctrls fallback.
+  - 이전엔 flat 구조에서 NUMA 매핑 lookup 실패 → 디바이스→노드 edge 미연결.
+  - 검증: GB10 환경에서 nvme0 NUMA=-1 정확히 식별 (실제 unified memory 값).
 
 - [x] **P3** html/md report에 nvme_ctrls 상세 표시
   - html_report._render_topology: NUMA 노드 dl 아래에 nvme 상세 테이블 추가

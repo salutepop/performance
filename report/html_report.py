@@ -467,7 +467,9 @@ def _render_topology_svg(topo):
     if not nodes:
         return ""
     cpu_map = topo.get("cpu_to_node") or {}
-    nvmes_full = topo.get("raw", {}).get("discovered", {}).get("nvme_ctrls", []) or []
+    # topology.json의 raw는 flat (raw.nvme_ctrls). 구버전 호환을 위해 .discovered fallback도 시도.
+    raw = topo.get("raw") or {}
+    nvmes_full = raw.get("nvme_ctrls") or raw.get("discovered", {}).get("nvme_ctrls") or []
     nvme_names = topo.get("nvme_controllers") or []
     nvme_to_node = {}
     for c in nvmes_full:

@@ -27,11 +27,17 @@
 
 ### Test framework rewrite
 
-- [ ] **P3** scenario: gc stress with percentile collection
-  - Preconditioning → mixed workload → p99 tail 변화 시각화
 
 
 ## Done (newest first)
+
+- [x] **P3** scenario: gc stress with percentile collection
+  - scenarios/gc_stress.py. 1M seq write 128M (precond) + 4K randwrite (measure)
+    를 fio `--stonewall` 로 sequential 실행. eBPF는 둘 다 같은 트레이스에서 캡처.
+  - analyze: write_total_io / d2c_avg / GC signature 휴리스틱(d2c_avg > 1ms)
+  - p99 변화는 HTML report (`report_<sid>.html`)의 d2c p99 차트로 시각화.
+  - 검증: 1.15M writes, d2c avg 40us, pass=True. 임시 파일/ext4 환경이라
+    실제 flash GC는 약함 — raw NVMe 환경에서 더 강한 signature 기대.
 
 - [x] **P3** scenario: pcie contention (fio + gpu workload)
   - scenarios/pcie_contention.py 신규.

@@ -8,10 +8,6 @@
 
 ### Foundation — eBPF / I/O 정확도 향상
 
-- [ ] **P0** per-interval libaio overhead in csv
-  - `io_profiler.py::parse_and_store_metrics`: `libaio_overhead` 필드도 delta 계산해서 CSV에 `u2q_avg_us_interval, c2a_avg_us_interval, a2u_avg_us_interval` 컬럼 추가
-  - 검증: libaio 모드 smoke 후 CSV의 새 컬럼이 0이 아닌 값을 가지는지
-
 - [ ] **P1** record per-request issue cpu + complete cpu (sq/cq divergence stat)
   - BPF: `req_start` ctx에 `issue_cpu`, `block_rq_complete`에서 현재 CPU 비교
   - 통계: `sq_cq_same_count`, `sq_cq_diff_count` 글로벌 카운터 (또는 device_qd 옆)
@@ -152,6 +148,11 @@
   - 검증: 프로젝트 루트에서 `python3 ebpf/io_profiler.py ...` 호출이 동작
 
 ## Done (newest first)
+
+- [x] **P0** per-interval libaio overhead in csv
+  - `prev_libaio` 모듈 dict로 인터벌 delta 추적, `_LIBAIO_OP_KEY` 매핑으로 BPF op↔libaio 필드 연결
+  - CSV에 `u2q_avg_us_interval` (글로벌), `c2a_avg_us_interval`/`a2u_avg_us_interval` (op별) 추가
+  - 검증: busy 인터벌에서 u2q ~2us, c2a ~1us, a2u ~150us 출력 (read_ahead/discard는 0 — libaio 경로 없음)
 
 - [x] **P0** expose latency histograms in JSON + python percentile calc
   - `compute_percentiles(hist, [50,95,99,99.9])` 헬퍼 추가 (log2 bucket 선형 보간 → us)

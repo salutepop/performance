@@ -25,6 +25,15 @@ SESSION_ID = datetime.now().strftime("%Y%m%d_%H%M%S")
 
 prev_metrics = {}
 csv_buffers = {}
+prev_libaio = {}  # {key: count or total_ns}, per-interval delta 계산용 (u2q_count/lat, c2a_*, a2u_*)
+
+
+# BPF op 이름 → libaio_overhead 필드 prefix 매핑. read_ahead/discard는 libaio 경로가 없어 None.
+_LIBAIO_OP_KEY = {
+    "read": "read",
+    "write": "write",
+    "flush": "flush",
+}
 
 
 LAT_HIST_BUCKETS = 32
@@ -91,6 +100,9 @@ def save_csv_buffers():
         "bandwidth_mb_s_interval",
         "q2d_avg_us_interval",
         "d2c_avg_us_interval",
+        "u2q_avg_us_interval",
+        "c2a_avg_us_interval",
+        "a2u_avg_us_interval",
         "current_qd",
         "max_qd",
         "total_io_count",
@@ -126,10 +138,46 @@ def save_csv_buffers():
 
 
 def parse_and_store_metrics(json_str):
-    global prev_metrics, csv_buffers
+    global prev_metrics, csv_buffers, prev_libaio
     try:
         bpf_data = json.loads(json_str)
         timestamp = datetime.now().strftime("%H:%M:%S")
+
+        # libaio_overhead 누적값을 인터벌 delta로 변환 (avg us 계산).
+        sys_st = bpf_data.get("libaio_overhead", {}) or {}
+
+        def _delta_avg_us(prefix):
+            """prefix='c2a_read' → (delta_total_ns / delta_count) us 반환. 데이터 없으면 0."""
+            cnt_k = f"{prefix}_count"
+            tot_k = f"{prefix}_total" if prefix == "u2q_lat" else f"{prefix}_total"
+            curr_c = sys_st.get(cnt_k, 0)
+            curr_t = sys_st.get(tot_k, 0)
+            prev_c = prev_libaio.get(cnt_k, 0)
+            prev_t = prev_libaio.get(tot_k, 0)
+            prev_libaio[cnt_k] = curr_c
+            prev_libaio[tot_k] = curr_t
+            dc = curr_c - prev_c
+            dt = curr_t - prev_t
+            return (dt / dc / 1000.0) if dc > 0 else 0.0
+
+        # u2q는 op 구분 없는 글로벌 값 (모든 행에 같은 값 들어감).
+        u2q_curr_c = sys_st.get("u2q_count", 0)
+        u2q_curr_t = sys_st.get("u2q_lat_total", 0)
+        u2q_prev_c = prev_libaio.get("u2q_count", 0)
+        u2q_prev_t = prev_libaio.get("u2q_lat_total", 0)
+        prev_libaio["u2q_count"] = u2q_curr_c
+        prev_libaio["u2q_lat_total"] = u2q_curr_t
+        u2q_dc = u2q_curr_c - u2q_prev_c
+        u2q_dt = u2q_curr_t - u2q_prev_t
+        u2q_avg_us_interval = (u2q_dt / u2q_dc / 1000.0) if u2q_dc > 0 else 0.0
+
+        # op별 c2a/a2u avg us delta 미리 계산해두기
+        op_libaio_avg = {}
+        for bpf_op, lib_key in _LIBAIO_OP_KEY.items():
+            op_libaio_avg[bpf_op] = {
+                "c2a": _delta_avg_us(f"c2a_{lib_key}"),
+                "a2u": _delta_avg_us(f"a2u_{lib_key}"),
+            }
 
         for dev in bpf_data.get("devices", []):
             dev_name_raw = dev["dev_name"]
@@ -177,6 +225,8 @@ def parse_and_store_metrics(json_str):
                 size_hist = stats.get("size_hist", [0, 0, 0, 0])
                 lba_hist = stats.get("lba_hist", [0] * 64)
 
+                op_libaio = op_libaio_avg.get(op, {"c2a": 0.0, "a2u": 0.0})
+
                 row = {
                     "timestamp": timestamp,
                     "operation": op,
@@ -184,6 +234,9 @@ def parse_and_store_metrics(json_str):
                     "bandwidth_mb_s_interval": round(bw_mb, 4),
                     "q2d_avg_us_interval": round(q2d_avg_us, 2),
                     "d2c_avg_us_interval": round(d2c_avg_us, 2),
+                    "u2q_avg_us_interval": round(u2q_avg_us_interval, 2),
+                    "c2a_avg_us_interval": round(op_libaio["c2a"], 2),
+                    "a2u_avg_us_interval": round(op_libaio["a2u"], 2),
                     "current_qd": current_qd,
                     "max_qd": max_qd,
                     "total_io_count": curr_count,

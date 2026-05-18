@@ -1,12 +1,24 @@
 import json
 import subprocess
 import os
+import sys
 import signal
 import time
 import argparse
 import threading
 import csv
 from datetime import datetime
+
+# sysmon은 프로젝트 루트의 core/ 모듈에 있음 — 상대 import 가능하도록 path 보정
+_PROJ_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PROJ_ROOT not in sys.path:
+    sys.path.insert(0, _PROJ_ROOT)
+
+try:
+    from core.monitor import SystemMonitor
+except Exception as _e:
+    SystemMonitor = None
+    print(f"[!] SystemMonitor import 실패: {_e} — system_metrics 수집은 비활성화")
 
 OUTPUT_DIR = "./csv_results"
 SESSION_ID = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -469,6 +481,21 @@ def run_benchmark(mode="generic", cmd=None, script_file=None, interval=1):
             "[*] Timeseries logging DISABLED (interval: 0). Collecting only final summary."
         )
 
+    # SystemMonitor: CPU/Mem/IRQ/GPU 통합 메트릭. interval>0일 때만 활성.
+    sysmon = None
+    if interval > 0 and SystemMonitor is not None:
+        try:
+            os.makedirs(OUTPUT_DIR, exist_ok=True)
+            sysmon = SystemMonitor(
+                output_dir=OUTPUT_DIR,
+                session_id=SESSION_ID,
+                interval=float(interval),
+            )
+            sysmon.start()
+        except Exception as e:
+            print(f"[!] SystemMonitor start 실패: {e}")
+            sysmon = None
+
     print("[*] Executing workload...\n")
 
     t0 = time.time()
@@ -520,6 +547,12 @@ def run_benchmark(mode="generic", cmd=None, script_file=None, interval=1):
                 .split("---JSON_END---")[0]
                 .strip()
             )
+
+    if sysmon is not None:
+        try:
+            sysmon.stop()
+        except Exception as e:
+            print(f"[!] SystemMonitor stop 실패: {e}")
 
     if interval > 0:
         save_csv_buffers()

@@ -9,7 +9,8 @@ class SystemDiscovery:
             "cpu": {},
             "numa": {},
             "storage": [],
-            "memory": {}
+            "memory": {},
+            "gpu": []
         }
 
     def discover_all(self):
@@ -17,6 +18,7 @@ class SystemDiscovery:
         self._discover_numa()
         self._discover_storage()
         self._discover_memory()
+        self._discover_gpu()
         return self.info
 
     def _discover_cpu(self):
@@ -86,6 +88,45 @@ class SystemDiscovery:
             self.info["memory"]["details"] = res.strip().split("\n")
         except:
             self.info["memory"]["details"] = "Permission denied or tool missing"
+
+    def _discover_gpu(self):
+        """nvidia-smi -L로 GPU 목록 탐지. 없으면 빈 리스트로 남김.
+        각 GPU는 PCI bus_id를 통해 /sys/bus/pci/devices/.../numa_node로 NUMA 매핑."""
+        try:
+            out = subprocess.check_output(
+                ["nvidia-smi", "--query-gpu=index,name,pci.bus_id",
+                 "--format=csv,noheader"],
+                text=True, stderr=subprocess.DEVNULL, timeout=2
+            )
+        except Exception:
+            return
+
+        for line in out.strip().splitlines():
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) < 3:
+                continue
+            idx, name, pci_bus = parts[0], parts[1], parts[2]
+            numa_node = "-1"
+            try:
+                # nvidia-smi 형식 "00000000:01:00.0" (8-hex 도메인) → sysfs는 4-hex 도메인 소문자.
+                parts_pci = pci_bus.lower().split(":")
+                if len(parts_pci) == 3:
+                    domain = parts_pci[0][-4:].rjust(4, "0")
+                    pci_norm = f"{domain}:{parts_pci[1]}:{parts_pci[2]}"
+                else:
+                    pci_norm = pci_bus.lower()
+                sysfs = f"/sys/bus/pci/devices/{pci_norm}/numa_node"
+                if os.path.exists(sysfs):
+                    with open(sysfs) as f:
+                        numa_node = f.read().strip()
+            except Exception:
+                pass
+            self.info["gpu"].append({
+                "index": int(idx) if idx.isdigit() else idx,
+                "name": name,
+                "pci_bus_id": pci_bus,
+                "numa_node": numa_node,
+            })
 
     def save_to_file(self, filepath="config/discovered_system.json"):
         os.makedirs(os.path.dirname(filepath), exist_ok=True)

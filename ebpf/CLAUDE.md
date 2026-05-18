@@ -1,0 +1,195 @@
+# ebpf/ — Block-layer I/O Profiler
+
+eBPF 기반 full-stack I/O 지연 분석 도구. fio(또는 임의 워크로드)가 도는 동안 커널 블록 계층 + libaio 경로의 각 구간 지연을 maps에 누적하고, 사용자 공간에서 JSON으로 뽑아 페이즈별 breakdown 테이블을 생성한다.
+
+## 핵심 아이디어: Full-Stack Latency Breakdown
+
+I/O 한 건의 전체 시간을 5개 페이즈로 쪼개서 측정한다. 이 페이즈 정의가 이 코드의 존재 이유이므로, 어디든 손대기 전에 머릿속에 박혀 있어야 한다.
+
+```
+ User                                                              User
+  │                                                                 ▲
+  │ io_submit()                                              io_getevents()
+  │                                                                 │
+  ▼     U2Q          Q2D          D2C          C2A          A2U     │
+  ●──────────►●──────────►●──────────►●──────────►●──────────►●─────┘
+  syscall   block_q    rq_issue   rq_complete  aio_complete  user wakeup
+   enter    (bio in)   (to disk)   (from disk)  (aio layer)
+
+  U2Q : sys_enter_io_submit → block_bio_queue        (사용자→블록 큐 진입)
+  Q2D : block_bio_queue     → block_rq_issue         (블록 큐에서 디바이스로 dispatch)
+  D2C : block_rq_issue      → block_rq_complete      (디스크 hw 처리)
+  C2A : block_rq_complete   → aio_complete           (블록 완료→AIO 레이어)
+  A2U : aio_complete        → sys_exit_io_getevents  (AIO→사용자 wakeup)
+```
+
+- **Generic mode**: Q2D, D2C만 측정 (블록 계층 tracepoints만 attach). 어떤 ioengine이든 잡힌다.
+- **Libaio mode**: 위 + U2Q, C2A, A2U까지 측정. `io_submit`/`io_getevents` syscall tracepoint와 `aio_complete` kprobe를 추가로 attach.
+- **iouring mode**: argparse에는 선언되어 있지만 BPF 측 구현 없음 (현재 generic과 동일하게 동작). 추가 작업 포인트.
+
+## 3-layer architecture
+
+```
+io_trace.bpf.c   (kernel BPF programs)   ── attach to tracepoints/kprobes
+       │                                    populate eBPF maps
+       ▼
+io_trace.c       (C userspace loader)    ── libbpf로 skeleton open/load/attach
+       │                                    SIGUSR1 reset / 주기적으로
+       ▼                                    print_json_report()로 stdout 출력
+io_profiler.py   (Python orchestrator)   ── io_trace를 Popen, 워크로드 thread 실행
+                                            JSON 마커 파싱 → CSV + 최종 리포트
+```
+
+세 레이어 사이의 계약(contract)이 깨지면 silent failure가 난다. 특히 **JSON 마커**(`---JSON_START---`/`---JSON_END---`)와 **필드 키 이름**은 양쪽이 합의해야 한다.
+
+### Layer 1: `io_trace.bpf.c` — BPF programs
+
+Attach points:
+| Program | Hook | Mode |
+| --- | --- | --- |
+| `trace_submit_enter/exit` | `tp/syscalls/sys_enter_io_submit`, `sys_exit_io_submit` | libaio |
+| `trace_getevents_enter/exit` | `sys_enter_io_getevents`, `sys_exit_io_getevents` | libaio |
+| `trace_pgetevents_enter/exit` | `sys_enter_io_pgetevents`, `sys_exit_io_pgetevents` | libaio |
+| `trace_aio_complete` | `kprobe/aio_complete` | libaio |
+| `block_bio_queue` | `tp_btf/block_bio_queue` | always |
+| `block_rq_issue` | `tp_btf/block_rq_issue` | always |
+| `block_rq_complete` | `tp_btf/block_rq_complete` | always |
+
+`opt_trace_libaio`는 BPF rodata 변수. 사용자 공간에서 load 전에 세팅하고, libaio가 아니면 C에서 `bpf_program__set_autoattach(..., false)`로 syscall 관련 프로그램들을 disable한다.
+
+Maps (전부 `io_trace.bpf.c`의 `SEC(".maps")`에서 선언):
+
+| Map | Type | Key | Value | 용도 |
+| --- | --- | --- | --- | --- |
+| `bio_start` | HASH | `bio*` | `bio_start_ctx` | bio enqueue 시각 (Q2D 시작점) |
+| `req_start` | HASH | `request*` | `trace_ctx` | rq issue 시각 + 직전 Q2D 지연 |
+| `device_stats` | **PERCPU_HASH** | `dev_id` (maj<<20\|min) | `io_stats` | 디바이스 단위 누적 통계 |
+| `pid_submit_start` | HASH | `pid_tgid` | `u64 ts` | io_submit 진입 시각 |
+| `active_getevents_events` | HASH | `pid_tgid` | `events ptr` | io_getevents의 events 인자 |
+| `iocb_complete_ts` | HASH | `{pid_tgid,iocb}` | `u64 ts` | aio_complete 시각 (A2U 시작점) |
+| `iocb_c2a_start` | HASH | `iocb*` | `c2a_ctx` | rq_complete 시각 (C2A 시작점) |
+| `sys_stats_map` | ARRAY[1] | 0 | `libaio_stats` | libaio 페이즈 글로벌 누적 |
+| `scratch_stats` | PERCPU_ARRAY[1] | 0 | `io_stats` | 0-초기화용 임시 버퍼 |
+| `dev_capacity_map` | HASH | `dev_id` | `u64 sectors` | LBA bucket 계산용 (디바이스 용량) |
+
+핵심 데이터 구조 (`io_trace.h`):
+- `io_req_type`: READ=0, READ_AHEAD=1, WRITE=2, FLUSH=3, DISCARD=4 — 이 순서는 C와 Python 양쪽이 의존한다.
+- `rw_stats`: io_count, total_bytes, q2d(lat_stats), d2c(lat_stats), size_hist[4], lba_hist[64], current_qd, max_qd.
+- `lat_stats`: total/max/min (ns 단위).
+- 디바이스 키 인코딩: `(major << 20) | minor`. unpack은 `major = key >> 20`, `minor = key & 0xFFFFF`.
+- 사이즈 히스토그램 버킷: `<=4K | 4K~32K | 32K~128K | >128K` (4-bucket, `block_rq_complete`에서 분류).
+- LBA 히트맵: 디바이스 용량을 64등분해서 `(sector * 64) / capacity_sectors`로 bucket index 계산.
+
+QD 추적: `block_rq_issue`에서 `current_qd++`, `block_rq_complete`에서 `current_qd--`. PERCPU_HASH이므로 음수가 될 수 있고, 사용자 공간에서 모든 CPU 값을 합산해야 의미 있는 값이 된다. `max_qd`는 per-CPU에서 갱신 후 user-space에서 `max()` reduce.
+
+### Layer 2: `io_trace.c` — userspace loader
+
+핵심 흐름:
+1. argv 파싱 (`-m/--mode`, `-i/--interval`).
+2. `io_trace_bpf__open()` → `skel->rodata->opt_trace_libaio` 설정 → 모드에 따라 syscall 프로그램들 autoattach off → `__load()`.
+3. `/sys/dev/block/*/size`를 읽어 `dev_capacity_map`을 채운다 (LBA 정규화에 필요).
+4. `__attach()` 후 1초 sleep 루프.
+5. `SIGUSR1` → `clear_stats_map(device_stats)` (Python이 워크로드 시작 직전 리셋용으로 보냄).
+6. `opt_interval`초마다 `print_json_report()` 호출, 종료 시 마지막 리포트 1회 더.
+
+`print_json_report()`는 `---JSON_START---` … `---JSON_END---` 마커 사이에 단일 JSON 객체를 출력한다. **PERCPU_HASH 합산**(nr_cpus만큼 stats_array를 받아 sum/max/min)도 여기서 수행. `total_any_io == 0`인 디바이스는 출력에서 스킵한다.
+
+JSON 스키마 (이게 layer 사이 contract):
+```json
+{
+  "devices": [
+    {
+      "dev_name": "dev(259:0)",
+      "operations": {
+        "read"|"write"|"read_ahead"|"flush"|"discard": {
+          "total_count": <u64>, "total_bytes": <u64>,
+          "current_qd": <int>, "max_qd": <u32>,
+          "size_hist": [u64, u64, u64, u64],
+          "lba_hist": [u32 × 64],
+          "q2d": {"total_lat_ns": u64, "min_lat_ns": u64, "max_lat_ns": u64},
+          "d2c": {"total_lat_ns": u64, "min_lat_ns": u64, "max_lat_ns": u64}
+        }
+      }
+    }
+  ],
+  "libaio_overhead": {
+    "u2q_count": ..., "u2q_lat_total": ...,
+    "c2a_{read,write,flush}_count|total": ...,
+    "a2u_{read,write,flush}_count|total": ...
+  }
+}
+```
+
+### Cross-cutting: System metrics
+
+`io_profiler.py`는 워크로드 thread 시작 직전에 `from core.monitor import SystemMonitor`로 통합 시스템 메트릭 수집기를 띄운다. eBPF I/O CSV (`{dev}_{session}.csv`)와 같은 디렉터리(`csv_results/`)에 `system_metrics_{session}.csv` + `topology_{session}.json`이 함께 떨어진다. timestamp 컬럼으로 join 가능. SystemMonitor 자체는 eBPF와 무관하므로 손댈 일 있으면 `core/monitor.py`만 보면 됨.
+
+### Layer 3: `io_profiler.py` — Python orchestrator
+
+`run_benchmark(mode, cmd|script_file, interval)`:
+1. `sudo ./io_trace -i {interval} [-m {mode}]`을 `Popen`(stdout=PIPE).
+2. `time.sleep(1.5)`로 attach 안정화 대기 → `drop_caches` → `SIGUSR1`로 통계 리셋 (워크로드 시작 직전 상태에서 0부터).
+3. 워크로드는 별도 thread(`run_workload_thread`)에서 `subprocess.run(cmd_or_bash_script_file)`. 워크로드 종료 시 메인 PID에 `SIGINT`를 쏴서 깨끗하게 정리.
+4. 메인 thread는 trace_proc.stdout을 라인 단위로 읽으며 `---JSON_START---`/`---JSON_END---` 사이를 버퍼링.
+5. 매 JSON마다 `parse_and_store_metrics()`로 누적값을 **delta**로 변환해 IOPS/BW/avg-lat 계산, 5초마다 `save_csv_buffers()`로 flush.
+6. 종료 시 마지막 JSON으로 `print_final_summary()` — phase × {Total, READ, WRITE, READ-AHEAD, FLUSH}의 Call/Sum(ms)/Avg(us) 테이블 출력.
+
+CSV 출력 위치: `./csv_results/{real_dev_name}_{SESSION_ID}.csv` (SESSION_ID는 모듈 로드 시 한 번 생성). 디바이스 이름은 `dev(maj:min)` → `/sys/dev/block/maj:min` realpath로 `nvme0n1` 같은 실명으로 변환.
+
+CSV 컬럼: timestamp, operation, iops_interval, bandwidth_mb_s_interval, q2d_avg_us_interval, d2c_avg_us_interval, current_qd, max_qd, total_io_count, total_bytes, q2d/d2c {total,min,max}_ns, size_hist_{4k,32k,128k,large}, lba_0 … lba_63.
+
+## Build / Run
+
+```bash
+# 빌드
+cd ebpf
+make            # vmlinux.h 생성 → BPF obj 컴파일 → skeleton 생성 → io_trace 빌드
+make clean
+
+# 단독 실행 (raw JSON을 stdout에 흘림)
+sudo ./io_trace -m libaio -i 1
+
+# 워크로드와 함께 실행 (권장 경로)
+sudo python3 io_profiler.py -m generic -i 1 -c "fio --name=test --filename=/dev/nvme0n1 ..."
+sudo python3 io_profiler.py -m libaio  -i 0 -f ./fio.sh
+```
+
+옵션:
+- `-m {generic|libaio|iouring}` — iouring은 placeholder(generic과 동일 동작).
+- `-i N` — N초마다 CSV 한 줄. `-i 0`이면 timeseries 비활성, 최종 summary만.
+- `-c` vs `-f` — mutually exclusive. 둘 다 없으면 무한 대기(수동 조작용).
+
+빌드 의존성: `clang`, `bpftool`, `libbpf-dev`, `libelf-dev`, `zlib1g-dev`. 커널은 BTF가 켜져 있어야 하며 (`/sys/kernel/btf/vmlinux` 존재), tp_btf 사용을 위해 5.x 이상 권장.
+
+## Layer 간 컨벤션
+
+수정 시 깨지기 쉬운 항목들:
+
+- **`io_req_type` enum 순서** — `io_trace.bpf.c`의 분기, `io_trace.c`의 `type_names[]`, Python의 operation 키("read"/"read_ahead"/"write"/"flush"/"discard")가 전부 같은 순서/이름. 하나 바꾸면 셋 다 바꿔야 한다.
+- **JSON 마커** — `---JSON_START---` / `---JSON_END---` 문자열. Python 파서가 라인 단위로 매칭하므로 줄을 합치거나 prefix를 추가하면 안 됨.
+- **dev key 인코딩** — `(maj << 20) | min`. 다른 곳에서 보통 `MKDEV`는 `(maj << 8) | min`을 쓰는데 여기는 다르다. minor가 20bit까지 들어갈 수 있도록 의도된 선택.
+- **size_hist 경계** — 4096 / 32768 / 131072 byte. Python CSV 컬럼명(`size_hist_4k`, `_32k`, `_128k`, `_large`)이 이걸 가정.
+- **PERCPU 합산은 user-space 책임** — BPF 측에서 PERCPU map 값을 그대로 노출하면 CPU별 부분합만 보인다. `io_trace.c::print_json_report`의 `for (i = 0; i < nr_cpus; i++)` 루프가 그 역할.
+- **`runtime`은 BPF가 모름** — fio runtime / Python `effective_duration` / interval-기반 delta는 각자 다른 시간 기준이다. 최종 리포트의 BW(MB/s)는 `total_bytes / effective_duration`을 쓰고, CSV의 `bandwidth_mb_s_interval`은 interval 사이 delta를 쓴다.
+- **bio→iocb 매핑은 fragile** — `block_rq_complete`에서 `bio->bi_private`를 `iomap_dio*`로 캐스팅해 `iocb`를 꺼낸다. iomap 경로(direct I/O over filesystem 등) 외에서는 동작하지 않을 수 있다. raw block device direct I/O는 OK이지만, 다른 I/O 경로 추가 시 확인 필요.
+
+## 알려진 sharp edges / 작업 후보
+
+- **iouring 모드 미구현** — argparse `choices`에는 있고 generic으로 fall-through. `io_uring_enter`/`io_uring_complete`에 해당하는 tracepoint/probe attach가 추가되어야 함.
+- **PERCPU_HASH max_entries=256** — 디바이스 수 상한. 일반 시스템에선 충분하지만 멀티-경로/멀티-디스크 환경에서 한계 가능.
+- **루프 unroll `#pragma unroll for (i=0; i<256; i++)`** — `io_getevents` 결과 256개까지만 처리. nr > 256인 거대한 batch는 일부 누락.
+- **`opt_interval`이 1초 미만이 안 됨** — `io_trace.c` 메인 루프가 `sleep(1)` 고정. sub-second 샘플링이 필요하면 여기 손봐야 함.
+- **CSV는 append 모드** — 같은 디렉터리에서 재실행하면 `SESSION_ID`가 달라져 새 파일이 생기지만, 디바이스 이름이 충돌하면 같은 파일에 이어붙는다. 의도된 동작인지 검토.
+- **`sample.log`, `sample.txt`, `io_trace.bpf.o`, `io_trace.skel.h`, `io_trace`(바이너리)** — 빌드/실험 산출물. `.gitignore`에 `ebpf/io_trace`, `*.o`는 들어 있지만 skel.h, sample.* 는 추적 중. 새 워크플로 추가 시 정리 여부 결정.
+- **`vmlinux.h`가 4MB 가까이 됨** — 시스템 커널 BTF 덤프. 다른 커널/머신에서 빌드하려면 `make vmlinux.h`로 재생성 필요.
+- **fio.sh의 워크로드** — 현재 Seq Write/Read 1M만 활성, Random 4K는 주석 처리. 테스트 시나리오 바꿀 일 잦으니 인자화 고려.
+
+## 작업 시 출발점 매핑
+
+| 하고 싶은 일 | 손대야 할 곳 |
+| --- | --- |
+| 새 페이즈/지연 추가 (예: scheduler 큐 진입) | `io_trace.h`의 struct → `io_trace.bpf.c`에 hook 추가 → maps에 누적 → `print_json_report`에 필드 추가 → Python `phase_stats`/CSV 컬럼 추가 |
+| 새 ioengine 지원 (iouring 등) | `io_trace.bpf.c`에 해당 syscall tracepoint 추가 → `opt_trace_*` rodata 플래그 패턴 따라가기 → `io_trace.c`의 mode 분기에 autoattach 토글 추가 → `io_profiler.py`의 `choices`와 모드 분기 |
+| 출력 포맷 추가 (예: Prometheus, parquet) | `io_profiler.py::parse_and_store_metrics`/`print_final_summary`만 건드리면 됨 — JSON 컨트랙트는 유지 |
+| 새 메트릭 (예: p99 latency) | BPF 단에서 히스토그램 추가 (현재는 mean/min/max만 있음). `lat_stats`에 bucket array 추가하는 게 표준 패턴 |
+| LBA 해상도 변경 | `io_trace.h::LBA_BUCKETS` → `io_profiler.py`의 `lba_{i}` 컬럼 생성 루프 및 `+ [f"lba_{i}" for i in range(64)]` 동기화 |

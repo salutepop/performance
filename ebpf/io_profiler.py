@@ -604,7 +604,9 @@ def run_workload_thread(cmd, script_file):
 
 
 def run_benchmark(mode="generic", cmd=None, script_file=None, interval=1):
-    trace_cmd = ["sudo", "./io_trace", "-i", str(interval)]
+    # io_trace 바이너리는 ebpf/ 안에 있음. cwd 무관하게 동작하도록 절대 경로 사용.
+    io_trace_bin = os.path.join(os.path.dirname(os.path.abspath(__file__)), "io_trace")
+    trace_cmd = ["sudo", io_trace_bin, "-i", str(interval)]
     if mode != "generic":
         trace_cmd.extend(["-m", mode])
         print(f"[*] eBPF Tracer starting in: {mode.upper()} Mode")

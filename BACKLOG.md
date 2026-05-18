@@ -39,12 +39,14 @@
 - [ ] **P3** scenario: gc stress with percentile collection
   - Preconditioning → mixed workload → p99 tail 변화 시각화
 
-- [ ] **P2** io_profiler.py: `./io_trace` 상대 경로 → 절대 경로
-  - 현재 `subprocess.Popen(["sudo","./io_trace",...])`라 ebpf/ 디렉터리 cwd에서만 동작
-  - `os.path.join(os.path.dirname(__file__), "io_trace")` 같이 절대경로화
-  - 검증: 프로젝트 루트에서 `python3 ebpf/io_profiler.py ...` 호출이 동작
 
 ## Done (newest first)
+
+- [x] **P2** io_profiler.py io_trace 경로 절대화
+  - `sudo ./io_trace` → `sudo /abs/path/io_trace` (os.path.dirname(__file__) 기준)
+  - 프로젝트 루트에서 `python3 ebpf/io_profiler.py ...` 호출도 동작
+  - sudoers NOPASSWD가 절대 경로로 매칭되므로 호환
+  - 검증: 루트 cwd에서 실행 → exit 0, FINAL REPORT 출력, BW 212 MB/s
 
 - [x] **P2** new tc framework draft
   - 신규 `scenarios/` 디렉터리. 기존 test_cases/*.py는 그대로 유지 (deprecated).

@@ -8,11 +8,6 @@
 
 ### Foundation — eBPF / I/O 정확도 향상
 
-- [ ] **P1** sub-second sampling support
-  - `io_trace.c`: `sleep(1)` 고정 루프 → `usleep(opt_interval * 1000000)` 으로 변경 (단, `opt_interval` float 받도록)
-  - argparse도 float 허용
-  - 검증: `-i 0.5` 로 500ms 주기 동작
-
 - [ ] **P1** io_uring mode support
   - BPF tracepoints: `io_uring_submit_sqe`, `io_uring_complete` 추가
   - `io_trace.c`: `-m iouring` 분기 추가
@@ -143,6 +138,11 @@
   - 검증: 프로젝트 루트에서 `python3 ebpf/io_profiler.py ...` 호출이 동작
 
 ## Done (newest first)
+
+- [x] **P1** sub-second sampling support
+  - io_trace.c: opt_interval double + atof + nanosleep tick. 최소 50ms로 clamp.
+  - io_profiler.py: -i argparse type=float
+  - 검증: -i 0.5로 ~4초간 8개 JSON 블록 (500ms 주기 정확)
 
 - [x] **P1** record per-request issue cpu + complete cpu (sq/cq divergence stat)
   - `trace_ctx`에 issue_cpu 추가, `block_rq_issue`에서 `bpf_get_smp_processor_id()` 저장

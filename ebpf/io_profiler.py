@@ -707,9 +707,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "-i",
         "--interval",
-        type=int,
-        default=1,
-        help="Logging interval in seconds (0 = Disable CSV)",
+        type=float,
+        default=1.0,
+        help="Logging interval in seconds (float, 예: 0.5 = 500ms). 0이면 CSV/timeseries 비활성.",
     )
 
     group = parser.add_mutually_exclusive_group()

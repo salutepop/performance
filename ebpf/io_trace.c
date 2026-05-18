@@ -189,21 +189,23 @@ int main(int argc, char **argv) {
     struct bpf_map *device_qd_map;
 
     bool mode_libaio = false;
-    int opt_interval = 1; 
+    double opt_interval = 1.0;   // 초 단위, sub-second (예: 0.5) 허용
 
     for (int i = 1; i < argc; i++) {
         const char *mode_str = NULL;
         if (strncmp(argv[i], "--mode=", 7) == 0) mode_str = argv[i] + 7;
         else if (strcmp(argv[i], "-m") == 0 && i + 1 < argc) mode_str = argv[++i];
-        
+
         if (mode_str && strcmp(mode_str, "libaio") == 0) mode_libaio = true;
 
         if (strncmp(argv[i], "--interval=", 11) == 0) {
-            opt_interval = atoi(argv[i] + 11);
+            opt_interval = atof(argv[i] + 11);
         } else if (strcmp(argv[i], "-i") == 0 && i + 1 < argc) {
-            opt_interval = atoi(argv[++i]);
+            opt_interval = atof(argv[++i]);
         }
     }
+    /* 너무 짧으면 BPF map clear와 print 부하로 도구가 자체로 노이즈가 됨. 최소 50ms 강제. */
+    if (opt_interval > 0 && opt_interval < 0.05) opt_interval = 0.05;
 
     signal(SIGINT, sig_handler);
     signal(SIGTERM, sig_handler);
@@ -259,24 +261,30 @@ int main(int argc, char **argv) {
     sys_stats_map = bpf_object__find_map_by_name(skel->obj, "sys_stats_map");
     device_qd_map = bpf_object__find_map_by_name(skel->obj, "device_qd");
 
-    printf("[PID: %d] io_trace is running (Modes: Generic%s) | Interval: %ds\n", 
+    printf("[PID: %d] io_trace is running (Modes: Generic%s) | Interval: %.3fs\n",
             getpid(), mode_libaio ? " + Libaio" : "", opt_interval);
     fflush(stdout);
 
-    int elapsed = 0;
+    /* opt_interval==0이면 print 비활성 (final report만). 그 외엔 매 tick 0.05초 sleep 후
+     * 누적 시간이 opt_interval 넘으면 print. */
+    const double tick_s = (opt_interval > 0 && opt_interval < 0.1) ? opt_interval : 0.1;
+    struct timespec ts_sleep = { .tv_sec = (time_t)tick_s,
+                                 .tv_nsec = (long)((tick_s - (long)tick_s) * 1e9) };
+    double elapsed = 0.0;
     while (!stop) {
-        sleep(1);
+        nanosleep(&ts_sleep, NULL);
         if (reset_flag) {
             clear_stats_map(bpf_map__fd(device_stats_map));
             if (device_qd_map) clear_stats_map(bpf_map__fd(device_qd_map));
             reset_flag = 0;
-            elapsed = 0;
+            elapsed = 0.0;
             continue;
         }
-        elapsed++;
-        
-        if (opt_interval > 0 && (elapsed % opt_interval == 0)) {
+        elapsed += tick_s;
+
+        if (opt_interval > 0 && elapsed + 1e-9 >= opt_interval) {
             print_json_report(device_stats_map, sys_stats_map, device_qd_map, stats_array, nr_cpus);
+            elapsed = 0.0;
         }
     }
 

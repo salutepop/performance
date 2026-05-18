@@ -181,7 +181,7 @@ sudo python3 io_profiler.py -m libaio  -i 0 -f ./fio.sh
 - **iouring 모드 미구현** — argparse `choices`에는 있고 generic으로 fall-through. `io_uring_enter`/`io_uring_complete`에 해당하는 tracepoint/probe attach가 추가되어야 함.
 - **PERCPU_HASH max_entries=256** — 디바이스 수 상한. 일반 시스템에선 충분하지만 멀티-경로/멀티-디스크 환경에서 한계 가능.
 - **루프 unroll `#pragma unroll for (i=0; i<256; i++)`** — `io_getevents` 결과 256개까지만 처리. nr > 256인 거대한 batch는 일부 누락.
-- **`opt_interval`이 1초 미만이 안 됨** — `io_trace.c` 메인 루프가 `sleep(1)` 고정. sub-second 샘플링이 필요하면 여기 손봐야 함.
+- ~~**`opt_interval`이 1초 미만이 안 됨**~~ — `io_trace.c` 메인 루프가 이제 `nanosleep` + float `opt_interval` 사용. `-i 0.5` 등 sub-second 가능 (최소 50ms로 clamp). `io_profiler.py`의 `-i` 도 float. **단** SystemMonitor의 nvidia-smi dmon은 1초 미만 인터벌 지원 안 함 → `int(max(1, interval))`로 clamp되어 GPU 메트릭만 1초 주기 유지.
 - **CSV는 append 모드** — 같은 디렉터리에서 재실행하면 `SESSION_ID`가 달라져 새 파일이 생기지만, 디바이스 이름이 충돌하면 같은 파일에 이어붙는다. 의도된 동작인지 검토.
 - **`sample.log`, `sample.txt`, `io_trace.bpf.o`, `io_trace.skel.h`, `io_trace`(바이너리)** — 빌드/실험 산출물. `.gitignore`에 `ebpf/io_trace`, `*.o`는 들어 있지만 skel.h, sample.* 는 추적 중. 새 워크플로 추가 시 정리 여부 결정.
 - **`vmlinux.h`가 4MB 가까이 됨** — 시스템 커널 BTF 덤프. 다른 커널/머신에서 빌드하려면 `make vmlinux.h`로 재생성 필요.

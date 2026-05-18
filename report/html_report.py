@@ -550,6 +550,23 @@ def _render_topology(topo):
         cpus = node_to_cpus.get(str(node), [])
         out.append(f"<dt>node {html.escape(str(node))} CPUs</dt><dd><code>{html.escape(_compact_cpu_list(cpus))}</code> ({len(cpus)}개)</dd>")
     out.append(f"<dt>NVMe controllers</dt><dd>{html.escape(', '.join(nvmes) or '(none)')}</dd>")
+    # nvme controller 상세 (topology.json의 raw.nvme_ctrls — flat 구조)
+    raw = topo.get("raw") or {}
+    ctrls = raw.get("nvme_ctrls") or raw.get("discovered", {}).get("nvme_ctrls") or []
+    if ctrls:
+        rows = []
+        for c in ctrls:
+            rows.append([
+                c.get("name", "?"),
+                c.get("model", "?").strip(),
+                c.get("firmware_rev", "?"),
+                str(c.get("queue_count", "?")),
+                c.get("state", "?"),
+                c.get("transport", "?"),
+                c.get("numa_node", "?"),
+            ])
+        ctrl_table = _render_table(["ctrl", "model", "firmware", "queue_count", "state", "transport", "numa"], rows)
+        out.append(f"<dt>NVMe details</dt><dd>{ctrl_table}</dd>")
     if gpus:
         gpu_descs = []
         for g in gpus:

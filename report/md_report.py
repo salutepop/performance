@@ -277,6 +277,25 @@ def build_report(session_dir, sid):
         gpus = topo.get("gpus", [])
         lines.append(f"- NUMA nodes: {', '.join(map(str, nodes)) or '(none)'}")
         lines.append(f"- NVMe controllers: {', '.join(nvmes) or '(none)'}")
+        # 상세 정보 (raw.nvme_ctrls flat 구조)
+        raw = topo.get("raw") or {}
+        ctrls = raw.get("nvme_ctrls") or raw.get("discovered", {}).get("nvme_ctrls") or []
+        if ctrls:
+            ctrl_rows = []
+            for c in ctrls:
+                ctrl_rows.append([
+                    c.get("name", "?"),
+                    (c.get("model", "?") or "?").strip(),
+                    c.get("firmware_rev", "?"),
+                    str(c.get("queue_count", "?")),
+                    c.get("state", "?"),
+                    c.get("transport", "?"),
+                    c.get("numa_node", "?"),
+                ])
+            lines.append("")
+            lines.append(_md_table(ctrl_rows,
+                ["ctrl", "model", "firmware", "queue", "state", "transport", "numa"],
+                ["l"] * 7))
         if gpus:
             for g in gpus:
                 lines.append(f"- GPU #{g.get('index','?')}: {g.get('name','?')} (NUMA {g.get('numa_node','?')})")

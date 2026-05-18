@@ -10,7 +10,6 @@
 
 - [ ] **P1** io_uring mode support  **BLOCKED:** 단일 이터레이션 범위 초과 — 신규 BPF 프로그램 2개(io_uring_submit_req/io_uring_complete) + 신규 latency 누적 struct + 신규 글로벌 map + JSON 스키마 확장 + Python parse/리포트 통합 + fio io_uring 검증까지 필요. 아래 sub-task로 분할.
   - 6.11 커널 기준 tracepoint 이름: `io_uring/io_uring_submit_req`(SQE 제출), `io_uring/io_uring_complete`(CQE 푸시), 옵션 `io_uring/io_uring_cqring_wait`.
-- [ ] **P3** html/md report에 nvme_ctrls 상세(model/firmware/queue_count) 표시 — 데이터는 이미 topology.json에 캡처됨
 - [ ] **P3** html_report `_render_topology_svg`에서 `raw.discovered.nvme_ctrls` 경로 오류 — 실제 topology.json은 flat (`raw.nvme_ctrls`). 디바이스 NUMA 매핑 lookup 실패로 edge가 그려지지 않을 수 있음. fallback path 추가.
 - [ ] **P2** iouring-1: BPF struct + 2개 tracepoint hook + map  **BLOCKED:** io_uring 워크로드(fio --ioengine=io_uring) 검증 인프라 필요. 셋이 묶음 단위라 연속 작업하는 게 효율적.
 - [ ] **P2** iouring-2: io_trace.c userspace -m iouring 분기 + iouring_overhead JSON  **BLOCKED:** iouring-1 의존
@@ -40,6 +39,13 @@
 
 
 ## Done (newest first)
+
+- [x] **P3** html/md report에 nvme_ctrls 상세 표시
+  - html_report._render_topology: NUMA 노드 dl 아래에 nvme 상세 테이블 추가
+    (ctrl/model/firmware/queue_count/state/transport/numa). topo.raw.nvme_ctrls
+    + raw.discovered.nvme_ctrls 모두 시도 (양 포맷 호환).
+  - md_report.build_report Topology 섹션에 동일 테이블.
+  - 검증: GB10 Samsung MZALC4T0HBL1 / NXHB202Q / queue=16 / live / pcie 정상 표시.
 
 - [x] **P3** md_report iops-weighted D2C/Q2D avg
   - md_report._device_aggregates: weighted_rows로 (iops, q2d, d2c) parallel tuple

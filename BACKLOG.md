@@ -55,11 +55,6 @@
 
 ### Infrastructure
 
-- [ ] **P1** root-level cli entry
-  - `pmon.py` (or `tools/pmon.py`) — io_profiler.py + report 통합 진입점
-  - `pmon run --fio "..."` → 측정 후 자동으로 리포트 생성
-  - 인자 design: subcommand `run`, `report`, `diff`
-
 - [ ] **P2** csv/json schema docs
   - `doc/schemas.md` — system_metrics.csv, device CSV, topology.json, summary.json 컬럼 명세
   - 예시 1행 포함
@@ -87,6 +82,13 @@
   - 검증: 프로젝트 루트에서 `python3 ebpf/io_profiler.py ...` 호출이 동작
 
 ## Done (newest first)
+
+- [x] **P1** root-level cli entry
+  - 프로젝트 루트에 `pmon.py` 신규. subcommand 4종: run / report / diff / summary.
+  - `run`: io_profiler 호출 후 자동 리포트 생성 (--report all|html|md|json|none)
+  - `report`: 기존 세션 산출물에서 html+md+json 일괄 생성 (--format 콤마구분)
+  - `diff`, `summary`: report.diff / report.summary 모듈 위임
+  - 검증: 4 subcommand 전부 정상 동작 (run 후 26KB HTML 자동 생성 확인)
 
 - [x] **P1** json summary export
   - `report/summary.py` 신규. md_report aggregate를 평탄한 stable JSON 스키마로 변환

@@ -28,6 +28,20 @@ NVMe raw 디바이스에 직접 쓰는 워크로드가 많아 root/sudo 권한�
 
 > eBPF 서브시스템은 별도 문서가 있다: [`ebpf/CLAUDE.md`](./ebpf/CLAUDE.md). 이 폴더 코드를 만질 때는 그 문서를 먼저 읽을 것.
 
+### 통합 CLI: `pmon.py`
+
+프로젝트 루트의 `pmon.py`가 모든 흐름을 묶는 진입점.
+
+```bash
+./pmon.py run --fio "fio ..."           # fio + eBPF 측정 + 자동 HTML/MD/JSON 리포트
+./pmon.py run --script ebpf/fio.sh -m libaio -i 1
+./pmon.py report                        # 가장 최근 세션에서 리포트만 (--session-id로 명시 가능)
+./pmon.py diff --baseline SID --candidate SID
+./pmon.py summary                       # 평탄화 JSON export
+```
+
+`run`은 종료 후 `--report` 옵션(`html`/`md`/`json` 콤마구분 or `all`/`none`)에 따라 자동 리포트 생성. 개별 `report.*` 모듈은 그대로 `python3 -m report.X` 로 단독 호출도 가능.
+
 ### 리포트 생성 (report/)
 
 세션 산출물(topology_*.json, system_metrics_*.csv, <device>_*.csv)을 자기완결 리포트로 변환. session-id 생략 시 가장 최근 topology_*.json 자동 선택.

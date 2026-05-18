@@ -28,10 +28,6 @@
 
 ### Reporting
 
-- [ ] **P2** report cli unification
-  - `report/__main__.py`: `python3 -m report --session csv_results/ --format html,md,json`
-  - 단일 진입점
-
 ### Infrastructure
 
 - [ ] **P2** csv/json schema docs
@@ -61,6 +57,12 @@
   - 검증: 프로젝트 루트에서 `python3 ebpf/io_profiler.py ...` 호출이 동작
 
 ## Done (newest first)
+
+- [x] **P2** report cli unification (`python3 -m report`)
+  - report/__main__.py 신규. --format all|html,md,json 콤마구분 옵션
+  - 내부적으로 html_report.main / md_report.main / summary.main 호출
+  - diff는 분리 — `python3 -m report.diff` 또는 pmon.py diff 사용
+  - 검증: 모든 포맷 콤보 (`all`, `html`, `md,json`) 정상 동작
 
 - [x] **P2** topology svg diagram
   - report/html_report.py: `_render_topology_svg(topo)` 신규. inline SVG로

@@ -38,12 +38,6 @@
 
 ### Visualization (단일 HTML 리포트 우선)
 
-- [ ] **P0** time-series charts (chart.js via cdn)
-  - `report/html_report.py`: I/O CSV → IOPS/BW/latency 시계열 line chart
-  - Chart.js를 CDN 또는 inline으로 embed (인터넷 없어도 동작하려면 inline)
-  - x축 timestamp, y축 메트릭. read/write 색 분리
-  - 검증: HTML 안에 `<canvas` 와 chart 데이터 JSON 포함되는지
-
 - [ ] **P1** system metrics charts (cpu/mem/irq overlay with i/o)
   - 같은 HTML에 system_metrics 차트 추가
   - I/O 차트와 timestamp 동기화 (x축 정렬). 이중 패널 또는 secondary y-axis
@@ -122,6 +116,14 @@
   - 검증: 프로젝트 루트에서 `python3 ebpf/io_profiler.py ...` 호출이 동작
 
 ## Done (newest first)
+
+- [x] **P0** time-series charts (chart.js via cdn)
+  - 디바이스별 3개 line chart: IOPS / Bandwidth / D2C latency (op 색 분리)
+  - timestamp 통합 정렬, 누락된 op 시점은 null로 align (spanGaps: true)
+  - Chart.js v4 CDN via jsdelivr. 오프라인 시 inline JS fallback이
+    "Chart.js CDN unreachable" 표시 (table은 정상 렌더 유지)
+  - 검증: 3 canvas (iops/bw/d2c) per device + 4 ops × 7 timestamps,
+    read는 첫 tick null, flush는 첫 3 tick null로 올바르게 align됨
 
 - [x] **P0** baseline html report generator
   - `report/__init__.py` + `report/html_report.py` 신규

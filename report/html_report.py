@@ -74,6 +74,105 @@ def _render_table(header, rows, max_rows=200):
     return "".join(out)
 
 
+_OP_COLORS = {
+    "read": "#0a84ff", "write": "#ff453a",
+    "read_ahead": "#30d158", "flush": "#bf5af2", "discard": "#8e8e93",
+}
+
+
+def _build_device_series(header, rows):
+    """device CSV → (labels[], series{op:{iops,bw,d2c}}). 모든 op timestamp 통합·정렬."""
+    if not header or not rows:
+        return [], {}
+    try:
+        ts_i = header.index("timestamp")
+        op_i = header.index("operation")
+        iops_i = header.index("iops_interval")
+        bw_i = header.index("bandwidth_mb_s_interval")
+        d2c_i = header.index("d2c_avg_us_interval")
+    except ValueError:
+        return [], {}
+
+    def _f(v):
+        try:
+            return float(v) if v not in ("", None) else None
+        except ValueError:
+            return None
+
+    labels = []
+    seen = set()
+    op_data = {}
+    for row in rows:
+        ts = row[ts_i] if ts_i < len(row) else ""
+        op = row[op_i] if op_i < len(row) else "?"
+        if ts not in seen:
+            labels.append(ts)
+            seen.add(ts)
+        op_data.setdefault(op, {})[ts] = {
+            "iops": _f(row[iops_i]) if iops_i < len(row) else None,
+            "bw":   _f(row[bw_i])   if bw_i < len(row) else None,
+            "d2c":  _f(row[d2c_i])  if d2c_i < len(row) else None,
+        }
+    series = {}
+    for op, by_ts in op_data.items():
+        series[op] = {
+            "iops": [by_ts.get(t, {}).get("iops") for t in labels],
+            "bw":   [by_ts.get(t, {}).get("bw")   for t in labels],
+            "d2c":  [by_ts.get(t, {}).get("d2c")  for t in labels],
+        }
+    return labels, series
+
+
+def _render_device_charts(dname, header, rows):
+    labels, series = _build_device_series(header, rows)
+    if not labels or not series:
+        return ""
+    safe = re.sub(r"[^a-zA-Z0-9]", "_", dname)
+    charts = [
+        ("iops", "IOPS",      "ops/s"),
+        ("bw",   "Bandwidth", "MB/s"),
+        ("d2c",  "D2C Latency", "us"),
+    ]
+    parts = ["<div class='chart-row'>"]
+    for metric, _, _ in charts:
+        parts.append(f"<div class='chart-cell'><canvas id='chart_{safe}_{metric}'></canvas></div>")
+    parts.append("</div>")
+
+    payload = {
+        "labels": labels,
+        "series": series,
+        "colors": _OP_COLORS,
+    }
+    payload_json = json.dumps(payload, separators=(",", ":"))
+    chart_specs = json.dumps(charts, separators=(",", ":"))
+    parts.append(f"""<script>(function(){{
+if (typeof Chart === 'undefined') {{
+  document.querySelectorAll('[id^="chart_{safe}_"]').forEach(c => c.parentNode.innerHTML = '<p class=\\'chart-warn\\'>Chart.js CDN unreachable — see table above.</p>');
+  return;
+}}
+const payload = {payload_json};
+const charts = {chart_specs};
+charts.forEach(function(spec) {{
+  const metric = spec[0], title = spec[1], ylabel = spec[2];
+  const datasets = Object.keys(payload.series).map(function(op) {{
+    return {{label: op, data: payload.series[op][metric], borderColor: payload.colors[op] || '#888',
+             backgroundColor: 'transparent', pointRadius: 1, tension: 0.2, spanGaps: true}};
+  }});
+  const cid = 'chart_{safe}_' + metric;
+  const ctx = document.getElementById(cid);
+  if (!ctx) return;
+  new Chart(ctx.getContext('2d'), {{
+    type: 'line', data: {{labels: payload.labels, datasets: datasets}},
+    options: {{responsive: true, maintainAspectRatio: false, animation: false,
+               plugins: {{title: {{display: true, text: title}}, legend: {{position: 'bottom'}}}},
+               scales: {{y: {{title: {{display: true, text: ylabel}}, beginAtZero: true}},
+                         x: {{ticks: {{maxTicksLimit: 12}}}}}}}}
+  }});
+}});
+}})();</script>""")
+    return "".join(parts)
+
+
 def _render_topology(topo):
     if not topo:
         return "<p><em>topology.json 없음</em></p>"
@@ -139,14 +238,22 @@ HTML_CSS = """
   .note { color: #888; font-size: 0.85em; }
   code { background: #eee; padding: 0.1em 0.3em; border-radius: 3px; }
   .meta { color: #666; font-size: 0.9em; }
+  .chart-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 1em; margin: 1em 0; }
+  .chart-cell { background: #fafafa; border: 1px solid #ddd; padding: 0.5em; height: 280px; position: relative; }
+  .chart-warn { color: #b00; font-style: italic; }
 """
+
+
+CHART_CDN = "https://cdn.jsdelivr.net/npm/chart.js@4"
 
 
 def _html_head(sid, now, src):
     return (
         "<!doctype html>\n<html lang='ko'><head><meta charset='utf-8'>\n"
         f"<title>perf report {html.escape(sid)}</title>\n"
-        f"<style>{HTML_CSS}</style></head><body>\n"
+        f"<style>{HTML_CSS}</style>\n"
+        f"<script src='{CHART_CDN}'></script>\n"
+        "</head><body>\n"
         f"<h1>Performance Report — session {html.escape(sid)}</h1>\n"
         f"<p class='meta'>Generated {html.escape(now)} · source: <code>{html.escape(src)}</code></p>\n"
     )
@@ -183,6 +290,7 @@ def build_report(session_dir, sid):
             parts.append(f"<h3>{html.escape(dname)}</h3>")
             h, r = _load_csv(dpath)
             parts.append(f"<p class='meta'>{len(r)}행 × {len(h)}컬럼</p>")
+            parts.append(_render_device_charts(dname, h, r))
             parts.append(_render_table(h, r))
 
     parts.append(HTML_FOOT)

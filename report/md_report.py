@@ -110,6 +110,7 @@ def _device_aggregates(header, rows):
 
     per_op = {}
     sqcq_all = []
+    weighted_rows = {}  # op → [(iops, q2d_avg, d2c_avg)] (parallel, None 허용)
     for row in rows:
         op = row[op_i] if op_i < len(row) else "?"
         s = per_op.setdefault(op, {"iops": [], "bw": [], "q2d": [], "d2c": [], "qd": []})
@@ -124,11 +125,44 @@ def _device_aggregates(header, rows):
                 sqcq_all.append(float(row[sqcq_i]))
             except ValueError:
                 pass
+        # 가중평균용 parallel tuple (None 허용)
+        def _opt(idx):
+            if idx < 0 or idx >= len(row) or row[idx] in ("", None):
+                return None
+            try:
+                return float(row[idx])
+            except ValueError:
+                return None
+        weighted_rows.setdefault(op, []).append((_opt(iops_i), _opt(q2d_i), _opt(d2c_i)))
 
     out = {"_sqcq_diff_ratio": _stats(sqcq_all)}
     for op, s in per_op.items():
         out[op] = {k: _stats(v) for k, v in s.items()}
+        # q2d/d2c avg를 iops-가중평균으로 override (interval outlier 보정)
+        wq, wd = _weighted_lat(weighted_rows.get(op, []))
+        if wq is not None:
+            out[op]["q2d"]["avg"] = wq
+        if wd is not None:
+            out[op]["d2c"]["avg"] = wd
     return out
+
+
+def _weighted_lat(triples):
+    """[(iops, q2d_avg, d2c_avg)] → (weighted_q2d, weighted_d2c). iops가 0/None인 row 무시."""
+    tw_q = tw_d = 0.0
+    sum_q = sum_d = 0.0
+    have_q = have_d = False
+    for iops, q, d in triples:
+        if not iops or iops <= 0:
+            continue
+        if q is not None:
+            sum_q += q * iops; tw_q += iops; have_q = True
+        if d is not None:
+            sum_d += d * iops; tw_d += iops; have_d = True
+    return (
+        (sum_q / tw_q) if (have_q and tw_q > 0) else None,
+        (sum_d / tw_d) if (have_d and tw_d > 0) else None,
+    )
 
 
 def _top_findings(sys_agg, dev_aggs):

@@ -136,6 +136,14 @@ class SystemMonitor:
         gpus = self.sys_info.get("discovered", self.sys_info).get("gpu", [])
         self._gpu_indices = [g["index"] for g in gpus if isinstance(g.get("index"), int)]
 
+        # cpufreq 존재 여부 1회 탐지 (없으면 컬럼/수집 모두 스킵).
+        self._cpufreq_paths = {}
+        for cpu_id in self._cpu_to_node:
+            p = f"/sys/devices/system/cpu/cpu{cpu_id}/cpufreq/scaling_cur_freq"
+            if os.path.exists(p):
+                self._cpufreq_paths[cpu_id] = p
+        self._has_cpufreq = bool(self._cpufreq_paths)
+
     def _dump_topology(self):
         path = os.path.join(self.output_dir, f"topology_{self.session_id}.json")
         with open(path, "w") as f:
@@ -160,6 +168,9 @@ class SystemMonitor:
             "pgpgin_per_s", "pgpgout_per_s", "pswpin_per_s", "pswpout_per_s",
             "loadavg_1m",
         ]
+        if self._has_cpufreq:
+            for node in self._nodes:
+                cols += [f"node{node}_freq_avg_mhz", f"node{node}_freq_max_mhz"]
         for idx in self._gpu_indices:
             cols += [
                 f"gpu{idx}_pwr_w", f"gpu{idx}_temp_c",
@@ -244,6 +255,17 @@ class SystemMonitor:
                 return float(f.read().split()[0])
         except Exception:
             return 0.0
+
+    def _read_cpu_freq_mhz(self):
+        """{cpu_id: mhz} — cpufreq 없는 시스템은 빈 dict."""
+        out = {}
+        for cpu_id, path in self._cpufreq_paths.items():
+            try:
+                with open(path) as f:
+                    out[cpu_id] = int(f.read().strip()) / 1000.0  # kHz → MHz
+            except Exception:
+                pass
+        return out
 
     # ----------------------------------------------------------------------
     # GPU streaming
@@ -418,6 +440,22 @@ class SystemMonitor:
         row["pswpin_per_s"] = round(pswpin / elapsed, 1)
         row["pswpout_per_s"] = round(pswpout / elapsed, 1)
         row["loadavg_1m"] = load1
+
+        if self._has_cpufreq:
+            freqs = self._read_cpu_freq_mhz()
+            # cpu_id → node 매핑으로 그룹화. 노드별 평균/최대 산출.
+            per_node = {n: [] for n in self._nodes}
+            for cpu_id, mhz in freqs.items():
+                node = self._cpu_to_node.get(cpu_id)
+                if node in per_node:
+                    per_node[node].append(mhz)
+            for node, vals in per_node.items():
+                if vals:
+                    row[f"node{node}_freq_avg_mhz"] = round(sum(vals) / len(vals), 1)
+                    row[f"node{node}_freq_max_mhz"] = round(max(vals), 1)
+                else:
+                    row[f"node{node}_freq_avg_mhz"] = None
+                    row[f"node{node}_freq_max_mhz"] = None
 
         if self._gpu_indices:
             with self._gpu_lock:

@@ -8,18 +8,21 @@
 
 ### Foundation — eBPF / I/O 정확도 향상
 
-- [ ] **P1** io_uring mode support
-  - BPF tracepoints: `io_uring_submit_sqe`, `io_uring_complete` 추가
-  - `io_trace.c`: `-m iouring` 분기 추가
-  - `io_profiler.py`: choices 정리 + 동작
-  - 검증: fio `--ioengine=io_uring` 으로 워크로드 → C2A/A2U 비슷한 phase 잡히는지
+- [ ] **P1** io_uring mode support  **BLOCKED:** 단일 이터레이션 범위 초과 — 신규 BPF 프로그램 2개(io_uring_submit_req/io_uring_complete) + 신규 latency 누적 struct + 신규 글로벌 map + JSON 스키마 확장 + Python parse/리포트 통합 + fio io_uring 검증까지 필요. 아래 sub-task로 분할.
+  - 6.11 커널 기준 tracepoint 이름: `io_uring/io_uring_submit_req`(SQE 제출), `io_uring/io_uring_complete`(CQE 푸시), 옵션 `io_uring/io_uring_cqring_wait`.
+- [ ] **P1** iouring-1: BPF struct + 2개 tracepoint hook + map
+  - `io_trace.h`에 `struct iouring_stats { u2q_count/total, c2a_count/total }` 추가
+  - `opt_trace_iouring` rodata. `tp/io_uring/io_uring_submit_req` → submit_ts에 (pid_tgid, req_ptr) 기록.
+  - `tp/io_uring/io_uring_complete` → match해서 latency 누적
+- [ ] **P1** iouring-2: io_trace.c userspace
+  - `-m iouring` 분기에서 autoattach 토글
+  - print_json_report에 `iouring_overhead` 블록 추가
+- [ ] **P1** iouring-3: io_profiler.py 통합
+  - mode 분기 (현재 generic으로 fall-through)
+  - final report에 io_uring phase 행
+  - 검증: `--ioengine=io_uring` fio로 워크로드 후 평균 latency가 nonzero
 
 ### System extensions
-
-- [ ] **P1** cpu frequency tracking (where available)
-  - `core/monitor.py`: `/sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq` per-NUMA 평균/최대
-  - 컬럼: `node{N}_freq_avg_mhz, node{N}_freq_max_mhz`
-  - 없는 시스템은 skip (silent)
 
 - [ ] **P1** per-numa memory stats
   - `/sys/devices/system/node/node*/meminfo` 에서 MemFree/MemUsed 파싱
@@ -138,6 +141,10 @@
   - 검증: 프로젝트 루트에서 `python3 ebpf/io_profiler.py ...` 호출이 동작
 
 ## Done (newest first)
+
+- [x] **P1** cpu frequency tracking (where available)
+  - `core/monitor.py`: cpu0..cpuN의 cpufreq sysfs 존재 검사 1회. 있으면 컬럼 `node{N}_freq_{avg,max}_mhz` 추가.
+  - 검증: ARM GB10에서 node0 avg ~3300MHz, max 종종 4-7GHz spike (AMU 즉시값 특성).
 
 - [x] **P1** sub-second sampling support
   - io_trace.c: opt_interval double + atof + nanosleep tick. 최소 50ms로 clamp.

@@ -458,6 +458,77 @@ charts.forEach(function(spec) {{
     return "".join(parts)
 
 
+def _render_topology_svg(topo):
+    """간단 inline SVG: NUMA node 박스 + 그 아래 CPU range, NVMe/GPU 박스를
+    소속 NUMA node에 라인으로 연결. 외부 라이브러리 0."""
+    if not topo:
+        return ""
+    nodes = topo.get("nodes") or []
+    if not nodes:
+        return ""
+    cpu_map = topo.get("cpu_to_node") or {}
+    nvmes_full = topo.get("raw", {}).get("discovered", {}).get("nvme_ctrls", []) or []
+    nvme_names = topo.get("nvme_controllers") or []
+    nvme_to_node = {}
+    for c in nvmes_full:
+        if c.get("name") in nvme_names:
+            nvme_to_node[c["name"]] = c.get("numa_node", "-1")
+    gpus = topo.get("gpus") or []
+
+    # node→cpus 역매핑
+    node_to_cpus = {}
+    for cpu, node in cpu_map.items():
+        node_to_cpus.setdefault(str(node), []).append(int(cpu))
+    for n in node_to_cpus:
+        node_to_cpus[n] = sorted(node_to_cpus[n])
+
+    W = 760
+    node_w = max(140, (W - 40) // max(1, len(nodes)))
+    node_h = 56
+    pad_top = 20
+    y_node = pad_top
+    y_dev = y_node + node_h + 70  # 디바이스(NVMe/GPU)는 아래 row
+    h_dev = 36
+    H = y_dev + h_dev + 30
+
+    parts = [f"<svg width='{W}' height='{H}' xmlns='http://www.w3.org/2000/svg' style='font-family: ui-monospace, monospace; font-size: 11px;'>"]
+    parts.append("<style>.nodebox{fill:#dbeafe;stroke:#1d4ed8;stroke-width:1.5} "
+                 ".devbox{fill:#fef3c7;stroke:#b45309;stroke-width:1.5} "
+                 ".gpubox{fill:#dcfce7;stroke:#15803d;stroke-width:1.5} "
+                 ".lbl{fill:#1f2937} .sub{fill:#6b7280;font-size:10px} "
+                 ".edge{stroke:#9ca3af;stroke-width:1;fill:none}</style>")
+
+    node_centers = {}
+    for i, node in enumerate(nodes):
+        x = 20 + i * node_w
+        cx = x + (node_w - 20) / 2
+        node_centers[str(node)] = cx
+        parts.append(f"<rect class='nodebox' x='{x}' y='{y_node}' width='{node_w - 20}' height='{node_h}' rx='6'/>")
+        parts.append(f"<text class='lbl' x='{cx}' y='{y_node + 22}' text-anchor='middle'>NUMA node {node}</text>")
+        cpus = node_to_cpus.get(str(node), [])
+        parts.append(f"<text class='sub' x='{cx}' y='{y_node + 42}' text-anchor='middle'>CPU {_compact_cpu_list(cpus)} ({len(cpus)})</text>")
+
+    # 디바이스 row: NVMe + GPU 함께. 균등 분할.
+    devs = [("nvme", n, nvme_to_node.get(n, "-1")) for n in nvme_names]
+    devs += [("gpu", g.get("name", "?"), str(g.get("numa_node", "-1"))) for g in gpus]
+    if devs:
+        dev_w = max(120, (W - 40) // max(1, len(devs)))
+        for i, (kind, name, node_id) in enumerate(devs):
+            x = 20 + i * dev_w
+            cx = x + (dev_w - 20) / 2
+            klass = "gpubox" if kind == "gpu" else "devbox"
+            parts.append(f"<rect class='{klass}' x='{x}' y='{y_dev}' width='{dev_w - 20}' height='{h_dev}' rx='4'/>")
+            short = name if len(name) < 22 else name[:19] + "..."
+            parts.append(f"<text class='lbl' x='{cx}' y='{y_dev + 16}' text-anchor='middle'>{short}</text>")
+            parts.append(f"<text class='sub' x='{cx}' y='{y_dev + 30}' text-anchor='middle'>{kind.upper()} · NUMA {node_id}</text>")
+            # edge to its NUMA node (있을 때만)
+            ncx = node_centers.get(str(node_id))
+            if ncx is not None:
+                parts.append(f"<line class='edge' x1='{cx}' y1='{y_dev}' x2='{ncx}' y2='{y_node + node_h}'/>")
+    parts.append("</svg>")
+    return "<div style='margin: 0.5em 0;'>" + "".join(parts) + "</div>"
+
+
 def _render_topology(topo):
     if not topo:
         return "<p><em>topology.json 없음</em></p>"
@@ -473,7 +544,7 @@ def _render_topology(topo):
     for n in node_to_cpus:
         node_to_cpus[n] = sorted(node_to_cpus[n])
 
-    out = ["<dl class='topology'>"]
+    out = [_render_topology_svg(topo), "<dl class='topology'>"]
     out.append(f"<dt>NUMA nodes</dt><dd>{html.escape(', '.join(map(str, nodes)) or '(none)')}</dd>")
     for node in nodes:
         cpus = node_to_cpus.get(str(node), [])

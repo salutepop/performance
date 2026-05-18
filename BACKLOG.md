@@ -26,10 +26,6 @@
 
 ### Visualization (단일 HTML 리포트 우선)
 
-- [ ] **P2** topology svg diagram
-  - cpu cores ↔ NUMA nodes ↔ nvme controllers ↔ gpus 단순 SVG
-  - inline SVG (외부 라이브러리 안 씀)
-
 ### Reporting
 
 - [ ] **P2** report cli unification
@@ -65,6 +61,15 @@
   - 검증: 프로젝트 루트에서 `python3 ebpf/io_profiler.py ...` 호출이 동작
 
 ## Done (newest first)
+
+- [x] **P2** topology svg diagram
+  - report/html_report.py: `_render_topology_svg(topo)` 신규. inline SVG로
+    NUMA node 박스 + 그 아래 CPU range 라벨 + 디바이스 row(NVMe/GPU 박스).
+    디바이스의 numa_node가 NUMA 노드와 매칭되면 line으로 연결, 아니면 (예: -1
+    unified memory) 미연결 — 정확히 시각화.
+  - 외부 라이브러리 0, CSS는 SVG 안 inline 스타일.
+  - 검증: GB10 → 3 box(1 NUMA + 1 NVMe + 1 GPU), 6 text label, 0 line
+    (NVMe/GPU 모두 numa_node=-1 정확 반영)
 
 - [x] **P2** multi-device comparison view
   - HTML 리포트 Device I/O 섹션 맨 위에 "Overview" 패널 추가.

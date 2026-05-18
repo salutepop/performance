@@ -12,6 +12,7 @@
   - 6.11 커널 기준 tracepoint 이름: `io_uring/io_uring_submit_req`(SQE 제출), `io_uring/io_uring_complete`(CQE 푸시), 옵션 `io_uring/io_uring_cqring_wait`.
 - [ ] **P3** md_report: D2C/Q2D avg를 iops 가중평균으로 (현재 단순 mean이 첫 인터벌 outlier에 끌림)
 - [ ] **P3** html/md report에 nvme_ctrls 상세(model/firmware/queue_count) 표시 — 데이터는 이미 topology.json에 캡처됨
+- [ ] **P3** html_report `_render_topology_svg`에서 `raw.discovered.nvme_ctrls` 경로 오류 — 실제 topology.json은 flat (`raw.nvme_ctrls`). 디바이스 NUMA 매핑 lookup 실패로 edge가 그려지지 않을 수 있음. fallback path 추가.
 - [ ] **P2** iouring-1: BPF struct + 2개 tracepoint hook + map  **BLOCKED:** io_uring 워크로드(fio --ioengine=io_uring) 검증 인프라 필요. 셋이 묶음 단위라 연속 작업하는 게 효율적.
 - [ ] **P2** iouring-2: io_trace.c userspace -m iouring 분기 + iouring_overhead JSON  **BLOCKED:** iouring-1 의존
 - [ ] **P2** iouring-3: io_profiler.py 통합 + fio --ioengine=io_uring 검증  **BLOCKED:** iouring-1/2 의존
@@ -29,10 +30,6 @@
 ### Reporting
 
 ### Infrastructure
-
-- [ ] **P2** csv/json schema docs
-  - `doc/schemas.md` — system_metrics.csv, device CSV, topology.json, summary.json 컬럼 명세
-  - 예시 1행 포함
 
 - [ ] **P2** ramdisk fallback for ci-friendly testing
   - 현재 `/tmp/fio_smoke.dat` 쓰는데 디스크 free 적은 시스템 고려
@@ -57,6 +54,16 @@
   - 검증: 프로젝트 루트에서 `python3 ebpf/io_profiler.py ...` 호출이 동작
 
 ## Done (newest first)
+
+- [x] **P2** csv/json schema docs
+  - `doc/schemas.md` 신규. 5개 산출물 명세:
+    - `<device>_*.csv` (이전에 ebpf/CLAUDE.md에 흩어져 있던 컬럼 정리)
+    - `system_metrics_*.csv` (동적 컬럼 패턴 documentation)
+    - `topology_*.json` (raw가 flat — `raw.nvme_ctrls` 직접 경로임을 명시)
+    - `summary_*.json` (stable schema)
+    - report HTML/MD/diff 요약
+  - add-only 정책 명시 (외부 도구 호환)
+  - 발견된 P3: html_report._render_topology_svg의 nvme_ctrls 경로 오류
 
 - [x] **P2** report cli unification (`python3 -m report`)
   - report/__main__.py 신규. --format all|html,md,json 콤마구분 옵션

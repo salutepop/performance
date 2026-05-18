@@ -1,0 +1,161 @@
+# Development Backlog
+
+랄프 루프가 위에서 아래 순서로 처리한다. 각 task는 작게 — 한 커밋 안에 끝낼 수 있어야 함.
+
+**범례**: `P0` 차단/필수 · `P1` 가치 큼 · `P2` nice-to-have · `P3` 발견된 follow-up · `BLOCKED:` 이유
+
+## Pending
+
+### Foundation — eBPF / I/O 정확도 향상
+
+- [ ] **P0** add latency log2 histograms to BPF (q2d, d2c per type)
+  - `io_trace.h`: `struct lat_hist { unsigned long long buckets[32]; }` (1us~16ms log2). `rw_stats`에 `lat_hist q2d_hist`, `lat_hist d2c_hist` 추가
+  - `io_trace.bpf.c::block_rq_complete`: bucket = `log2(ns)`, 클램프, 해당 bucket++
+  - 검증: smoke 후 JSON에 `q2d_hist[32]`, `d2c_hist[32]` 컬럼 보이는지
+
+- [ ] **P0** expose latency histograms in JSON + python percentile calc
+  - `io_trace.c::print_json_report`: histogram 배열 출력
+  - `io_profiler.py`: `compute_percentiles(hist, [50,95,99,99.9])` 헬퍼, 최종 리포트에 p50/p95/p99/p99.9 행 추가
+  - 검증: fio + 결과에 p99 latency 값 합리적인지
+
+- [ ] **P0** per-interval libaio overhead in csv
+  - `io_profiler.py::parse_and_store_metrics`: `libaio_overhead` 필드도 delta 계산해서 CSV에 `u2q_avg_us_interval, c2a_avg_us_interval, a2u_avg_us_interval` 컬럼 추가
+  - 검증: libaio 모드 smoke 후 CSV의 새 컬럼이 0이 아닌 값을 가지는지
+
+- [ ] **P1** record per-request issue cpu + complete cpu (sq/cq divergence stat)
+  - BPF: `req_start` ctx에 `issue_cpu`, `block_rq_complete`에서 현재 CPU 비교
+  - 통계: `sq_cq_same_count`, `sq_cq_diff_count` 글로벌 카운터 (또는 device_qd 옆)
+  - JSON / CSV에 비율 노출
+
+- [ ] **P1** sub-second sampling support
+  - `io_trace.c`: `sleep(1)` 고정 루프 → `usleep(opt_interval * 1000000)` 으로 변경 (단, `opt_interval` float 받도록)
+  - argparse도 float 허용
+  - 검증: `-i 0.5` 로 500ms 주기 동작
+
+- [ ] **P1** io_uring mode support
+  - BPF tracepoints: `io_uring_submit_sqe`, `io_uring_complete` 추가
+  - `io_trace.c`: `-m iouring` 분기 추가
+  - `io_profiler.py`: choices 정리 + 동작
+  - 검증: fio `--ioengine=io_uring` 으로 워크로드 → C2A/A2U 비슷한 phase 잡히는지
+
+### System extensions
+
+- [ ] **P1** cpu frequency tracking (where available)
+  - `core/monitor.py`: `/sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq` per-NUMA 평균/최대
+  - 컬럼: `node{N}_freq_avg_mhz, node{N}_freq_max_mhz`
+  - 없는 시스템은 skip (silent)
+
+- [ ] **P1** per-numa memory stats
+  - `/sys/devices/system/node/node*/meminfo` 에서 MemFree/MemUsed 파싱
+  - 컬럼: `node{N}_mem_free_mb, node{N}_mem_used_mb`
+  - 단일 노드 fallback 처리
+
+- [ ] **P2** nvme controller sysfs stats
+  - `/sys/class/nvme/nvme*/model`, `state`, `numa_node`, `queue_count`, `cntrltype`
+  - topology.json에 nvme controllers 섹션 확장 (정적 정보)
+  - SMART는 별도 task
+
+- [ ] **P2** pcie aer counters (per-device)
+  - `/sys/bus/pci/devices/*/aer_dev_correctable`, `aer_dev_fatal` 등
+  - 활성화돼 있는 디바이스만 (대부분 0). NVMe 컨트롤러 대상으로만 노출
+  - 컬럼: `nvme{N}_aer_correctable, nvme{N}_aer_fatal`
+
+- [ ] **P2** smartctl integration (optional, if smartctl exists)
+  - 1회성 metadata + 끝나고 1회 smart attributes dump
+  - `which smartctl` 없으면 skip
+  - 출력: `smart_{session}.json`
+
+- [ ] **P3** network stats for nvme-of (if applicable)
+  - `/proc/net/dev`, ConnectX nic 같은 게 있으면 잡기
+  - 일반 시스템엔 noise이므로 explicit opt-in (config 플래그)
+
+### Visualization (단일 HTML 리포트 우선)
+
+- [ ] **P0** baseline html report generator
+  - `report/` 디렉터리 신규 (peer to `core/`, `ebpf/`)
+  - `report/html_report.py`: argparse로 session 디렉터리 받음 → `report_{session}.html` 생성
+  - 첫 버전: topology summary + I/O CSV/system CSV 테이블 dump (스타일 단순)
+  - 자기-완결 HTML (외부 리소스 없음)
+  - 검증: 생성된 HTML 브라우저 없이 grep으로 핵심 섹션 확인
+
+- [ ] **P0** time-series charts (chart.js via cdn)
+  - `report/html_report.py`: I/O CSV → IOPS/BW/latency 시계열 line chart
+  - Chart.js를 CDN 또는 inline으로 embed (인터넷 없어도 동작하려면 inline)
+  - x축 timestamp, y축 메트릭. read/write 색 분리
+  - 검증: HTML 안에 `<canvas` 와 chart 데이터 JSON 포함되는지
+
+- [ ] **P1** system metrics charts (cpu/mem/irq overlay with i/o)
+  - 같은 HTML에 system_metrics 차트 추가
+  - I/O 차트와 timestamp 동기화 (x축 정렬). 이중 패널 또는 secondary y-axis
+
+- [ ] **P1** lba heatmap chart
+  - 64 bucket × time → 2D heatmap (HTML5 canvas 직접 또는 chart.js matrix)
+  - 색상: 접근 빈도 log-scale
+
+- [ ] **P1** latency percentile rendering
+  - p50/p95/p99/p99.9 시계열 line (A1/A2 완료 의존)
+  - 같은 HTML 리포트에 통합
+
+- [ ] **P2** multi-device comparison view
+  - 한 세션에 N개 NVMe 있으면 device별 차트를 하나의 그리드에
+  - 또는 normalized 한 패널에 overlay
+
+- [ ] **P2** topology svg diagram
+  - cpu cores ↔ NUMA nodes ↔ nvme controllers ↔ gpus 단순 SVG
+  - inline SVG (외부 라이브러리 안 씀)
+
+### Reporting
+
+- [ ] **P0** markdown summary report
+  - `report/md_report.py`: HTML과 동일 입력 → `report_{session}.md`
+  - 표 + 핵심 숫자 (총 IOPS, BW, p99, dirty/iowait, GPU peak)
+  - "Top findings" 자동 추출 (예: top NUMA node CPU%, top IRQ CPU 등)
+
+- [ ] **P1** session comparison diff
+  - `report/diff.py`: 두 session 디렉터리 입력 → 차이 리포트 (md+html)
+  - IOPS/BW/lat 통계 비교, regression 후보 highlight (>5% 변동)
+  - 검증: 같은 session 두 번 주면 모든 diff가 ~0
+
+- [ ] **P1** json summary export
+  - `report/summary.py`: session → `summary_{session}.json` (programmatic consumption)
+  - 스키마 평탄화: device별 totals + system 평균/peak + gpu peak
+
+- [ ] **P2** report cli unification
+  - `report/__main__.py`: `python3 -m report --session csv_results/ --format html,md,json`
+  - 단일 진입점
+
+### Infrastructure
+
+- [ ] **P0** quick smoke script as ci-baseline
+  - `scripts/smoke_quick.sh`: 이미 1차 버전 있음. 더 빡세게: 종료 코드 0 보장 + CSV row count > 0 + GPU 컬럼 있는지 체크 (있는 시스템에서)
+  - 매 BPF/sysmon 커밋 전 자동 실행 (DEV_RULES에 명시)
+
+- [ ] **P1** root-level cli entry
+  - `pmon.py` (or `tools/pmon.py`) — io_profiler.py + report 통합 진입점
+  - `pmon run --fio "..."` → 측정 후 자동으로 리포트 생성
+  - 인자 design: subcommand `run`, `report`, `diff`
+
+- [ ] **P2** csv/json schema docs
+  - `doc/schemas.md` — system_metrics.csv, device CSV, topology.json, summary.json 컬럼 명세
+  - 예시 1행 포함
+
+- [ ] **P2** ramdisk fallback for ci-friendly testing
+  - 현재 `/tmp/fio_smoke.dat` 쓰는데 디스크 free 적은 시스템 고려
+  - tmpfs 명시 + 사이즈 작게 (64M)
+
+### Test framework rewrite
+
+- [ ] **P2** new tc framework draft
+  - 기존 `test_cases/*.py` 다 ignore (한 번 backup 후 deprecated/ 로 이동)
+  - 신규 `scenarios/` (또는 `test_cases/` 재활용) — 새 SystemMonitor + 통합 리포트 활용하는 베이스 클래스
+  - 예시 시나리오 1~2개
+
+- [ ] **P3** scenario: pcie contention (fio + gpu workload)
+  - GPU에 가벼운 매트릭스 곱 thread + 동시에 fio → PCIe band 경합 측정
+
+- [ ] **P3** scenario: gc stress with percentile collection
+  - Preconditioning → mixed workload → p99 tail 변화 시각화
+
+## Done (newest first)
+
+<!-- 루프가 완료한 task가 여기로 옮겨진다 -->

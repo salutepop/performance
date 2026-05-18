@@ -79,6 +79,105 @@ _OP_COLORS = {
     "read_ahead": "#30d158", "flush": "#bf5af2", "discard": "#8e8e93",
 }
 
+# 다중 시리즈 자동 색 팔레트 (NUMA node, NVMe controller, GPU 등).
+_PALETTE = ["#0a84ff", "#ff453a", "#30d158", "#ff9f0a", "#bf5af2", "#5e5ce6", "#64d2ff", "#ffd60a"]
+
+
+def _build_system_series(header, rows):
+    """system_metrics CSV → labels[] + 4종 chart 데이터.
+    {labels, cpu:{label:[]}, irq:{label:[]}, mem:{label:[]}, gpu:{label:[]}}."""
+    if not header or not rows:
+        return None
+    ts_i = -1
+    try:
+        ts_i = header.index("timestamp")
+    except ValueError:
+        return None
+
+    labels = [row[ts_i] for row in rows]
+
+    def _series_for(predicate):
+        out = {}
+        for i, name in enumerate(header):
+            if predicate(name):
+                col = []
+                for row in rows:
+                    if i >= len(row) or row[i] in ("", None):
+                        col.append(None)
+                    else:
+                        try:
+                            col.append(float(row[i]))
+                        except ValueError:
+                            col.append(None)
+                out[name] = col
+        return out
+
+    cpu_series = _series_for(lambda n: n.startswith("node") and (
+        n.endswith("_user_pct") or n.endswith("_sys_pct") or n.endswith("_iowait_pct")))
+    irq_series = _series_for(lambda n: n.endswith("_irq_per_s") and n.startswith("nvme"))
+    mem_series = _series_for(lambda n: n in ("mem_dirty_mb", "mem_writeback_mb"))
+    # GPU SM 단독은 % / power는 W → 단위 다르므로 두 차트 분리. 우선 SM과 power 한 패널에 dual y-axis보단 simple하게 같이 출력.
+    gpu_series = _series_for(lambda n: n.startswith("gpu") and (
+        n.endswith("_sm_pct") or n.endswith("_pwr_w") or n.endswith("_mem_pct")))
+
+    return {"labels": labels, "cpu": cpu_series, "irq": irq_series, "mem": mem_series, "gpu": gpu_series}
+
+
+def _render_system_charts(payload):
+    """system_metrics 4종 line chart 렌더링. payload는 _build_system_series 출력."""
+    if not payload:
+        return ""
+    has_gpu = bool(payload.get("gpu"))
+    has_irq = bool(payload.get("irq"))
+    has_mem = bool(payload.get("mem"))
+    has_cpu = bool(payload.get("cpu"))
+    if not (has_cpu or has_irq or has_mem or has_gpu):
+        return ""
+
+    canvases = []
+    if has_cpu: canvases.append(("cpu", "CPU % (per NUMA node)", "%"))
+    if has_irq: canvases.append(("irq", "NVMe IRQ rate", "IRQ/s"))
+    if has_mem: canvases.append(("mem", "Memory dirty/writeback", "MB"))
+    if has_gpu: canvases.append(("gpu", "GPU utilization & power", "% / W"))
+
+    parts = ["<div class='chart-row'>"]
+    for key, _, _ in canvases:
+        parts.append(f"<div class='chart-cell'><canvas id='chart_sys_{key}'></canvas></div>")
+    parts.append("</div>")
+
+    payload_json = json.dumps(payload, separators=(",", ":"))
+    specs = json.dumps(canvases, separators=(",", ":"))
+    palette = json.dumps(_PALETTE)
+    parts.append(f"""<script>(function(){{
+if (typeof Chart === 'undefined') {{
+  document.querySelectorAll('[id^="chart_sys_"]').forEach(c => c.parentNode.innerHTML = '<p class=\\'chart-warn\\'>Chart.js CDN unreachable.</p>');
+  return;
+}}
+const payload = {payload_json};
+const specs = {specs};
+const palette = {palette};
+specs.forEach(function(spec) {{
+  const key = spec[0], title = spec[1], ylabel = spec[2];
+  const data = payload[key] || {{}};
+  const labels = Object.keys(data);
+  const datasets = labels.map(function(label, i) {{
+    return {{label: label, data: data[label], borderColor: palette[i % palette.length],
+             backgroundColor: 'transparent', pointRadius: 1, tension: 0.2, spanGaps: true}};
+  }});
+  const cid = 'chart_sys_' + key;
+  const ctx = document.getElementById(cid);
+  if (!ctx) return;
+  new Chart(ctx.getContext('2d'), {{
+    type: 'line', data: {{labels: payload.labels, datasets: datasets}},
+    options: {{responsive: true, maintainAspectRatio: false, animation: false,
+               plugins: {{title: {{display: true, text: title}}, legend: {{position: 'bottom'}}}},
+               scales: {{y: {{title: {{display: true, text: ylabel}}, beginAtZero: true}},
+                         x: {{ticks: {{maxTicksLimit: 12}}}}}}}}
+  }});
+}});
+}})();</script>""")
+    return "".join(parts)
+
 
 def _build_device_series(header, rows):
     """device CSV → (labels[], series{op:{iops,bw,d2c}}). 모든 op timestamp 통합·정렬."""
@@ -279,6 +378,8 @@ def build_report(session_dir, sid):
         parts.append("<p><em>system_metrics CSV 없음</em></p>")
     else:
         parts.append(f"<p class='meta'>{len(r)}행 × {len(h)}컬럼 · 원본: <code>{html.escape(os.path.basename(sys_path))}</code></p>")
+        sys_payload = _build_system_series(h, r)
+        parts.append(_render_system_charts(sys_payload))
         parts.append(_render_table(h, r))
 
     parts.append("<h2>3. Device I/O metrics</h2>")

@@ -39,10 +39,6 @@
 
 ### Visualization (단일 HTML 리포트 우선)
 
-- [ ] **P1** system metrics charts (cpu/mem/irq overlay with i/o)
-  - 같은 HTML에 system_metrics 차트 추가
-  - I/O 차트와 timestamp 동기화 (x축 정렬). 이중 패널 또는 secondary y-axis
-
 - [ ] **P1** lba heatmap chart
   - 64 bucket × time → 2D heatmap (HTML5 canvas 직접 또는 chart.js matrix)
   - 색상: 접근 빈도 log-scale
@@ -108,6 +104,12 @@
   - 검증: 프로젝트 루트에서 `python3 ebpf/io_profiler.py ...` 호출이 동작
 
 ## Done (newest first)
+
+- [x] **P1** system metrics charts (cpu/mem/irq overlay with i/o)
+  - HTML "System metrics" 섹션에 4개 line chart 추가: CPU %(per NUMA), NVMe IRQ/s,
+    Memory dirty/writeback, GPU SM%/power
+  - 각 차트는 조건부 — 데이터 없으면 canvas 생략 (single-node, no-GPU 시스템 대응)
+  - 검증: GB10 세션 7 canvas total (system 4 + device 3) 정상
 
 - [x] **P0** quick smoke script as ci-baseline (강화판)
   - 7단계 검증으로 확장:

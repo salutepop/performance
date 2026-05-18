@@ -222,6 +222,105 @@ def _build_device_series(header, rows):
     return labels, series
 
 
+def _build_lba_heatmap(header, rows):
+    """device CSV → {timestamps:[], buckets: [[count per ts] × 64]}.
+    각 timestamp에서 모든 operation의 lba_N 합계를 취하고, 이전 timestamp 와의 delta 사용.
+    """
+    if not header or not rows:
+        return None
+    try:
+        ts_i = header.index("timestamp")
+    except ValueError:
+        return None
+    lba_indices = []
+    for i in range(64):
+        try:
+            lba_indices.append(header.index(f"lba_{i}"))
+        except ValueError:
+            return None  # 64 컬럼 다 없으면 스킵
+
+    # timestamp 단위로 op별 합계 → row 합 (op 무관, 디스크 전체 접근 분포)
+    ts_order = []
+    ts_seen = set()
+    per_ts_sum = {}  # ts → [64 buckets cumulative sum across ops]
+    for row in rows:
+        ts = row[ts_i] if ts_i < len(row) else ""
+        if ts not in ts_seen:
+            ts_order.append(ts)
+            ts_seen.add(ts)
+            per_ts_sum[ts] = [0] * 64
+        for b, ci in enumerate(lba_indices):
+            if ci < len(row) and row[ci] not in ("", None):
+                try:
+                    per_ts_sum[ts][b] += int(float(row[ci]))
+                except ValueError:
+                    pass
+
+    # 누적값이라 인터벌 delta = 현재 - 이전 (첫 인터벌은 그대로)
+    deltas = []
+    prev = [0] * 64
+    for ts in ts_order:
+        cur = per_ts_sum[ts]
+        d = [max(0, cur[b] - prev[b]) for b in range(64)]
+        deltas.append(d)
+        prev = cur
+
+    return {"timestamps": ts_order, "buckets": deltas}
+
+
+def _render_lba_heatmap(dname, header, rows):
+    data = _build_lba_heatmap(header, rows)
+    if not data or not any(any(row) for row in data["buckets"]):
+        return ""
+    safe = re.sub(r"[^a-zA-Z0-9]", "_", dname)
+    payload_json = json.dumps(data, separators=(",", ":"))
+    return f"""<div class='heatmap-cell'>
+<canvas id='heatmap_{safe}' width='720' height='320'></canvas>
+<p class='meta'>LBA 분포 heatmap (bucket 0 = 디스크 앞부분, 63 = 뒷부분). 색: log(인터벌 접근 횟수).</p>
+</div>
+<script>(function() {{
+const data = {payload_json};
+const canvas = document.getElementById('heatmap_{safe}');
+if (!canvas) return;
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+const padL = 50, padB = 30, padT = 10, padR = 10;
+const nx = data.timestamps.length || 1;
+const ny = 64;
+const cellW = (W - padL - padR) / nx;
+const cellH = (H - padT - padB) / ny;
+let mx = 0;
+for (const col of data.buckets) for (const v of col) if (v > mx) mx = v;
+const logMax = Math.log10(mx + 1) || 1;
+ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H);
+for (let xi = 0; xi < nx; xi++) {{
+  const col = data.buckets[xi];
+  for (let yi = 0; yi < ny; yi++) {{
+    const v = col[yi];
+    if (v <= 0) continue;
+    const t = Math.log10(v + 1) / logMax;
+    // viridis-like: dark blue → green → yellow
+    const r = Math.round(255 * Math.min(1, Math.max(0, 1.5 * t - 0.4)));
+    const g = Math.round(255 * Math.min(1, Math.max(0, 1.2 * t)));
+    const b = Math.round(255 * Math.min(1, Math.max(0, 1 - 1.5 * t)));
+    ctx.fillStyle = `rgb(${{r}},${{g}},${{b}})`;
+    ctx.fillRect(padL + xi * cellW, padT + (ny - 1 - yi) * cellH, Math.ceil(cellW), Math.ceil(cellH));
+  }}
+}}
+ctx.fillStyle = '#333'; ctx.font = '11px ui-monospace, monospace';
+ctx.textAlign = 'right';
+ctx.fillText('bucket 63', padL - 4, padT + 10);
+ctx.fillText('0', padL - 4, H - padB);
+ctx.textAlign = 'center';
+for (let xi = 0; xi < nx; xi++) {{
+  if (xi % Math.max(1, Math.floor(nx / 8)) !== 0) continue;
+  ctx.fillText(data.timestamps[xi], padL + xi * cellW + cellW / 2, H - padB + 14);
+}}
+ctx.fillStyle = '#666'; ctx.textAlign = 'left';
+ctx.fillText(`max ${{mx.toLocaleString()}}`, padL, H - 4);
+}})();</script>"""
+
+
 def _render_device_charts(dname, header, rows):
     labels, series = _build_device_series(header, rows)
     if not labels or not series:
@@ -340,6 +439,8 @@ HTML_CSS = """
   .chart-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 1em; margin: 1em 0; }
   .chart-cell { background: #fafafa; border: 1px solid #ddd; padding: 0.5em; height: 280px; position: relative; }
   .chart-warn { color: #b00; font-style: italic; }
+  .heatmap-cell { margin: 1em 0; }
+  .heatmap-cell canvas { border: 1px solid #ccc; max-width: 100%; height: auto; }
 """
 
 
@@ -392,6 +493,7 @@ def build_report(session_dir, sid):
             h, r = _load_csv(dpath)
             parts.append(f"<p class='meta'>{len(r)}행 × {len(h)}컬럼</p>")
             parts.append(_render_device_charts(dname, h, r))
+            parts.append(_render_lba_heatmap(dname, h, r))
             parts.append(_render_table(h, r))
 
     parts.append(HTML_FOOT)

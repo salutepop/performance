@@ -39,10 +39,6 @@
 
 ### Visualization (단일 HTML 리포트 우선)
 
-- [ ] **P1** lba heatmap chart
-  - 64 bucket × time → 2D heatmap (HTML5 canvas 직접 또는 chart.js matrix)
-  - 색상: 접근 빈도 log-scale
-
 - [ ] **P1** latency percentile rendering
   - p50/p95/p99/p99.9 시계열 line (A1/A2 완료 의존)
   - 같은 HTML 리포트에 통합
@@ -104,6 +100,12 @@
   - 검증: 프로젝트 루트에서 `python3 ebpf/io_profiler.py ...` 호출이 동작
 
 ## Done (newest first)
+
+- [x] **P1** lba heatmap chart
+  - Device별 (LBA bucket × timestamp) 2D heatmap. HTML5 canvas 직접 그림 (Chart.js
+    matrix plugin 의존성 없음 — code-size 작음).
+  - 누적 lba_N → 인터벌 delta 변환 (op 무관 합계). log-scale viridis 색.
+  - 검증: bucket 18 (256MB 파일 위치)에 200K/인터벌 집중 관찰됨
 
 - [x] **P1** system metrics charts (cpu/mem/irq overlay with i/o)
   - HTML "System metrics" 섹션에 4개 line chart 추가: CPU %(per NUMA), NVMe IRQ/s,

@@ -14,8 +14,19 @@ set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 EBPF="$ROOT/ebpf"
-TMP_FIO="/tmp/fio_smoke.dat"
+TMP_FIO=${TMP_FIO:-/tmp/fio_smoke.dat}
 RUNTIME=${RUNTIME:-6}
+SIZE=${SIZE:-64M}            # fio 파일 사이즈. CI/저용량 디스크 환경에서 더 작게.
+NUMJOBS=${NUMJOBS:-2}
+
+# /tmp는 보통 ext4. tmpfs는 direct=1 미지원이라 못 씀.
+# 디스크 free 체크 — fio가 SIZE 만큼 미리 할당하므로 여유분 필요.
+TARGET_DIR=$(dirname "$TMP_FIO")
+AVAIL_MB=$(df -m "$TARGET_DIR" | awk 'NR==2 {print $4}')
+SIZE_MB=$(echo "$SIZE" | sed 's/[Mm]$//; s/[Gg]$/000/')
+if [ "$AVAIL_MB" -lt "$((SIZE_MB * 2))" ] 2>/dev/null; then
+    echo "[smoke] WARN: $TARGET_DIR free $AVAIL_MB MB < required ~${SIZE_MB}*2 MB"
+fi
 
 cd "$EBPF"
 
@@ -26,12 +37,13 @@ make >/dev/null 2>&1
 
 echo "[smoke] 2/7 run io_profiler (libaio, ${RUNTIME}s)"
 LOG=$(mktemp)
-trap 'rm -f "$LOG"' EXIT
+# fio 테스트 파일은 다음 실행 재사용 가능하지만 KEEP_FIO=0이면 정리.
+trap 'rm -f "$LOG"; [ "${KEEP_FIO:-1}" = "0" ] && rm -f "$TMP_FIO"; true' EXIT
 
 timeout 40 python3 io_profiler.py -m libaio -i 1 \
     -c "fio --name=smoke --filename=$TMP_FIO --rw=randrw --rwmixread=50 \
-        --bs=4k --iodepth=32 --size=256M --runtime=$RUNTIME --time_based \
-        --direct=1 --ioengine=libaio --group_reporting --numjobs=2" \
+        --bs=4k --iodepth=32 --size=$SIZE --runtime=$RUNTIME --time_based \
+        --direct=1 --ioengine=libaio --group_reporting --numjobs=$NUMJOBS" \
     >"$LOG" 2>&1
 RC=$?
 if [ $RC -ne 0 ]; then

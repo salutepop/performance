@@ -31,10 +31,6 @@
 
 ### Infrastructure
 
-- [ ] **P2** ramdisk fallback for ci-friendly testing
-  - 현재 `/tmp/fio_smoke.dat` 쓰는데 디스크 free 적은 시스템 고려
-  - tmpfs 명시 + 사이즈 작게 (64M)
-
 ### Test framework rewrite
 
 - [ ] **P2** new tc framework draft
@@ -54,6 +50,13 @@
   - 검증: 프로젝트 루트에서 `python3 ebpf/io_profiler.py ...` 호출이 동작
 
 ## Done (newest first)
+
+- [x] **P2** ci-friendly smoke parameters
+  - smoke_quick.sh: SIZE 256M → 64M 기본값, env로 override 가능 (SIZE/NUMJOBS/TMP_FIO/RUNTIME)
+  - 시작 시 df로 free space 체크, SIZE의 2배 미만이면 WARN
+  - KEEP_FIO=0 으로 종료 시 fio test file cleanup (기본은 재사용을 위해 유지)
+  - 주: tmpfs (/dev/shm)는 fio --direct=1 미지원이라 사용 불가 → /tmp ext4 유지
+  - 검증: 3 조합 (default / SIZE=32M / KEEP_FIO=0) 전부 PASS
 
 - [x] **P2** csv/json schema docs
   - `doc/schemas.md` 신규. 5개 산출물 명세:

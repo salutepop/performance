@@ -11,17 +11,13 @@
 - [ ] **P1** io_uring mode support  **BLOCKED:** 단일 이터레이션 범위 초과 — 신규 BPF 프로그램 2개(io_uring_submit_req/io_uring_complete) + 신규 latency 누적 struct + 신규 글로벌 map + JSON 스키마 확장 + Python parse/리포트 통합 + fio io_uring 검증까지 필요. 아래 sub-task로 분할.
   - 6.11 커널 기준 tracepoint 이름: `io_uring/io_uring_submit_req`(SQE 제출), `io_uring/io_uring_complete`(CQE 푸시), 옵션 `io_uring/io_uring_cqring_wait`.
 - [ ] **P3** md_report: D2C/Q2D avg를 iops 가중평균으로 (현재 단순 mean이 첫 인터벌 outlier에 끌림)
+- [ ] **P3** html/md report에 nvme_ctrls 상세(model/firmware/queue_count) 표시 — 데이터는 이미 topology.json에 캡처됨
 - [ ] **P2** iouring-1: BPF struct + 2개 tracepoint hook + map
 - [ ] **P2** iouring-2: io_trace.c userspace -m iouring 분기 + iouring_overhead JSON
 - [ ] **P2** iouring-3: io_profiler.py 통합 + fio --ioengine=io_uring 검증
   - 셋이 묶음 단위. 한 세션에서 연속 작업하는 게 효율적이라 P2로 demote.
 
 ### System extensions
-
-- [ ] **P2** nvme controller sysfs stats
-  - `/sys/class/nvme/nvme*/model`, `state`, `numa_node`, `queue_count`, `cntrltype`
-  - topology.json에 nvme controllers 섹션 확장 (정적 정보)
-  - SMART는 별도 task
 
 - [ ] **P2** pcie aer counters (per-device)
   - `/sys/bus/pci/devices/*/aer_dev_correctable`, `aer_dev_fatal` 등
@@ -82,6 +78,12 @@
   - 검증: 프로젝트 루트에서 `python3 ebpf/io_profiler.py ...` 호출이 동작
 
 ## Done (newest first)
+
+- [x] **P2** nvme controller sysfs stats
+  - core/discovery.py에 `_discover_nvme_ctrls` 추가. 10개 attr 수집:
+    model/state/firmware_rev/serial/transport/address/cntrltype/queue_count/numa_node/subsysnqn
+  - topology.json의 raw.discovered.nvme_ctrls에 노출됨 (post-hoc 분석 컨텍스트)
+  - 검증: Samsung MZALC4T0HBL1 / firmware NXHB202Q / queue_count=16 / state=live 캡처
 
 - [x] **P1** root-level cli entry
   - 프로젝트 루트에 `pmon.py` 신규. subcommand 4종: run / report / diff / summary.

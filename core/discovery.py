@@ -9,6 +9,7 @@ class SystemDiscovery:
             "cpu": {},
             "numa": {},
             "storage": [],
+            "nvme_ctrls": [],
             "memory": {},
             "gpu": []
         }
@@ -17,6 +18,7 @@ class SystemDiscovery:
         self._discover_cpu()
         self._discover_numa()
         self._discover_storage()
+        self._discover_nvme_ctrls()
         self._discover_memory()
         self._discover_gpu()
         return self.info
@@ -74,6 +76,32 @@ class SystemDiscovery:
         except:
             # NVMe가 없을 경우 기본 디스크 탐색 (lsblk)
             pass
+
+    def _discover_nvme_ctrls(self):
+        """NVMe 컨트롤러 단위 정적 sysfs attr 수집 — topology.json에 보존되어
+        post-hoc 분석 시 디바이스 모델/펌웨어/큐 수 등 컨텍스트 제공."""
+        attrs = ["model", "state", "firmware_rev", "serial", "transport",
+                 "address", "cntrltype", "queue_count", "numa_node", "subsysnqn"]
+        try:
+            nvme_dirs = sorted(d for d in os.listdir("/sys/class/nvme") if d.startswith("nvme"))
+        except Exception:
+            return
+        for ctrl in nvme_dirs:
+            ctx = {"name": ctrl}
+            for a in attrs:
+                p = f"/sys/class/nvme/{ctrl}/{a}"
+                try:
+                    with open(p) as f:
+                        ctx[a] = f.read().strip()
+                except Exception:
+                    pass
+            # queue_count 정수 변환 시도
+            if "queue_count" in ctx:
+                try:
+                    ctx["queue_count"] = int(ctx["queue_count"])
+                except ValueError:
+                    pass
+            self.info["nvme_ctrls"].append(ctx)
 
     def _discover_memory(self):
         try:

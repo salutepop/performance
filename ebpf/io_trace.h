@@ -28,16 +28,25 @@ struct lat_stats {
 struct rw_stats {
     unsigned long long io_count;
     unsigned long long total_bytes;
-    struct lat_stats q2d; 
-    struct lat_stats d2c; 
+    struct lat_stats q2d;
+    struct lat_stats d2c;
     unsigned long long size_hist[MAX_SIZE_BUCKETS];
     unsigned int lba_hist[LBA_BUCKETS]; // LBA 접근 빈도 버킷
-    int current_qd;        
-    unsigned int max_qd;
 };
 
 struct io_stats {
     struct rw_stats stats[IO_MAX_TYPES];
+};
+
+/*
+ * QD는 device_stats(PERCPU_HASH)에서 분리해 별도의 글로벌 HASH 맵으로 관리한다.
+ * block_rq_issue가 SQ CPU에서, block_rq_complete가 CQ(IRQ) CPU에서 실행되므로
+ * PERCPU 카운터로는 +1/-1이 서로 다른 CPU에 누적되어 무의미한 값이 나온다.
+ * 글로벌 HASH + __sync_fetch_and_add 로 cross-CPU atomic 보장.
+ */
+struct dev_qd {
+    int current_qd[IO_MAX_TYPES];
+    unsigned int max_qd[IO_MAX_TYPES];
 };
 
 struct libaio_stats {

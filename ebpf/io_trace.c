@@ -24,14 +24,16 @@ void clear_stats_map(int fd) {
     }
 }
 
-void print_json_report(struct bpf_map *device_stats_map, struct bpf_map *sys_stats_map, 
+void print_json_report(struct bpf_map *device_stats_map, struct bpf_map *sys_stats_map,
+                       struct bpf_map *device_qd_map,
                        struct io_stats *stats_array, int nr_cpus) {
     const char *type_names[IO_MAX_TYPES] = {"read", "read_ahead", "write", "flush", "discard"};
-    
+
     printf("\n---JSON_START---\n{\n  \"devices\": [\n");
 
     unsigned int key = 0, next_key;
     int fd = bpf_map__fd(device_stats_map);
+    int qd_fd = device_qd_map ? bpf_map__fd(device_qd_map) : -1;
     int first_dev = 1;
 
     while (bpf_map_get_next_key(fd, &key, &next_key) == 0) {
@@ -40,8 +42,6 @@ void print_json_report(struct bpf_map *device_stats_map, struct bpf_map *sys_sta
             for (int t = 0; t < IO_MAX_TYPES; t++) {
                 dev_total.stats[t].io_count = 0;
                 dev_total.stats[t].total_bytes = 0;
-                dev_total.stats[t].current_qd = 0;
-                dev_total.stats[t].max_qd = 0;
                 dev_total.stats[t].q2d.total = 0;
                 dev_total.stats[t].q2d.max = 0;
                 dev_total.stats[t].q2d.min = (unsigned long long)-1;
@@ -57,11 +57,9 @@ void print_json_report(struct bpf_map *device_stats_map, struct bpf_map *sys_sta
                 for (int t = 0; t < IO_MAX_TYPES; t++) {
                     struct rw_stats *cpu_st = &stats_array[i].stats[t];
                     struct rw_stats *tot_st = &dev_total.stats[t];
-                    if (cpu_st->io_count > 0 || cpu_st->current_qd > 0) {
+                    if (cpu_st->io_count > 0) {
                         tot_st->io_count += cpu_st->io_count;
                         tot_st->total_bytes += cpu_st->total_bytes;
-                        tot_st->current_qd += cpu_st->current_qd;
-                        if (cpu_st->max_qd > tot_st->max_qd) tot_st->max_qd = cpu_st->max_qd;
 
                         for (int b = 0; b < MAX_SIZE_BUCKETS; b++) tot_st->size_hist[b] += cpu_st->size_hist[b];
                         for (int b = 0; b < LBA_BUCKETS; b++) tot_st->lba_hist[b] += cpu_st->lba_hist[b];
@@ -74,6 +72,12 @@ void print_json_report(struct bpf_map *device_stats_map, struct bpf_map *sys_sta
                         total_any_io += cpu_st->io_count;
                     }
                 }
+            }
+
+            // QD는 별도 글로벌 HASH 맵에서 가져온다 (cross-CPU atomic 기반).
+            struct dev_qd qd_data = {0};
+            if (qd_fd >= 0) {
+                bpf_map_lookup_elem(qd_fd, &next_key, &qd_data);
             }
 
             if (total_any_io > 0) {
@@ -92,8 +96,8 @@ void print_json_report(struct bpf_map *device_stats_map, struct bpf_map *sys_sta
                         printf("        \"%s\": {\n", type_names[t]);
                         printf("          \"total_count\": %llu,\n", dev_total.stats[t].io_count);
                         printf("          \"total_bytes\": %llu,\n", dev_total.stats[t].total_bytes);
-                        printf("          \"current_qd\": %d,\n", dev_total.stats[t].current_qd);
-                        printf("          \"max_qd\": %u,\n", dev_total.stats[t].max_qd);
+                        printf("          \"current_qd\": %d,\n", qd_data.current_qd[t]);
+                        printf("          \"max_qd\": %u,\n", qd_data.max_qd[t]);
                         
                         printf("          \"size_hist\": [%llu, %llu, %llu, %llu],\n", 
                                dev_total.stats[t].size_hist[0], dev_total.stats[t].size_hist[1],
@@ -159,6 +163,7 @@ int main(int argc, char **argv) {
     struct io_stats *stats_array;
     struct bpf_map *device_stats_map;
     struct bpf_map *sys_stats_map;
+    struct bpf_map *device_qd_map;
 
     bool mode_libaio = false;
     int opt_interval = 1; 
@@ -229,6 +234,7 @@ int main(int argc, char **argv) {
     stats_array = calloc(nr_cpus, sizeof(struct io_stats));
     device_stats_map = bpf_object__find_map_by_name(skel->obj, "device_stats");
     sys_stats_map = bpf_object__find_map_by_name(skel->obj, "sys_stats_map");
+    device_qd_map = bpf_object__find_map_by_name(skel->obj, "device_qd");
 
     printf("[PID: %d] io_trace is running (Modes: Generic%s) | Interval: %ds\n", 
             getpid(), mode_libaio ? " + Libaio" : "", opt_interval);
@@ -239,6 +245,7 @@ int main(int argc, char **argv) {
         sleep(1);
         if (reset_flag) {
             clear_stats_map(bpf_map__fd(device_stats_map));
+            if (device_qd_map) clear_stats_map(bpf_map__fd(device_qd_map));
             reset_flag = 0;
             elapsed = 0;
             continue;
@@ -246,11 +253,11 @@ int main(int argc, char **argv) {
         elapsed++;
         
         if (opt_interval > 0 && (elapsed % opt_interval == 0)) {
-            print_json_report(device_stats_map, sys_stats_map, stats_array, nr_cpus);
+            print_json_report(device_stats_map, sys_stats_map, device_qd_map, stats_array, nr_cpus);
         }
     }
 
-    print_json_report(device_stats_map, sys_stats_map, stats_array, nr_cpus);
+    print_json_report(device_stats_map, sys_stats_map, device_qd_map, stats_array, nr_cpus);
 
     free(stats_array);
 cleanup:

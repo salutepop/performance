@@ -93,9 +93,28 @@ struct {
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 256);
-    __type(key, u32); 
-    __type(value, u64); 
+    __type(key, u32);
+    __type(value, u64);
 } dev_capacity_map SEC(".maps");
+
+/*
+ * QD 글로벌 카운터: cross-CPU atomic이 필요해 PERCPU가 아닌 일반 HASH를 사용.
+ * key=dev_id, value=struct dev_qd ({current_qd[5], max_qd[5]}).
+ */
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 256);
+    __type(key, u32);
+    __type(value, struct dev_qd);
+} device_qd SEC(".maps");
+
+static __always_inline struct dev_qd *get_or_init_dev_qd(u32 dev) {
+    struct dev_qd *q = bpf_map_lookup_elem(&device_qd, &dev);
+    if (q) return q;
+    struct dev_qd init = {};
+    bpf_map_update_elem(&device_qd, &dev, &init, BPF_NOEXIST);
+    return bpf_map_lookup_elem(&device_qd, &dev);
+}
 
 // Libaio Tracepoints 생략 (이전 코드와 동일, 분량관계상 주요 함수만 배치)
 SEC("tracepoint/syscalls/sys_enter_io_submit")
@@ -294,50 +313,28 @@ int BPF_PROG(block_rq_issue, struct request *rq) {
     struct trace_ctx tctx = { .issue_ts = ts, .q2d_lat = q2d_lat, .pid_tgid = pid_tgid };
     bpf_map_update_elem(&req_start, &req_ptr, &tctx, BPF_ANY);
 
-    // [QD 추적 로직 추가] Issue 될 때 증가
+    // QD 추적: device_qd(글로벌 HASH)에 cross-CPU atomic으로 증감.
     struct gendisk *disk = BPF_CORE_READ(rq, q, disk);
     if (disk) {
         u32 dev = (BPF_CORE_READ(disk, major) << 20) | BPF_CORE_READ(disk, first_minor);
-        struct io_stats *s = bpf_map_lookup_elem(&device_stats, &dev);
-        if (!s) {
-            u32 zero_key = 0;
-            struct io_stats *init_s = bpf_map_lookup_elem(&scratch_stats, &zero_key);
-            if (init_s) {
-                for(int i=0; i<IO_MAX_TYPES; i++) {
-                    init_s->stats[i].io_count = 0;
-                    init_s->stats[i].total_bytes = 0;
-                    init_s->stats[i].q2d.total = 0;
-                    init_s->stats[i].q2d.max = 0;
-                    init_s->stats[i].q2d.min = (unsigned long long)-1;
-                    init_s->stats[i].d2c.total = 0;
-                    init_s->stats[i].d2c.max = 0;
-                    init_s->stats[i].d2c.min = (unsigned long long)-1;
-                    init_s->stats[i].current_qd = 0;
-                    init_s->stats[i].max_qd = 0;
-                    for(int b=0; b<MAX_SIZE_BUCKETS; b++) init_s->stats[i].size_hist[b] = 0;
-                    for(int b=0; b<LBA_BUCKETS; b++) init_s->stats[i].lba_hist[b] = 0;
-                }
-                bpf_map_update_elem(&device_stats, &dev, init_s, BPF_ANY);
-                s = bpf_map_lookup_elem(&device_stats, &dev);
-            }
-        }
-        if (s) {
-            u64 cmd_flags = BPF_CORE_READ(rq, cmd_flags);
-            u32 op = cmd_flags & 255; 
-            int type = -1;
-            if (op == 0) type = (cmd_flags & BPF_REQ_RAHEAD) ? IO_READ_AHEAD : IO_READ;
-            else if (op == 1) type = IO_WRITE;
-            else if (op == 2) type = IO_FLUSH;
-            else if (op == 3) type = IO_DISCARD;
 
-            if (type != -1) {
-                // 1. 값만 원자적으로 증가시킴 (반환값 무시)
-                __sync_fetch_and_add(&s->stats[type].current_qd, 1);
-                
-                // 2. 증가된 값을 다시 읽어옴
-                int qd = s->stats[type].current_qd;
-                if (qd > (int)s->stats[type].max_qd) {
-                    s->stats[type].max_qd = qd;
+        u64 cmd_flags = BPF_CORE_READ(rq, cmd_flags);
+        u32 op = cmd_flags & 255;
+        int type = -1;
+        if (op == 0) type = (cmd_flags & BPF_REQ_RAHEAD) ? IO_READ_AHEAD : IO_READ;
+        else if (op == 1) type = IO_WRITE;
+        else if (op == 2) type = IO_FLUSH;
+        else if (op == 3) type = IO_DISCARD;
+
+        if (type >= 0 && type < IO_MAX_TYPES) {
+            struct dev_qd *q = get_or_init_dev_qd(dev);
+            if (q) {
+                // BPF XADD는 반환값 사용 불가 → increment 후 별도 read.
+                // 두 연산 사이 race가 있지만 max_qd는 soft stat이라 허용.
+                __sync_fetch_and_add(&q->current_qd[type], 1);
+                int new_qd = q->current_qd[type];
+                if (new_qd > 0 && (unsigned int)new_qd > q->max_qd[type]) {
+                    q->max_qd[type] = (unsigned int)new_qd;
                 }
             }
         }
@@ -383,8 +380,6 @@ int BPF_PROG(block_rq_complete, struct request *rq, int error, unsigned int nr_b
                         init_s->stats[i].d2c.total = 0;
                         init_s->stats[i].d2c.max = 0;
                         init_s->stats[i].d2c.min = (unsigned long long)-1;
-                        init_s->stats[i].current_qd = 0;
-                        init_s->stats[i].max_qd = 0;
                         for(int b=0; b<MAX_SIZE_BUCKETS; b++) init_s->stats[i].size_hist[b] = 0;
                         for(int b=0; b<LBA_BUCKETS; b++) init_s->stats[i].lba_hist[b] = 0;
                     }
@@ -395,15 +390,15 @@ int BPF_PROG(block_rq_complete, struct request *rq, int error, unsigned int nr_b
 
             if (s) {
                 struct rw_stats *target = &s->stats[type];
-                
+
                 target->io_count++;
                 target->total_bytes += nr_bytes;
-                
+
                 if (nr_bytes <= 4096) target->size_hist[0]++;
                 else if (nr_bytes <= 32768) target->size_hist[1]++;
                 else if (nr_bytes <= 131072) target->size_hist[2]++;
                 else target->size_hist[3]++;
-                
+
                 target->d2c.total += d2c_lat;
                 if (d2c_lat > target->d2c.max) target->d2c.max = d2c_lat;
                 if (target->d2c.min == (unsigned long long)-1 || d2c_lat < target->d2c.min) target->d2c.min = d2c_lat;
@@ -421,9 +416,12 @@ int BPF_PROG(block_rq_complete, struct request *rq, int error, unsigned int nr_b
                     if (bucket >= LBA_BUCKETS) bucket = LBA_BUCKETS - 1;
                     target->lba_hist[bucket]++;
                 }
+            }
 
-                // [QD 추적 로직 추가] 완료 시 감소
-                __sync_fetch_and_add(&target->current_qd, -1);
+            // QD 추적: 완료 시 글로벌 카운터에서 감소 (cross-CPU atomic).
+            struct dev_qd *qd = bpf_map_lookup_elem(&device_qd, &dev);
+            if (qd) {
+                __sync_fetch_and_add(&qd->current_qd[type], -1);
             }
         }
     }

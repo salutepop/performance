@@ -49,10 +49,6 @@
 
 ### Reporting
 
-- [ ] **P1** json summary export
-  - `report/summary.py`: session → `summary_{session}.json` (programmatic consumption)
-  - 스키마 평탄화: device별 totals + system 평균/peak + gpu peak
-
 - [ ] **P2** report cli unification
   - `report/__main__.py`: `python3 -m report --session csv_results/ --format html,md,json`
   - 단일 진입점
@@ -91,6 +87,12 @@
   - 검증: 프로젝트 루트에서 `python3 ebpf/io_profiler.py ...` 호출이 동작
 
 ## Done (newest first)
+
+- [x] **P1** json summary export
+  - `report/summary.py` 신규. md_report aggregate를 평탄한 stable JSON 스키마로 변환
+  - 구조: topology + devices{name: {sqcq, ops: {op: {total_io, bw/d2c/qd peaks}}}}
+    + system {cpu per-node, memory peaks, nvme_irq, gpu peaks}
+  - 검증: 2.2KB JSON, 모든 device/system 필드 정상 출력
 
 - [x] **P1** session comparison diff
   - `report/diff.py` 신규. md_report의 _device_aggregates/_system_aggregates 재사용

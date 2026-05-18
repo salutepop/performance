@@ -35,6 +35,7 @@ NVMe raw 디바이스에 직접 쓰는 워크로드가 많아 root/sudo 권한�
 - HTML: `python3 -m report.html_report --session-dir <dir> [--session-id SID] [-o out.html]` — topology 요약 + CSV 테이블 + 디바이스별 시계열 차트 3개 (IOPS/BW/D2C latency, operation 색 분리). 차트는 `<script src="https://cdn.jsdelivr.net/npm/chart.js@4">`를 통한 CDN 로드 — 오프라인 환경에서는 차트 자리에 "Chart.js CDN unreachable" 메시지 표시되고 테이블은 정상 렌더.
 - Markdown: `python3 -m report.md_report ...` — Top findings(SQ/CQ, iowait, GPU 활동, top NUMA node) + Topology/Device aggregate/System aggregate 요약 테이블만 (포터블 텍스트, ~1.5KB).
 - Session diff: `python3 -m report.diff --baseline SID --candidate SID [--session-dir DIR]` — 두 세션 aggregate 비교, op별 IOPS/BW/D2C/peak QD + system CPU/IRQ/GPU 변동률 표. 변동 ≥5%는 ⚠, ≥20%는 ⛔로 표시. SID 대신 절대 경로 폴더도 받음.
+- JSON summary: `python3 -m report.summary ...` — 세션 산출물을 단일 평탄화 JSON으로 export (`summary_{sid}.json`). 프로그램적 소비용 (대시보드 입력, 회귀 자동화 등). 스키마는 stable — 컬럼 추가만 허용.
 
 ```bash
 cd ebpf

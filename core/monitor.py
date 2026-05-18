@@ -179,6 +179,25 @@ class SystemMonitor:
                 self._aer_paths[ctrl] = paths
         self._has_aer = bool(self._aer_paths)
 
+        # 네트워크 통계는 opt-in (NVMe-oF/RDMA 환경 한정). 환경변수 PMON_ENABLE_NET=1로 활성.
+        self._net_enabled = os.environ.get("PMON_ENABLE_NET", "0") in ("1", "true", "yes")
+        self._net_ifaces = []
+        if self._net_enabled:
+            try:
+                with open("/proc/net/dev") as f:
+                    lines = f.readlines()[2:]
+                for line in lines:
+                    iface = line.split(":")[0].strip()
+                    if not iface or iface == "lo":
+                        continue
+                    # docker/bridge/veth 등 가상 인터페이스 제외, 물리/RDMA만 남김
+                    if iface.startswith(("docker", "br-", "veth", "virbr")):
+                        continue
+                    self._net_ifaces.append(iface)
+            except Exception:
+                pass
+        self._prev_net = None  # {iface: (rx_bytes, tx_bytes)} 인터벌 delta용
+
     def _dump_topology(self):
         path = os.path.join(self.output_dir, f"topology_{self.session_id}.json")
         with open(path, "w") as f:
@@ -212,6 +231,9 @@ class SystemMonitor:
         if self._has_aer:
             for ctrl in self._aer_paths:
                 cols += [f"{ctrl}_aer_cor", f"{ctrl}_aer_fatal", f"{ctrl}_aer_nonfatal"]
+        if self._net_enabled and self._net_ifaces:
+            for iface in self._net_ifaces:
+                cols += [f"net_{iface}_rx_mb_s", f"net_{iface}_tx_mb_s"]
         for idx in self._gpu_indices:
             cols += [
                 f"gpu{idx}_pwr_w", f"gpu{idx}_temp_c",
@@ -296,6 +318,32 @@ class SystemMonitor:
                 return float(f.read().split()[0])
         except Exception:
             return 0.0
+
+    def _read_net_raw(self):
+        """{iface: (rx_bytes, tx_bytes)} — /proc/net/dev raw 누적값."""
+        out = {}
+        try:
+            with open("/proc/net/dev") as f:
+                lines = f.readlines()[2:]
+            for line in lines:
+                if ":" not in line:
+                    continue
+                iface, rest = line.split(":", 1)
+                iface = iface.strip()
+                if iface not in self._net_ifaces:
+                    continue
+                parts = rest.split()
+                if len(parts) < 16:
+                    continue
+                try:
+                    rx = int(parts[0])    # bytes
+                    tx = int(parts[8])    # bytes
+                    out[iface] = (rx, tx)
+                except (ValueError, IndexError):
+                    pass
+        except Exception:
+            pass
+        return out
 
     def _read_aer(self):
         """{ctrl: {cor, fatal, nonfatal}} - PCI AER TOTAL counters (raw 누적값).
@@ -544,6 +592,18 @@ class SystemMonitor:
                 row[f"{ctrl}_aer_cor"] = v.get("cor", 0)
                 row[f"{ctrl}_aer_fatal"] = v.get("fatal", 0)
                 row[f"{ctrl}_aer_nonfatal"] = v.get("nonfatal", 0)
+
+        if self._net_enabled and self._net_ifaces:
+            net_now = self._read_net_raw()
+            prev = self._prev_net or {}
+            for iface in self._net_ifaces:
+                rx, tx = net_now.get(iface, (0, 0))
+                prx, ptx = prev.get(iface, (rx, tx))
+                drx = max(0, rx - prx) / (1024 * 1024) / elapsed
+                dtx = max(0, tx - ptx) / (1024 * 1024) / elapsed
+                row[f"net_{iface}_rx_mb_s"] = round(drx, 3)
+                row[f"net_{iface}_tx_mb_s"] = round(dtx, 3)
+            self._prev_net = net_now
 
         if self._has_numa_meminfo:
             numa_mem = self._read_numa_meminfo_mb()

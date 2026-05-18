@@ -18,9 +18,6 @@
 
 - [ ] **P2** smartctl integration (optional, if smartctl exists)  **BLOCKED:** smartctl가 NVMe 블록 디바이스 접근에 root 필요. 현재 NOPASSWD sudoers에 미포함이라 자율 루프에서 검증 불가.
 
-- [ ] **P3** network stats for nvme-of (if applicable)
-  - `/proc/net/dev`, ConnectX nic 같은 게 있으면 잡기
-  - 일반 시스템엔 noise이므로 explicit opt-in (config 플래그)
 
 ### Visualization (단일 HTML 리포트 우선)
 
@@ -38,6 +35,14 @@
 
 
 ## Done (newest first)
+
+- [x] **P3** network stats for nvme-of (opt-in)
+  - core/monitor.py: PMON_ENABLE_NET=1 환경변수로 활성. 기본은 비활성 (일반
+    시스템에서 노이즈 회피).
+  - /proc/net/dev 파싱 + interval delta → net_<iface>_{rx,tx}_mb_s 컬럼
+  - lo/docker/br-/veth/virbr 자동 제외 (물리/RDMA NIC만 남김)
+  - 검증: env 미설정 → 0 net 컬럼; PMON_ENABLE_NET=1 → 4 iface × 2 (rx/tx)
+    = 8 net 컬럼 (enP7s7, enp1s0f0np0 등 정상 인식)
 
 - [x] **P3** svg topology nvme_ctrls path fix
   - `_render_topology_svg`: raw.nvme_ctrls (flat) 우선, raw.discovered.nvme_ctrls fallback.

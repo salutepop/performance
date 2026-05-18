@@ -179,6 +179,99 @@ specs.forEach(function(spec) {{
     return "".join(parts)
 
 
+def _fmt_num(v, unit="", prec=1):
+    if v is None:
+        return "-"
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return str(v)
+    if abs(v) >= 1_000_000:
+        return f"{v/1_000_000:.{prec}f}M{unit}"
+    if abs(v) >= 1_000:
+        return f"{v/1_000:.{prec}f}K{unit}"
+    return f"{v:.{prec}f}{unit}" if v != int(v) else f"{int(v)}{unit}"
+
+
+def _render_summary(dev_aggs, sys_agg):
+    """상단 executive summary: 카드 + Top findings."""
+    if not dev_aggs and not sys_agg:
+        return ""
+
+    # 디바이스 합산값
+    total_read = 0.0
+    total_write = 0.0
+    peak_bw = 0.0
+    peak_d2c_us = 0.0
+    sqcq_avgs = []
+    for da in dev_aggs.values():
+        for op, key in (("read", "iops"), ("read_ahead", "iops")):
+            v = (da.get(op) or {}).get(key, {}).get("sum")
+            if v: total_read += v
+        v = (da.get("write") or {}).get("iops", {}).get("sum")
+        if v: total_write += v
+        for op in da:
+            if op.startswith("_"):
+                continue
+            bw = (da[op].get("bw") or {}).get("max") or 0
+            if bw > peak_bw: peak_bw = bw
+            d = (da[op].get("d2c") or {}).get("max") or 0
+            if d > peak_d2c_us: peak_d2c_us = d
+        s = (da.get("_sqcq_diff_ratio") or {}).get("avg")
+        if s is not None: sqcq_avgs.append(s)
+
+    # 시스템 peak
+    cpu = sys_agg.get("cpu", {})
+    iowait_peak = max((s.get("max", 0) or 0) for k, s in cpu.items() if k.endswith("_iowait_pct")) if cpu else 0
+    sys_peak = max((s.get("max", 0) or 0) for k, s in cpu.items() if k.endswith("_sys_pct")) if cpu else 0
+    gpu = sys_agg.get("gpu", {})
+    gpu_pwr_peak = max((s.get("max", 0) or 0) for k, s in gpu.items() if "_pwr_w" in k) if gpu else None
+
+    sqcq_avg = (sum(sqcq_avgs) / len(sqcq_avgs)) if sqcq_avgs else 0
+
+    cards = [
+        ("Read IOPS (total)", _fmt_num(total_read), "", ""),
+        ("Write IOPS (total)", _fmt_num(total_write), "", ""),
+        ("Peak BW", _fmt_num(peak_bw, " MB/s", 1), "", ""),
+        ("Worst D2C interval avg", _fmt_num(peak_d2c_us, " us", 1),
+         "warn" if peak_d2c_us > 500 else "", "tail spike 지점 잠재력"),
+        ("SQ↔CQ diff", f"{sqcq_avg*100:.1f}%",
+         "bad" if sqcq_avg > 0.2 else ("warn" if sqcq_avg > 0.05 else ""),
+         "cross-CPU completion 비율"),
+        ("CPU iowait peak", f"{iowait_peak:.1f}%",
+         "bad" if iowait_peak > 10 else ("warn" if iowait_peak > 2 else ""), ""),
+        ("CPU sys peak", f"{sys_peak:.1f}%", "warn" if sys_peak > 50 else "", ""),
+    ]
+    if gpu_pwr_peak is not None:
+        cards.append(("GPU power peak", _fmt_num(gpu_pwr_peak, " W", 0),
+                      "warn" if gpu_pwr_peak > 50 else "", "GPU 활동 흔적"))
+
+    out = ["<div class='summary-cards'>"]
+    for label, val, klass, hint in cards:
+        cls = f"card {klass}".strip()
+        h_html = f"<div class='h'>{html.escape(hint)}</div>" if hint else ""
+        out.append(f"<div class='{cls}'><div class='l'>{html.escape(label)}</div>"
+                   f"<div class='v'>{html.escape(val)}</div>{h_html}</div>")
+    out.append("</div>")
+
+    # Top findings (md_report 헬퍼 재사용)
+    try:
+        from .md_report import _top_findings
+        findings = _top_findings(sys_agg, dev_aggs)
+        if findings:
+            out.append("<div class='findings'><strong>Top findings</strong><ul>")
+            for f in findings:
+                # md 식으로 **bold** 들어가는 경우 처리
+                f_html = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", html.escape(f))
+                # html.escape가 <strong>의 <>도 escape했으니 복구
+                f_html = f_html.replace("&lt;strong&gt;", "<strong>").replace("&lt;/strong&gt;", "</strong>")
+                out.append(f"<li>{f_html}</li>")
+            out.append("</ul></div>")
+    except Exception:
+        pass
+    return "".join(out)
+
+
 def _build_device_series(header, rows):
     """device CSV → (labels[], series{op:{iops,bw,d2c,p50,p99}}). 모든 op timestamp 통합·정렬."""
     if not header or not rows:
@@ -613,6 +706,15 @@ HTML_CSS = """
   .note { color: #888; font-size: 0.85em; }
   code { background: #eee; padding: 0.1em 0.3em; border-radius: 3px; }
   .meta { color: #666; font-size: 0.9em; }
+  .summary-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0.6em; margin: 1em 0; }
+  .card { background: #f0f4f9; border-left: 3px solid #1d4ed8; padding: 0.5em 0.8em; border-radius: 3px; }
+  .card .v { font-size: 1.4em; font-weight: bold; color: #111; font-family: ui-monospace, monospace; }
+  .card .l { color: #555; font-size: 0.85em; }
+  .card .h { color: #999; font-size: 0.75em; font-style: italic; }
+  .card.warn { border-left-color: #f59e0b; background: #fffaf0; }
+  .card.bad  { border-left-color: #ef4444; background: #fef2f2; }
+  .findings { background: #f9fafb; border: 1px solid #e5e7eb; padding: 0.6em 1em; border-radius: 4px; margin: 0.8em 0; }
+  .findings li { margin: 0.25em 0; }
   .chart-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 1em; margin: 1em 0; }
   .chart-cell { background: #fafafa; border: 1px solid #ddd; padding: 0.5em; height: 280px; position: relative; }
   .chart-warn { color: #b00; font-style: italic; }
@@ -646,6 +748,21 @@ def build_report(session_dir, sid):
     device_csvs = [p for p in device_csvs if not os.path.basename(p).startswith("system_metrics_")]
 
     parts = [_html_head(sid, datetime.now().isoformat(timespec="seconds"), os.path.abspath(session_dir))]
+
+    # Executive summary (카드 + Top findings) — 모든 차트보다 위.
+    try:
+        from .md_report import _device_aggregates, _system_aggregates
+        sys_h_tmp, sys_r_tmp = _load_csv(sys_path)
+        sys_agg = _system_aggregates(sys_h_tmp, sys_r_tmp) if sys_h_tmp else {}
+        dev_aggs = {}
+        for dp in device_csvs:
+            dh, dr = _load_csv(dp)
+            if dh:
+                dn = re.sub(r"_\d{8}_\d{6}\.csv$", "", os.path.basename(dp))
+                dev_aggs[dn] = _device_aggregates(dh, dr)
+        parts.append(_render_summary(dev_aggs, sys_agg))
+    except Exception as e:
+        parts.append(f"<p class='meta'>(summary 생성 실패: {html.escape(str(e))})</p>")
 
     parts.append("<h2>1. Topology</h2>")
     parts.append(_render_topology(topo))

@@ -77,6 +77,18 @@ def _fmt_us(v):
     return f"{v:.2f}us"
 
 
+# 모니터링 제외 디바이스 prefix (가상/loop/ramdisk 등 — 분석 노이즈).
+_EXCLUDED_DEV_PREFIXES = ("loop", "ram", "zram", "dm-", "md")
+
+
+def _is_monitored_dev(name):
+    """이름이 loop/ram/dm-/md 등 가상 디바이스가 아니면 True."""
+    if not name:
+        return False
+    base = name.split("/")[-1]
+    return not base.startswith(_EXCLUDED_DEV_PREFIXES)
+
+
 def get_real_dev_name(dev_id_str):
     try:
         maj_min = dev_id_str.replace("dev(", "").replace(")", "")
@@ -188,6 +200,8 @@ def parse_and_store_metrics(json_str):
         for dev in bpf_data.get("devices", []):
             dev_name_raw = dev["dev_name"]
             real_name = get_real_dev_name(dev_name_raw)
+            if not _is_monitored_dev(real_name):
+                continue  # loop/ram/dm-/md 등 가상 디바이스 제외
 
             if real_name not in csv_buffers:
                 csv_buffers[real_name] = []
@@ -417,12 +431,15 @@ def print_final_summary(raw_json, effective_duration, mode):
         phase_stats = {"U2Q": {}, "Q2D": {}, "D2C": {}, "C2A": {}, "A2U": {}}
         tot_q2d_cnt = tot_q2d_ms = tot_d2c_ms = 0
 
+        # loop/ram/dm-/md 등 가상 디바이스 제외하고 비율 계산
+        monitored_devs = [d for d in bpf_data["devices"]
+                          if _is_monitored_dev(get_real_dev_name(d["dev_name"]))]
         total_sys_ios = sum(
             sum(op["total_count"] for op in dev["operations"].values())
-            for dev in bpf_data["devices"]
+            for dev in monitored_devs
         )
 
-        for dev in bpf_data["devices"]:
+        for dev in monitored_devs:
             ops = dev["operations"]
             bpf_total_cnt = sum(op["total_count"] for op in ops.values())
             if bpf_total_cnt > 0 and bpf_total_cnt > (total_sys_ios * 0.05):

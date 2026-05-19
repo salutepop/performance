@@ -216,7 +216,8 @@ class SystemMonitor:
             for k in ("user", "sys", "iowait", "irq", "softirq"):
                 cols.append(f"node{node}_{k}_pct")
         for ctrl in self._nvme_controllers:
-            cols += [f"{ctrl}_irq_per_s", f"{ctrl}_top_cpu", f"{ctrl}_top_cpu_node"]
+            cols += [f"{ctrl}_irq_per_s", f"{ctrl}_top_cpu", f"{ctrl}_top_cpu_node",
+                     f"{ctrl}_active_queues", f"{ctrl}_active_cpus"]
         cols += [
             "mem_available_mb", "mem_dirty_mb", "mem_writeback_mb", "swap_used_mb",
             "pgpgin_per_s", "pgpgout_per_s", "pswpin_per_s", "pswpout_per_s",
@@ -530,15 +531,21 @@ class SystemMonitor:
             agg["total"] += total
 
         # ---- NVMe IRQ aggregation per controller ----
-        nvme_metrics = {ctrl: {"delta": 0, "top_cpu": None, "top_cpu_val": -1} for ctrl in self._nvme_controllers}
+        nvme_metrics = {ctrl: {"delta": 0, "top_cpu": None, "top_cpu_val": -1,
+                                "active_queues": set(), "active_cpus": set()}
+                        for ctrl in self._nvme_controllers}
         per_cpu_delta = {}  # {(ctrl, cpu_id): total_delta}
         for key, cur in irq_now.items():
             prev = self._prev_irq.get(key, 0)
             d = cur - prev
-            if d < 0:
-                d = 0
-            ctrl, _, cpu_id = key
+            if d <= 0:
+                continue
+            ctrl, irq_num, cpu_id = key
             per_cpu_delta[(ctrl, cpu_id)] = per_cpu_delta.get((ctrl, cpu_id), 0) + d
+            m = nvme_metrics.get(ctrl)
+            if m is not None:
+                m["active_queues"].add(irq_num)  # 활성 큐 (IRQ 1개 = 큐 1개)
+                m["active_cpus"].add(cpu_id)     # IRQ 받은 CPU 집합
         for (ctrl, cpu_id), d in per_cpu_delta.items():
             m = nvme_metrics.get(ctrl)
             if m is None:
@@ -573,6 +580,8 @@ class SystemMonitor:
             row[f"{ctrl}_irq_per_s"] = round(m["delta"] / elapsed, 1)
             row[f"{ctrl}_top_cpu"] = m["top_cpu"] if m["top_cpu"] is not None else -1
             row[f"{ctrl}_top_cpu_node"] = self._cpu_to_node.get(m["top_cpu"], "-") if m["top_cpu"] is not None else "-"
+            row[f"{ctrl}_active_queues"] = len(m["active_queues"])
+            row[f"{ctrl}_active_cpus"] = len(m["active_cpus"])
 
         row["mem_available_mb"] = round(meminfo.get("MemAvailable", 0) / 1024, 1)
         row["mem_dirty_mb"] = round(meminfo.get("Dirty", 0) / 1024, 1)

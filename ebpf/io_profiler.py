@@ -623,7 +623,7 @@ def run_workload_thread(cmd, script_file):
         os.kill(os.getpid(), signal.SIGINT)
 
 
-def run_benchmark(mode="generic", cmd=None, script_file=None, interval=1):
+def run_benchmark(mode="generic", cmd=None, script_file=None, interval=1, enable_sysmon=True):
     # io_trace 바이너리는 ebpf/ 안에 있음. cwd 무관하게 동작하도록 절대 경로 사용.
     io_trace_bin = os.path.join(os.path.dirname(os.path.abspath(__file__)), "io_trace")
     trace_cmd = ["sudo", io_trace_bin, "-i", str(interval)]
@@ -654,8 +654,9 @@ def run_benchmark(mode="generic", cmd=None, script_file=None, interval=1):
         )
 
     # SystemMonitor: CPU/Mem/IRQ/GPU 통합 메트릭. interval>0일 때만 활성.
+    # main.py에서 호출될 때는 SystemMonitor를 외부에서 띄우므로 enable_sysmon=False로 중복 방지.
     sysmon = None
-    if interval > 0 and SystemMonitor is not None:
+    if enable_sysmon and interval > 0 and SystemMonitor is not None:
         try:
             os.makedirs(OUTPUT_DIR, exist_ok=True)
             sysmon = SystemMonitor(
@@ -768,8 +769,31 @@ if __name__ == "__main__":
         type=str,
         help="Shell script file to execute (e.g., -f ./fio.sh)",
     )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help="CSV/SystemMonitor 산출물 저장 디렉터리 (기본: ebpf/csv_results). main.py가 세션 단위로 호출할 때 session_dir을 주입.",
+    )
+    parser.add_argument(
+        "--session-id",
+        type=str,
+        default=None,
+        help="산출 파일명에 쓰일 session id (기본: 모듈 로드 timestamp). 외부 orchestrator와 ID를 맞추기 위함.",
+    )
+    parser.add_argument(
+        "--no-sysmon",
+        action="store_true",
+        help="SystemMonitor 비활성 (main.py가 별도 인스턴스를 띄우는 경우 중복 방지).",
+    )
 
     args = parser.parse_args()
+    # CLI override (module-level globals)
+    if args.output_dir:
+        OUTPUT_DIR = os.path.abspath(args.output_dir)
+    if args.session_id:
+        SESSION_ID = args.session_id
     run_benchmark(
-        mode=args.mode, cmd=args.cmd, script_file=args.file, interval=args.interval
+        mode=args.mode, cmd=args.cmd, script_file=args.file, interval=args.interval,
+        enable_sysmon=not args.no_sysmon,
     )

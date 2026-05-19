@@ -44,6 +44,10 @@ class MyTest(Scenario):
 
 실행: `python3 -m scenarios.<module>`. 종료 코드는 `analyze()`의 `pass` 키 따라감 (CI 친화). 예시: `scenarios/sample_randread.py`.
 
+### Python 환경 (uv)
+
+이 프로젝트는 [`uv`](https://docs.astral.sh/uv/)로 환경 관리. 외부 deps 0 (stdlib만)이지만 `pyproject.toml` + `uv.lock` 로 재현성 보장. 사용법은 [`doc/uv_usage.md`](./doc/uv_usage.md) 참고. 핵심: `uv sync` 한 번 → `uv run ./pmon.py ...` 또는 `python3 ./pmon.py ...` 둘 다 동작.
+
 ### 통합 CLI: `pmon.py`
 
 프로젝트 루트의 `pmon.py`가 모든 흐름을 묶는 진입점.

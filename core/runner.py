@@ -1,3 +1,5 @@
+import os
+import shutil
 import subprocess
 import json
 import sys
@@ -6,9 +8,11 @@ import sys
 def run_fio_job(disk, workload, numa_node=None, fio_path="fio", runtime_override=None):
     """
     fio_path를 인자로 받아 해당 경로의 바이너리를 실행합니다.
+    EUID != 0 이면 `sudo -n`을 붙여 호출 (sudoers에 fio NOPASSWD 룰이 있어야 함).
+    sudoers 매치를 위해 fio_path는 항상 절대 경로로 resolve.
     """
     job_name = workload.get("name", "default_job")
-    
+
     # [수정] disk가 리스트인 경우 콜론(:)으로 연결하여 여러 장치 동시 부하 지원
     if isinstance(disk, list):
         target_filename = ":".join(disk)
@@ -17,8 +21,11 @@ def run_fio_job(disk, workload, numa_node=None, fio_path="fio", runtime_override
         target_filename = disk
         print(f"\n[FIO Run] 디스크: {disk} | 워크로드: {job_name} 시작...")
 
-    cmd = [
-        fio_path,
+    abs_fio = shutil.which(fio_path) or fio_path
+    prefix = [] if os.geteuid() == 0 else ["sudo", "-n"]
+
+    cmd = prefix + [
+        abs_fio,
         f"--name={job_name}",
         f"--filename={target_filename}",
         "--direct=1",

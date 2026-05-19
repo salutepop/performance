@@ -22,12 +22,26 @@ def execute_json_tc(
 ):
     tc_name = tc_data.get("tc_name", "Unknown_TC")
 
+    # JSON에 disks가 명시되어 있으면 그것을 우선 사용 (smoke 등 자체 임시 파일 시나리오)
+    tc_disks = tc_data.get("disks") or disks
+
+    # 파일 경로 디스크(/dev/* 아님)면 parent dir + 빈 파일 사전 생성
+    # (fio가 sudo로 돌면 root 소유로 만들어지므로 user 소유 빈 파일을 미리 둬서 ownership 유지)
+    for d in tc_disks:
+        if not d.startswith("/dev/"):
+            parent = os.path.dirname(d)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            if not os.path.exists(d):
+                with open(d, "wb") as f:
+                    f.truncate(1 * 1024 * 1024 * 1024)  # 1 GiB
+
     print(f"\n==================================================")
     print(f"▶ [JSON 시나리오] {tc_name}")
     print(f"▶ 설명: {tc_data.get('description', '')}")
     print(f"==================================================")
 
-    for disk in disks:
+    for disk in tc_disks:
         disk_label = disk.split("/")[-1]
         print(f"\n[*] 타겟 디스크: {disk} ------------------------")
 
@@ -125,6 +139,12 @@ def main():
         action="store_true",
         help="빠른 검증 모드 (모든 테스트를 1초 내외로 실행)",
     )
+    parser.add_argument(
+        "-a",
+        "--all",
+        action="store_true",
+        help="모든 테스트 케이스를 실행 (기본값은 tc00_smoke만 실행)",
+    )
     args = parser.parse_args()
 
     from core.discovery import SystemDiscovery
@@ -157,6 +177,7 @@ def main():
         sys.exit(1)
 
     reporter = ResultReporter()
+    print(f"[*] 이번 평가 결과 폴더: {reporter.run_dir}")
     tc_files = sorted(glob.glob("test_cases/*.json") + glob.glob("test_cases/*.py"))
 
     # [추가] 터미널에서 --tc 옵션을 주었다면, 해당 키워드가 포함된 파일만 필터링
@@ -167,6 +188,16 @@ def main():
             sys.exit(1)
         tc_files = filtered_files
         print(f"[*] 타겟 실행 모드: '{args.tc}' 키워드가 포함된 시나리오만 실행합니다.")
+    elif not args.all:
+        # 기본 동작: tc00_smoke만 실행. -a/--all 또는 -t로 명시할 때만 전체/지정 TC 실행
+        smoke_files = [f for f in tc_files if "tc00" in os.path.basename(f).lower()]
+        if not smoke_files:
+            print("[Error] 기본 스모크 테스트(tc00_*)를 찾을 수 없습니다. -a 옵션으로 전체 실행하거나 -t로 TC를 지정하세요.")
+            sys.exit(1)
+        tc_files = smoke_files
+        print("[*] 기본 스모크 모드: tc00_smoke만 실행합니다. 전체 TC 실행은 -a/--all 옵션을 사용하세요.")
+    else:
+        print(f"[*] 전체 TC 실행 모드: {len(tc_files)}개의 시나리오를 순차 실행합니다.")
 
     # [수정] Quick 모드인 경우 런타임을 1초로 고정하는 오버라이드 설정
     runtime_val = 1 if args.quick else None

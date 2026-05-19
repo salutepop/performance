@@ -225,3 +225,9 @@ __marimo__/
 .streamlit/secrets.toml
 csv_results/
 /csv_results/
+
+# 측정 산출물 및 로컬 캐시
+results/
+.smoke/
+.claude/
+config/discovered_system.json

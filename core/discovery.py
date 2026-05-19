@@ -181,10 +181,13 @@ class SystemDiscovery:
                     if "MemTotal" in line:
                         self.info["memory"]["total_gb"] = round(int(line.split()[1]) / (1024*1024), 2)
             
-            # dmidecode 시도
-            res = subprocess.check_output("sudo dmidecode -t memory | grep -E 'Size|Speed|Type' | grep -v 'No Module'", shell=True, text=True)
+            # dmidecode 시도 (sudo NOPASSWD가 아닌 환경에서는 silent skip)
+            res = subprocess.check_output(
+                "sudo -n dmidecode -t memory | grep -E 'Size|Speed|Type' | grep -v 'No Module'",
+                shell=True, text=True, stderr=subprocess.DEVNULL,
+            )
             self.info["memory"]["details"] = res.strip().split("\n")
-        except:
+        except Exception:
             self.info["memory"]["details"] = "Permission denied or tool missing"
 
     def _discover_gpu(self):
@@ -227,7 +230,11 @@ class SystemDiscovery:
             })
 
     def save_to_file(self, filepath="config/discovered_system.json"):
-        os.makedirs(os.path.dirname(filepath), exist_ok=True)
-        with open(filepath, "w", encoding="utf-8") as f:
-            json.dump(self.info, f, indent=4)
-        print(f"[*] 시스템 정보 저장 완료: {filepath}")
+        try:
+            os.makedirs(os.path.dirname(filepath), exist_ok=True)
+            with open(filepath, "w", encoding="utf-8") as f:
+                json.dump(self.info, f, indent=4)
+            print(f"[*] 시스템 정보 저장 완료: {filepath}")
+        except PermissionError:
+            # 캐시 파일(이전 root 실행으로 root 소유 등) — 저장 실패해도 측정에는 영향 없음
+            print(f"[!] 시스템 정보 캐시 저장 실패(권한): {filepath} — 무시하고 진행")

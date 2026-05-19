@@ -480,7 +480,7 @@ def _render_lba_heatmap(dname, header, rows):
     payload_json = json.dumps(data, separators=(",", ":"))
     return f"""<div class='heatmap-cell'>
 <canvas id='heatmap_{safe}' width='720' height='320'></canvas>
-<p class='meta'>LBA 분포 heatmap (bucket 0 = 디스크 앞부분, 63 = 뒷부분). 색: log(인터벌 접근 횟수).</p>
+<p class='meta'>LBA 분포 heatmap (bucket 0 = 디스크 앞부분, 마지막 = 뒷부분). 색: log10(인터벌 접근 횟수) — <span style='background:hsl(240,85%,50%);color:#fff;padding:0 4px;border-radius:2px'>차가움</span>→<span style='background:hsl(120,85%,45%);color:#fff;padding:0 4px;border-radius:2px'>중간</span>→<span style='background:hsl(0,85%,40%);color:#fff;padding:0 4px;border-radius:2px'>뜨거움</span>. 회색 = 접근 0.</p>
 </div>
 <script>(function() {{
 const data = {payload_json};
@@ -490,30 +490,34 @@ const ctx = canvas.getContext('2d');
 const W = canvas.width, H = canvas.height;
 const padL = 50, padB = 30, padT = 10, padR = 10;
 const nx = data.timestamps.length || 1;
-const ny = 64;
+const ny = (data.buckets[0] || []).length || 64;
 const cellW = (W - padL - padR) / nx;
 const cellH = (H - padT - padB) / ny;
 let mx = 0;
 for (const col of data.buckets) for (const v of col) if (v > mx) mx = v;
 const logMax = Math.log10(mx + 1) || 1;
-ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H);
+// 빈 셀(=0) 명확히 보이게 진한 회색 배경
+ctx.fillStyle = '#dcdee2'; ctx.fillRect(0, 0, W, H);
+// 차트 영역만 더 짙은 회색 (라벨 영역과 구분)
+ctx.fillStyle = '#cfd2d7'; ctx.fillRect(padL, padT, W - padL - padR, H - padT - padB);
 for (let xi = 0; xi < nx; xi++) {{
   const col = data.buckets[xi];
   for (let yi = 0; yi < ny; yi++) {{
     const v = col[yi];
-    if (v <= 0) continue;
-    const t = Math.log10(v + 1) / logMax;
-    // viridis-like: dark blue → green → yellow
-    const r = Math.round(255 * Math.min(1, Math.max(0, 1.5 * t - 0.4)));
-    const g = Math.round(255 * Math.min(1, Math.max(0, 1.2 * t)));
-    const b = Math.round(255 * Math.min(1, Math.max(0, 1 - 1.5 * t)));
-    ctx.fillStyle = `rgb(${{r}},${{g}},${{b}})`;
+    if (v <= 0) continue;  // 회색 배경 그대로 두고 "값 있음"만 색칠
+    const t = Math.log10(v + 1) / logMax;  // 0..1
+    // 파랑(차가움) → 청록 → 노랑 → 빨강(뜨거움). HSL hue 240→0 회전 + 채도/명도 유지.
+    // t=0: hue 240 deg (blue), t=1: hue 0 deg (red). 흰색 영역(L=100%) 회피.
+    const hue = Math.round(240 * (1 - t));
+    const sat = 85;
+    const light = 50 - 10 * t;   // 더 뜨거울수록 약간 어둡게 → 채도 강조
+    ctx.fillStyle = `hsl(${{hue}},${{sat}}%,${{light}}%)`;
     ctx.fillRect(padL + xi * cellW, padT + (ny - 1 - yi) * cellH, Math.ceil(cellW), Math.ceil(cellH));
   }}
 }}
 ctx.fillStyle = '#333'; ctx.font = '11px ui-monospace, monospace';
 ctx.textAlign = 'right';
-ctx.fillText('bucket 63', padL - 4, padT + 10);
+ctx.fillText('bucket ' + (ny - 1), padL - 4, padT + 10);
 ctx.fillText('0', padL - 4, H - padB);
 ctx.textAlign = 'center';
 for (let xi = 0; xi < nx; xi++) {{

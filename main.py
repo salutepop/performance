@@ -8,6 +8,7 @@ import argparse
 
 from core.runner import run_fio_job
 from core.reporter import ResultReporter
+from core.monitor import SystemMonitor
 
 
 def load_json(file_path):
@@ -17,8 +18,50 @@ def load_json(file_path):
         return json.load(f)
 
 
+def _start_monitor(session_dir, sys_info):
+    """session_dir에 SystemMonitor를 띄움. session_id는 디렉터리 basename."""
+    sid = os.path.basename(session_dir)
+    try:
+        mon = SystemMonitor(session_dir, session_id=sid, interval=1.0, sys_info=sys_info)
+        mon.start()
+        return mon, sid
+    except Exception as e:
+        print(f"  [!] SystemMonitor 시작 실패 (리포트는 fio JSON 기반으로만 생성): {e}")
+        return None, sid
+
+
+def _stop_monitor(mon):
+    if not mon:
+        return
+    try:
+        mon.stop()
+    except Exception as e:
+        print(f"  [!] SystemMonitor 정지 중 오류: {e}")
+
+
+def _run_reports(session_dir, sid, formats):
+    """report.__main__.main()을 호출해 html/md/json/png 일괄 생성."""
+    if not formats or formats == "none":
+        return
+    try:
+        from report.__main__ import main as report_main
+    except ImportError as e:
+        print(f"  [!] 리포트 모듈 import 실패: {e}")
+        return
+    rc = report_main([
+        "--session-dir", session_dir,
+        "--session-id", sid,
+        "--format", formats,
+    ])
+    if rc:
+        print(f"  [!] 일부 리포트 생성 실패 (rc={rc}) — {session_dir}")
+    else:
+        print(f"  [*] 리포트 생성 완료 → {session_dir}")
+
+
 def execute_json_tc(
-    tc_file, tc_data, disks, numa_node, sys_info, reporter, bound_runner
+    tc_file, tc_data, disks, numa_node, sys_info, reporter, bound_runner,
+    report_formats="none",
 ):
     tc_name = tc_data.get("tc_name", "Unknown_TC")
 
@@ -50,15 +93,21 @@ def execute_json_tc(
             session_dir, "metadata.json", {"system": sys_info, "tc": tc_data}
         )
 
-        for wl in tc_data.get("workloads", []):
-            result_data = bound_runner(disk=disk, workload=wl, numa_node=numa_node)
-            if result_data:
-                filename = f"fio_{wl['name']}.json"
-                reporter.save_json(session_dir, filename, result_data)
-                reporter.print_summary(wl["name"], result_data)
+        mon, sid = _start_monitor(session_dir, sys_info)
+        try:
+            for wl in tc_data.get("workloads", []):
+                result_data = bound_runner(disk=disk, workload=wl, numa_node=numa_node)
+                if result_data:
+                    filename = f"fio_{wl['name']}.json"
+                    reporter.save_json(session_dir, filename, result_data)
+                    reporter.print_summary(wl["name"], result_data)
+        finally:
+            _stop_monitor(mon)
+        _run_reports(session_dir, sid, report_formats)
 
 
-def execute_python_tc(tc_file, disks, numa_node, sys_info, reporter, bound_runner):
+def execute_python_tc(tc_file, disks, numa_node, sys_info, reporter, bound_runner,
+                      report_formats="none"):
     # 1. 누락되었던 모듈 동적 로드 부분 (완성)
     module_name = os.path.basename(tc_file)[:-3]
     spec = importlib.util.spec_from_file_location(module_name, tc_file)
@@ -89,14 +138,19 @@ def execute_python_tc(tc_file, disks, numa_node, sys_info, reporter, bound_runne
                 "metadata.json",
                 {"system": sys_info, "type": "python_multi_disk_scenario"},
             )
-            scenario.execute(
-                disks=disks, # 단일 disk가 아닌 disks 리스트 전달
-                runner_func=bound_runner,
-                reporter=reporter,
-                session_dir=session_dir,
-                numa_node=numa_node,
-                sys_info=sys_info,  # [추가] 시스템 정보 전달
-            )
+            mon, sid = _start_monitor(session_dir, sys_info)
+            try:
+                scenario.execute(
+                    disks=disks, # 단일 disk가 아닌 disks 리스트 전달
+                    runner_func=bound_runner,
+                    reporter=reporter,
+                    session_dir=session_dir,
+                    numa_node=numa_node,
+                    sys_info=sys_info,  # [추가] 시스템 정보 전달
+                )
+            finally:
+                _stop_monitor(mon)
+            _run_reports(session_dir, sid, report_formats)
         else:
             for disk in disks:
                 disk_label = disk.split("/")[-1]
@@ -109,15 +163,20 @@ def execute_python_tc(tc_file, disks, numa_node, sys_info, reporter, bound_runne
                     {"system": sys_info, "type": "python_scenario"},
                 )
 
-                # 플러그인에 제어권 넘기기
-                scenario.execute(
-                    disk=disk,
-                    runner_func=bound_runner,
-                    reporter=reporter,
-                    session_dir=session_dir,
-                    numa_node=numa_node,
-                    sys_info=sys_info,  # [추가] 시스템 정보 전달
-                )
+                mon, sid = _start_monitor(session_dir, sys_info)
+                try:
+                    # 플러그인에 제어권 넘기기
+                    scenario.execute(
+                        disk=disk,
+                        runner_func=bound_runner,
+                        reporter=reporter,
+                        session_dir=session_dir,
+                        numa_node=numa_node,
+                        sys_info=sys_info,  # [추가] 시스템 정보 전달
+                    )
+                finally:
+                    _stop_monitor(mon)
+                _run_reports(session_dir, sid, report_formats)
     else:
         print(f"  -> [Skip] {tc_file} 내부에 'Scenario' 클래스가 없습니다.")
 
@@ -144,6 +203,15 @@ def main():
         "--all",
         action="store_true",
         help="모든 테스트 케이스를 실행 (기본값은 tc00_smoke만 실행)",
+    )
+    parser.add_argument(
+        "--report",
+        default="html,md,json,png",
+        help=(
+            "자동 생성할 리포트 포맷 콤마 구분 (html,md,json,png 또는 'none'). "
+            "기본: 'html,md,json,png' — SystemMonitor가 세션별로 topology/CSV를 "
+            "수집하고 종료 후 report.* 모듈로 일괄 생성."
+        ),
     )
     args = parser.parse_args()
 
@@ -212,12 +280,14 @@ def main():
         if ext == ".json":
             tc_data = load_json(tc_file)
             execute_json_tc(
-                tc_file, tc_data, disks, numa_node, sys_info, reporter, bound_runner
+                tc_file, tc_data, disks, numa_node, sys_info, reporter, bound_runner,
+                report_formats=args.report,
             )
 
         elif ext == ".py":
             execute_python_tc(
-                tc_file, disks, numa_node, sys_info, reporter, bound_runner
+                tc_file, disks, numa_node, sys_info, reporter, bound_runner,
+                report_formats=args.report,
             )
 
 

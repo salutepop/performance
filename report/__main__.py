@@ -40,8 +40,12 @@ def main(argv=None):
         from .summary import main as summary_main
         rc |= summary_main(base_argv) or 0
     if "png" in targets:
-        from .png_report import main as png_main
-        rc |= png_main(base_argv) or 0
+        try:
+            from .png_report import main as png_main
+        except ImportError as e:
+            print(f"[!] PNG 리포트 skip (matplotlib 미설치 또는 import 실패): {e}")
+        else:
+            rc |= png_main(base_argv) or 0
     return rc
 
 

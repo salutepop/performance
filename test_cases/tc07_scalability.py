@@ -6,7 +6,7 @@ class Scenario:
         self.description = "4대 주요 워크로드(Seq/Rand, R/W)에 대해 장치 개수별 성능 선형성을 측정합니다."
         self.run_all_disks = True
 
-    def execute(self, disks, runner_func, reporter, session_dir, numa_node):
+    def execute(self, disks, runner_func, reporter, session_dir, numa_node, sys_info=None):
         print(f"\n[Scenario] {self.tc_name} 시작 - 총 장치 수: {len(disks)}")
         
         # 테스트할 워크로드 조합 정의

@@ -5,7 +5,7 @@ class Scenario:
         self.tc_name = "TC06_Mixed_Workload_70_30"
         self.description = "4K 70% 읽기, 30% 쓰기 혼합 부하를 QD별로 측정하여 성능 곡선을 분석합니다."
 
-    def execute(self, disk, runner_func, reporter, session_dir, numa_node):
+    def execute(self, disk, runner_func, reporter, session_dir, numa_node, sys_info=None):
         print(f"\n[Scenario] {self.tc_name} 시작 - 대상: {disk}")
         
         # 측정하고자 하는 Queue Depth 리스트

@@ -9,7 +9,7 @@ class Scenario:
             "디스크에 쓰기 부하를 가한 후 캐시를 비우고 극한의 지연시간을 측정합니다."
         )
 
-    def execute(self, disk, runner_func, reporter, session_dir, numa_node):
+    def execute(self, disk, runner_func, reporter, session_dir, numa_node, sys_info=None):
         print(f"\n[Scenario] {self.tc_name} 시작 - 대상: {disk}")
 
         # Step 1: Preconditioning (디스크 부하 주기)

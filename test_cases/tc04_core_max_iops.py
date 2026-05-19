@@ -8,7 +8,7 @@ class Scenario:
         # 여러 디스크의 결과를 하나로 모으기 위한 인스턴스 변수
         self.all_results = {}
 
-    def execute(self, disk, runner_func, reporter, session_dir, numa_node):
+    def execute(self, disk, runner_func, reporter, session_dir, numa_node, sys_info=None):
         print(f"\n[Scenario] {self.tc_name} 시작 - 대상: {disk}")
         total_cores = os.cpu_count()
 

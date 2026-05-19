@@ -1,17 +1,8 @@
 {
   "tc_name": "TC00_Smoke_4Perf",
-  "description": "스모크 테스트: 4대 성능(Seq R/W, Rand R/W)을 각 5초 순차 측정 (자체 임시 파일 사용)",
+  "description": "스모크 테스트: 4대 성능을 각 5초 순차 측정 (Seq Write → Seq Read → Rand Write → Rand Read: write가 read보다 먼저 와서 sparse hole 효과 제거)",
   "disks": ["/home/cm/src/cm/performance/.smoke/smoke.img"],
   "workloads": [
-    {
-      "name": "seq_read_128k",
-      "rw": "read",
-      "bs": "128k",
-      "iodepth": 32,
-      "numjobs": 1,
-      "runtime": 5,
-      "size": "1G"
-    },
     {
       "name": "seq_write_128k",
       "rw": "write",
@@ -22,8 +13,17 @@
       "size": "1G"
     },
     {
-      "name": "rand_read_4k",
-      "rw": "randread",
+      "name": "seq_read_128k",
+      "rw": "read",
+      "bs": "128k",
+      "iodepth": 32,
+      "numjobs": 1,
+      "runtime": 5,
+      "size": "1G"
+    },
+    {
+      "name": "rand_write_4k",
+      "rw": "randwrite",
       "bs": "4k",
       "iodepth": 32,
       "numjobs": 8,
@@ -31,8 +31,8 @@
       "size": "1G"
     },
     {
-      "name": "rand_write_4k",
-      "rw": "randwrite",
+      "name": "rand_read_4k",
+      "rw": "randread",
       "bs": "4k",
       "iodepth": 32,
       "numjobs": 8,

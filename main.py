@@ -268,11 +268,12 @@ def main():
     )
     parser.add_argument(
         "--report",
-        default="html,md,json,png",
+        default="html,md,json,png,pdf",
         help=(
-            "자동 생성할 리포트 포맷 콤마 구분 (html,md,json,png 또는 'none'). "
-            "기본: 'html,md,json,png' — SystemMonitor가 세션별로 topology/CSV를 "
-            "수집하고 종료 후 report.* 모듈로 일괄 생성."
+            "자동 생성할 리포트 포맷 콤마 구분 (html,md,json,png,pdf 또는 'none'). "
+            "기본: 'html,md,json,png,pdf' — SystemMonitor가 세션별로 topology/CSV를 "
+            "수집하고 종료 후 report.* 모듈로 일괄 생성. pdf는 matplotlib만 사용 "
+            "(오프라인 CLI 환경에서도 동작)."
         ),
     )
     parser.add_argument(

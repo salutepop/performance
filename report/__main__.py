@@ -21,10 +21,10 @@ def main(argv=None):
     p.add_argument("--session-dir", default="ebpf/csv_results")
     p.add_argument("--session-id", default=None)
     p.add_argument("--format", default="all",
-                   help="html,md,json,png 콤마 구분 또는 'all' (기본: all). 'all'은 html+md+json (png 제외, deps 무거움).")
+                   help="html,md,json,png,pdf 콤마 구분 또는 'all' (기본: all = html+md+json+png+pdf). matplotlib 없으면 png/pdf는 자동 skip.")
     args = p.parse_args(argv)
 
-    targets = ["html", "md", "json"] if args.format == "all" else [t.strip() for t in args.format.split(",")]
+    targets = ["html", "md", "json", "png", "pdf"] if args.format == "all" else [t.strip() for t in args.format.split(",")]
     base_argv = ["--session-dir", args.session_dir]
     if args.session_id:
         base_argv += ["--session-id", args.session_id]
@@ -46,6 +46,13 @@ def main(argv=None):
             print(f"[!] PNG 리포트 skip (matplotlib 미설치 또는 import 실패): {e}")
         else:
             rc |= png_main(base_argv) or 0
+    if "pdf" in targets:
+        try:
+            from .pdf_report import main as pdf_main
+        except ImportError as e:
+            print(f"[!] PDF 리포트 skip (matplotlib 미설치 또는 import 실패): {e}")
+        else:
+            rc |= pdf_main(base_argv) or 0
     return rc
 
 

@@ -96,6 +96,9 @@ def _generate_reports(session_dir, session_id, fmt):
     if "json" in targets:
         from report.summary import main as summary_main
         ok &= summary_main(base_argv) == 0
+    if "png" in targets:
+        from report.png_report import main as png_main
+        ok &= png_main(base_argv) == 0
     return ok
 
 

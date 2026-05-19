@@ -21,7 +21,7 @@ def main(argv=None):
     p.add_argument("--session-dir", default="ebpf/csv_results")
     p.add_argument("--session-id", default=None)
     p.add_argument("--format", default="all",
-                   help="html,md,json 콤마 구분 또는 'all' (기본: all)")
+                   help="html,md,json,png 콤마 구분 또는 'all' (기본: all). 'all'은 html+md+json (png 제외, deps 무거움).")
     args = p.parse_args(argv)
 
     targets = ["html", "md", "json"] if args.format == "all" else [t.strip() for t in args.format.split(",")]
@@ -39,6 +39,9 @@ def main(argv=None):
     if "json" in targets:
         from .summary import main as summary_main
         rc |= summary_main(base_argv) or 0
+    if "png" in targets:
+        from .png_report import main as png_main
+        rc |= png_main(base_argv) or 0
     return rc
 
 

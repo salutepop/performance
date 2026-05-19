@@ -3,4 +3,6 @@ name = "pmon"
 version = "0.1.0"
 description = "SSD/NVMe performance monitoring framework with eBPF + system metrics + HTML/MD reports"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "matplotlib>=3.10.9",
+]

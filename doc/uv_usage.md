@@ -222,6 +222,30 @@ chromium --headless --no-sandbox \
 # 또는 브라우저에서 열어 Ctrl+P → "PDF로 저장"
 ```
 
+**경우 E-2**: 오프라인/GUI 없는 서버 — 정적 PNG + Markdown 리포트
+```bash
+uv run python -m report.png_report
+# 출력:
+#   ebpf/csv_results/report_png_<sid>.md
+#   ebpf/csv_results/figs_<sid>/*.png  (11+ 차트)
+
+# 또는 --format 으로
+uv run python -m report --format png
+
+# 측정 + PNG 리포트 같이
+uv run ./pmon.py run --fio "..." --report png
+
+# md만 보고 싶으면 (이미지 안 보임, less로 OK)
+less ebpf/csv_results/report_png_<sid>.md
+
+# tarball로 묶어 다른 머신으로 옮기기
+tar czf /tmp/perf_report.tar.gz -C ebpf/csv_results \
+    report_png_<sid>.md figs_<sid>
+```
+
+PNG는 matplotlib (Agg backend) 사용 — X11/GUI 필요 없음. Markdown 렌더러
+(vscode, github, mdcat 등) 어디서든 PNG 자동 표시.
+
 **경우 F**: 멀티 디바이스 동시 측정
 ```bash
 # 한 fio 명령으로 여러 디바이스 묶기 (filename1:filename2):

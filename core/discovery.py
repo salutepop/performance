@@ -101,7 +101,77 @@ class SystemDiscovery:
                     ctx["queue_count"] = int(ctx["queue_count"])
                 except ValueError:
                     pass
+            # 컨트롤러의 IRQ 큐 매핑 + affinity (multi-queue NVMe 진단용)
+            ctx["queues"] = self._discover_nvme_queues(ctrl)
             self.info["nvme_ctrls"].append(ctx)
+
+    @staticmethod
+    def _parse_cpulist(s):
+        """'0-3,7' → [0,1,2,3,7]. 빈 입력 → []."""
+        out = []
+        if not s:
+            return out
+        for chunk in s.split(","):
+            chunk = chunk.strip()
+            if not chunk:
+                continue
+            if "-" in chunk:
+                try:
+                    a, b = chunk.split("-", 1)
+                    out.extend(range(int(a), int(b) + 1))
+                except ValueError:
+                    pass
+            else:
+                try:
+                    out.append(int(chunk))
+                except ValueError:
+                    pass
+        return out
+
+    def _discover_nvme_queues(self, ctrl_name):
+        """/proc/interrupts에서 nvme0qN IRQ 번호 추출 + /proc/irq/<N>/{effective,smp}_affinity_list 캡처.
+        반환: [{name, irq, effective_cpus, smp_cpus}] (큐 이름 정렬)."""
+        queues = []
+        try:
+            with open("/proc/interrupts") as f:
+                lines = f.readlines()
+        except Exception:
+            return queues
+        prefix = ctrl_name + "q"
+        for line in lines:
+            line = line.rstrip()
+            if ":" not in line:
+                continue
+            head, rest = line.split(":", 1)
+            irq_num = head.strip()
+            if not irq_num.isdigit():
+                continue
+            tokens = rest.split()
+            if not tokens:
+                continue
+            name = tokens[-1]
+            if not name.startswith(prefix):
+                continue
+            suffix = name[len(prefix):]
+            if not suffix.isdigit():
+                continue
+            eff = self._read_cpulist(f"/proc/irq/{irq_num}/effective_affinity_list")
+            smp = self._read_cpulist(f"/proc/irq/{irq_num}/smp_affinity_list")
+            queues.append({
+                "name": name,
+                "irq": int(irq_num),
+                "effective_cpus": eff,
+                "smp_cpus": smp,
+            })
+        queues.sort(key=lambda q: q["irq"])
+        return queues
+
+    def _read_cpulist(self, path):
+        try:
+            with open(path) as f:
+                return self._parse_cpulist(f.read().strip())
+        except Exception:
+            return []
 
     def _discover_memory(self):
         try:

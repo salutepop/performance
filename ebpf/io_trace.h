@@ -17,7 +17,7 @@ enum io_req_type {
 };
 
 #define MAX_SIZE_BUCKETS 4
-#define LBA_BUCKETS 64
+#define LBA_BUCKETS 128   // 0..LBA_BUCKETS-1 (각 bucket = capacity_sectors / LBA_BUCKETS)
 #define LAT_HIST_BUCKETS 32   // log2(ns) buckets: 0=[1,2)ns ... 30=~1s. clamp to 31.
 
 struct lat_stats {

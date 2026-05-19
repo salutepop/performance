@@ -436,23 +436,27 @@ def _build_lba_heatmap(header, rows):
         ts_i = header.index("timestamp")
     except ValueError:
         return None
+    # CSV 헤더에서 연속된 lba_N 컬럼 동적 카운트 (LBA_BUCKETS 변경에 자동 대응)
     lba_indices = []
-    for i in range(64):
+    for i in range(1024):  # 안전한 상한
         try:
             lba_indices.append(header.index(f"lba_{i}"))
         except ValueError:
-            return None  # 64 컬럼 다 없으면 스킵
+            break
+    if not lba_indices:
+        return None
+    nb = len(lba_indices)
 
     # timestamp 단위로 op별 합계 → row 합 (op 무관, 디스크 전체 접근 분포)
     ts_order = []
     ts_seen = set()
-    per_ts_sum = {}  # ts → [64 buckets cumulative sum across ops]
+    per_ts_sum = {}  # ts → [nb buckets cumulative sum across ops]
     for row in rows:
         ts = row[ts_i] if ts_i < len(row) else ""
         if ts not in ts_seen:
             ts_order.append(ts)
             ts_seen.add(ts)
-            per_ts_sum[ts] = [0] * 64
+            per_ts_sum[ts] = [0] * nb
         for b, ci in enumerate(lba_indices):
             if ci < len(row) and row[ci] not in ("", None):
                 try:
@@ -462,10 +466,10 @@ def _build_lba_heatmap(header, rows):
 
     # 누적값이라 인터벌 delta = 현재 - 이전 (첫 인터벌은 그대로)
     deltas = []
-    prev = [0] * 64
+    prev = [0] * nb
     for ts in ts_order:
         cur = per_ts_sum[ts]
-        d = [max(0, cur[b] - prev[b]) for b in range(64)]
+        d = [max(0, cur[b] - prev[b]) for b in range(nb)]
         deltas.append(d)
         prev = cur
 
@@ -478,8 +482,11 @@ def _render_lba_heatmap(dname, header, rows):
         return ""
     safe = re.sub(r"[^a-zA-Z0-9]", "_", dname)
     payload_json = json.dumps(data, separators=(",", ":"))
+    # bucket 수에 비례한 캔버스 높이 (cell당 ~3.5px 보장)
+    ny = len(data["buckets"][0]) if data["buckets"] else 64
+    canvas_h = max(320, 40 + ny * 4)
     return f"""<div class='heatmap-cell'>
-<canvas id='heatmap_{safe}' width='720' height='320'></canvas>
+<canvas id='heatmap_{safe}' width='720' height='{canvas_h}'></canvas>
 <p class='meta'>LBA 분포 heatmap (bucket 0 = 디스크 앞부분, 마지막 = 뒷부분). 색: log10(인터벌 접근 횟수) — <span style='background:hsl(240,85%,50%);color:#fff;padding:0 4px;border-radius:2px'>차가움</span>→<span style='background:hsl(120,85%,45%);color:#fff;padding:0 4px;border-radius:2px'>중간</span>→<span style='background:hsl(0,85%,40%);color:#fff;padding:0 4px;border-radius:2px'>뜨거움</span>. 회색 = 접근 0.</p>
 </div>
 <script>(function() {{

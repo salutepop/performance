@@ -39,6 +39,7 @@ _LIBAIO_OP_KEY = {
 
 
 LAT_HIST_BUCKETS = 32
+LBA_BUCKETS = 128  # MUST match ebpf/io_trace.h. 변경 시 BPF 재빌드 필요.
 
 
 def compute_percentiles(hist, pcts=(50, 95, 99, 99.9)):
@@ -135,7 +136,7 @@ def save_csv_buffers():
         "size_hist_32k",
         "size_hist_128k",
         "size_hist_large",
-    ] + [f"lba_{i}" for i in range(64)]
+    ] + [f"lba_{i}" for i in range(LBA_BUCKETS)]
 
     for dev_name, rows in csv_buffers.items():
         if not rows:
@@ -253,7 +254,7 @@ def parse_and_store_metrics(json_str):
                     )
 
                 size_hist = stats.get("size_hist", [0, 0, 0, 0])
-                lba_hist = stats.get("lba_hist", [0] * 64)
+                lba_hist = stats.get("lba_hist", [0] * LBA_BUCKETS)
 
                 op_libaio = op_libaio_avg.get(op, {"c2a": 0.0, "a2u": 0.0})
 
@@ -376,7 +377,7 @@ def print_op_stats(op_name, bpf_stats, c2a_data, a2u_data, duration):
             print(f"      {labels[i]:>10} : [{bar:<20}] {ratio:>5.1f}% ({count:,})")
 
     lba_hist = bpf_stats.get("lba_hist", [])
-    if cnt > 0 and len(lba_hist) == 64 and sum(lba_hist) > 0:
+    if cnt > 0 and len(lba_hist) == LBA_BUCKETS and sum(lba_hist) > 0:
         max_val = max(lba_hist)
         spark_chars = [" ", " ", "▂", "▃", "▄", "▅", "▆", "▇", "█"]
         sparkline = ""

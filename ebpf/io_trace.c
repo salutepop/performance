@@ -3,6 +3,7 @@
 #include <string.h>
 #include <stdbool.h>
 #include <signal.h>
+#include <time.h>
 #include <unistd.h>
 #include <dirent.h>
 #include <bpf/libbpf.h>

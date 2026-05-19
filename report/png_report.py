@@ -86,39 +86,6 @@ def _save_line(path, labels, datasets, title, ylabel, colors=None, styles=None):
     plt.close(fig)
 
 
-def _save_dual_axis(path, labels, left_datasets, right_datasets,
-                     title, left_ylabel, right_ylabel,
-                     left_palette=None, right_color="#ef4444"):
-    """dual y-axis line chart (correlation chart용)."""
-    fig, ax1 = plt.subplots(figsize=(10, 4))
-    ax2 = ax1.twinx()
-    left_palette = left_palette or _PALETTE
-    for i, (name, vals) in enumerate(left_datasets.items()):
-        y = [v if v is not None else np.nan for v in vals]
-        ax1.plot(range(len(labels)), y, label=name, color=left_palette[i % len(left_palette)],
-                 linewidth=1.3, marker=".", markersize=3)
-    right_styles = ["--", ":"]
-    right_colors = ["#ef4444", "#f59e0b"]
-    for i, (name, vals) in enumerate(right_datasets.items()):
-        y = [v if v is not None else np.nan for v in vals]
-        ax2.plot(range(len(labels)), y, label=name,
-                 color=right_colors[i % len(right_colors)],
-                 linestyle=right_styles[i % len(right_styles)], linewidth=1.2)
-    ax1.set_title(title)
-    ax1.set_ylabel(left_ylabel)
-    ax2.set_ylabel(right_ylabel)
-    ax1.set_xlabel("time")
-    ax1.grid(True, alpha=0.3)
-    # 합친 legend
-    h1, l1 = ax1.get_legend_handles_labels()
-    h2, l2 = ax2.get_legend_handles_labels()
-    ax1.legend(h1 + h2, l1 + l2, loc="best", fontsize=8, ncol=min(4, len(l1) + len(l2)))
-    _xtick_thin(ax1, labels)
-    fig.tight_layout()
-    fig.savefig(path)
-    plt.close(fig)
-
-
 def _save_heatmap(path, deltas, ts_labels, title):
     """LBA heatmap (timestamps × buckets)."""
     if not deltas or not any(any(row) for row in deltas):
@@ -146,7 +113,7 @@ def _save_heatmap(path, deltas, ts_labels, title):
 
 
 def _build_correlation_data(sys_header, sys_rows, device_csv_paths):
-    """html_report._render_correlation_chart 데이터 변형 — matplotlib용."""
+    """correlation chart 데이터: IOPS(Kiops), BW(MB/s), iowait/sys% per timestamp."""
     if not sys_header or not sys_rows or not device_csv_paths:
         return None
     try:
@@ -170,7 +137,8 @@ def _build_correlation_data(sys_header, sys_rows, device_csv_paths):
     iowait_sum = [_safe_sum(r, iowait_cols) for r in sys_rows]
     sys_sum = [_safe_sum(r, sys_cols) for r in sys_rows]
 
-    dev_aligned = {}
+    dev_iops = {}
+    dev_bw = {}
     for dpath in device_csv_paths:
         h, r = _load_csv(dpath)
         if not h:
@@ -178,19 +146,72 @@ def _build_correlation_data(sys_header, sys_rows, device_csv_paths):
         try:
             dts_i = h.index("timestamp")
             iops_i = h.index("iops_interval")
+            bw_i = h.index("bandwidth_mb_s_interval")
         except ValueError:
             continue
         dname = re.sub(r"_\d{8}_\d{6}\.csv$", "", os.path.basename(dpath))
-        bucket = {}
+        iops_bucket = {}
+        bw_bucket = {}
         for row in r:
             ts = row[dts_i] if dts_i < len(row) else ""
             try:
-                v = float(row[iops_i]) if iops_i < len(row) and row[iops_i] not in ("", None) else 0.0
+                iv = float(row[iops_i]) if iops_i < len(row) and row[iops_i] not in ("", None) else 0.0
             except ValueError:
-                v = 0.0
-            bucket[ts] = bucket.get(ts, 0) + v
-        dev_aligned[dname] = [bucket.get(ts) for ts in labels]
-    return {"labels": labels, "iowait": iowait_sum, "sys": sys_sum, "devs": dev_aligned}
+                iv = 0.0
+            try:
+                bv = float(row[bw_i]) if bw_i < len(row) and row[bw_i] not in ("", None) else 0.0
+            except ValueError:
+                bv = 0.0
+            iops_bucket[ts] = iops_bucket.get(ts, 0) + iv
+            bw_bucket[ts] = bw_bucket.get(ts, 0) + bv
+        dev_iops[dname] = [(iops_bucket[ts] / 1000.0) if ts in iops_bucket else None for ts in labels]
+        dev_bw[dname]   = [bw_bucket.get(ts) for ts in labels]
+    return {"labels": labels, "iowait": iowait_sum, "sys": sys_sum,
+            "iops": dev_iops, "bw": dev_bw}
+
+
+def _save_correlation_chart(path, corr, title):
+    """3축 차트: left=IOPS(Kiops, solid), 'inner left'=BW(MB/s, dashed, 디바이스 색 공유), right=CPU %."""
+    labels = corr["labels"]
+    fig, ax_iops = plt.subplots(figsize=(11, 4))
+    ax_bw = ax_iops.twinx()
+    ax_cpu = ax_iops.twinx()
+    # BW 축을 안쪽 left에 배치 (오른쪽 outer는 CPU%)
+    ax_bw.spines["right"].set_position(("axes", 1.08))
+    ax_bw.set_frame_on(True); ax_bw.patch.set_visible(False)
+
+    palette = _PALETTE
+    handles, lbls = [], []
+    for i, (dn, iops) in enumerate(corr["iops"].items()):
+        color = palette[i % len(palette)]
+        y_iops = [v if v is not None else np.nan for v in iops]
+        h1, = ax_iops.plot(range(len(labels)), y_iops, color=color, linewidth=1.4,
+                           marker=".", markersize=3, label=f"IOPS {dn} [Kiops]")
+        bw = corr["bw"].get(dn) or []
+        y_bw = [v if v is not None else np.nan for v in bw]
+        h2, = ax_bw.plot(range(len(labels)), y_bw, color=color, linewidth=1.2,
+                         linestyle="--", label=f"BW {dn} [MB/s]")
+        handles += [h1, h2]; lbls += [h1.get_label(), h2.get_label()]
+
+    y_iow = [v if v is not None else np.nan for v in corr["iowait"]]
+    y_sys = [v if v is not None else np.nan for v in corr["sys"]]
+    h3, = ax_cpu.plot(range(len(labels)), y_iow, color="#ef4444",
+                      linestyle=(0, (6, 3)), linewidth=1.2, label="iowait % (sum)")
+    h4, = ax_cpu.plot(range(len(labels)), y_sys, color="#f59e0b",
+                      linestyle=(0, (2, 2)), linewidth=1.2, label="sys % (sum)")
+    handles += [h3, h4]; lbls += [h3.get_label(), h4.get_label()]
+
+    ax_iops.set_title(title)
+    ax_iops.set_xlabel("time")
+    ax_iops.set_ylabel("IOPS [Kiops]")
+    ax_bw.set_ylabel("BW [MB/s]")
+    ax_cpu.set_ylabel("% CPU")
+    ax_iops.grid(True, alpha=0.3)
+    ax_iops.legend(handles, lbls, loc="best", fontsize=8, ncol=min(4, len(lbls)))
+    _xtick_thin(ax_iops, labels)
+    fig.tight_layout()
+    fig.savefig(path)
+    plt.close(fig)
 
 
 def build_report(session_dir, sid):
@@ -218,15 +239,11 @@ def build_report(session_dir, sid):
     # ---- 차트 생성 ----
     fig_refs = {}  # logical_name → relative path
 
-    # 1. I/O × System correlation
+    # 1. I/O × System correlation (Kiops solid + BW MB/s dashed + CPU %)
     corr = _build_correlation_data(sys_h, sys_r, device_csvs)
     if corr and corr["labels"]:
         path = os.path.join(figs_dir, "correlation.png")
-        left = {f"IOPS {dn}": v for dn, v in corr["devs"].items()}
-        right = {"iowait %": corr["iowait"], "sys %": corr["sys"]}
-        _save_dual_axis(path, corr["labels"], left, right,
-                         "I/O × System correlation",
-                         "IOPS (left, solid)", "% CPU (right, dashed)")
+        _save_correlation_chart(path, corr, "I/O × System correlation")
         fig_refs["correlation"] = os.path.relpath(path, session_dir)
 
     # 2. Multi-device overview (IOPS, BW)
@@ -373,7 +390,7 @@ def build_report(session_dir, sid):
         ["Read IOPS (total)", f"{int(total_read):,}"],
         ["Write IOPS (total)", f"{int(total_write):,}"],
         ["Peak BW", f"{peak_bw:.1f} MB/s"],
-        ["Worst D2C interval avg", f"{peak_d2c:.1f} us"],
+        ["Max 1s-window D2C avg", f"{peak_d2c:.1f} us"],
         ["SQ↔CQ diff (mean)", f"{sqcq_avg*100:.2f} %"],
         ["CPU iowait peak", f"{iowait_peak:.1f} %"],
         ["CPU sys peak", f"{sys_peak:.1f} %"],

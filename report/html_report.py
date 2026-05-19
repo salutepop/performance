@@ -233,8 +233,8 @@ def _render_summary(dev_aggs, sys_agg):
         ("Read IOPS (total)", _fmt_num(total_read), "", ""),
         ("Write IOPS (total)", _fmt_num(total_write), "", ""),
         ("Peak BW", _fmt_num(peak_bw, " MB/s", 1), "", ""),
-        ("Worst D2C interval avg", _fmt_num(peak_d2c_us, " us", 1),
-         "warn" if peak_d2c_us > 500 else "", "tail spike 지점 잠재력"),
+        ("Max 1s-window D2C avg", _fmt_num(peak_d2c_us, " us", 1),
+         "warn" if peak_d2c_us > 500 else "", "tail spike 지점 잠재력 (인터벌별 평균 중 최대)"),
         ("SQ↔CQ diff", f"{sqcq_avg*100:.1f}%",
          "bad" if sqcq_avg > 0.2 else ("warn" if sqcq_avg > 0.05 else ""),
          "cross-CPU completion 비율"),
@@ -373,8 +373,10 @@ def _render_nvme_queue_diag(topo, sys_header, sys_rows):
 
 
 def _render_correlation_chart(sys_header, sys_rows, device_csv_paths):
-    """1개 dual-axis 차트로 I/O와 system load 상관 시각화.
-       왼쪽 Y = device 총 IOPS (디바이스별 색 분리), 오른쪽 Y = sys%/iowait% (점선)."""
+    """3-axis 차트로 I/O와 system load 상관 시각화.
+       left Y  = device 총 IOPS (Kiops, 디바이스별 색 분리, solid)
+       left Y2 = device 총 BW   (MB/s, 같은 색 dashed)
+       right Y = iowait%/sys%   (점선)"""
     if not sys_header or not sys_rows or not device_csv_paths:
         return ""
     try:
@@ -404,8 +406,9 @@ def _render_correlation_chart(sys_header, sys_rows, device_csv_paths):
     iowait_sum = [_safe_sum(r, iow_idx) for r in sys_rows]
     sys_sum = [_safe_sum(r, sys_idx) for r in sys_rows]
 
-    # device: timestamp별 op 합산 IOPS
-    dev_aligned = {}
+    # device: timestamp별 op 합산 IOPS(Kiops) + BW(MB/s)
+    dev_iops = {}   # {dname: [Kiops per ts]}
+    dev_bw = {}     # {dname: [MB/s per ts]}
     for dpath in device_csv_paths:
         h, r = _load_csv(dpath)
         if not h:
@@ -413,24 +416,34 @@ def _render_correlation_chart(sys_header, sys_rows, device_csv_paths):
         try:
             dts_i = h.index("timestamp")
             iops_i = h.index("iops_interval")
+            bw_i = h.index("bandwidth_mb_s_interval")
         except ValueError:
             continue
         dname = re.sub(r"_\d{8}_\d{6}\.csv$", "", os.path.basename(dpath))
-        bucket = {}
+        iops_bucket = {}
+        bw_bucket = {}
         for row in r:
             ts = row[dts_i] if dts_i < len(row) else ""
             try:
-                v = float(row[iops_i]) if iops_i < len(row) and row[iops_i] not in ("", None) else 0.0
+                iv = float(row[iops_i]) if iops_i < len(row) and row[iops_i] not in ("", None) else 0.0
             except ValueError:
-                v = 0.0
-            bucket[ts] = bucket.get(ts, 0) + v
-        dev_aligned[dname] = [bucket.get(ts) for ts in labels]
+                iv = 0.0
+            try:
+                bv = float(row[bw_i]) if bw_i < len(row) and row[bw_i] not in ("", None) else 0.0
+            except ValueError:
+                bv = 0.0
+            iops_bucket[ts] = iops_bucket.get(ts, 0) + iv
+            bw_bucket[ts] = bw_bucket.get(ts, 0) + bv
+        # IOPS → Kiops 변환
+        dev_iops[dname] = [(iops_bucket[ts] / 1000.0) if ts in iops_bucket else None for ts in labels]
+        dev_bw[dname]   = [bw_bucket.get(ts) for ts in labels]
 
     payload = {
         "labels": labels,
         "iowait": iowait_sum,
         "sys": sys_sum,
-        "devs": dev_aligned,
+        "iops": dev_iops,
+        "bw": dev_bw,
     }
     palette = json.dumps(_PALETTE)
     payload_json = json.dumps(payload, separators=(",", ":"))
@@ -446,9 +459,15 @@ if (typeof Chart === 'undefined') {{
 }}
 const p = {payload_json};
 const palette = {palette};
-const devDatasets = Object.keys(p.devs).map(function(dn, i) {{
-  return {{label: 'IOPS '+dn, data: p.devs[dn], yAxisID: 'y',
+const devNames = Object.keys(p.iops);
+const iopsDatasets = devNames.map(function(dn, i) {{
+  return {{label: 'IOPS '+dn+' [Kiops]', data: p.iops[dn], yAxisID: 'y',
            borderColor: palette[i % palette.length],
+           backgroundColor: 'transparent', pointRadius: 1, tension: 0.2, spanGaps: true}};
+}});
+const bwDatasets = devNames.map(function(dn, i) {{
+  return {{label: 'BW '+dn+' [MB/s]', data: p.bw[dn], yAxisID: 'yBW',
+           borderColor: palette[i % palette.length], borderDash: [5,3],
            backgroundColor: 'transparent', pointRadius: 1, tension: 0.2, spanGaps: true}};
 }});
 const sysDatasets = [
@@ -463,14 +482,15 @@ const ctx = document.getElementById('chart_corr');
 if (!ctx) return;
 new Chart(ctx.getContext('2d'), {{
   type: 'line',
-  data: {{labels: p.labels, datasets: devDatasets.concat(sysDatasets)}},
+  data: {{labels: p.labels, datasets: iopsDatasets.concat(bwDatasets).concat(sysDatasets)}},
   options: {{responsive: true, maintainAspectRatio: false, animation: false,
-    plugins: {{title: {{display: true, text: 'I/O × System correlation (left: IOPS, right: CPU %)'}},
+    plugins: {{title: {{display: true, text: 'I/O × System correlation (left: Kiops solid + MB/s dashed, right: CPU %)'}},
                legend: {{position: 'bottom'}}}},
     scales: {{
-      y:  {{type: 'linear', position: 'left',  title: {{display: true, text: 'IOPS'}}, beginAtZero: true}},
-      y1: {{type: 'linear', position: 'right', title: {{display: true, text: '% CPU'}}, beginAtZero: true, grid: {{drawOnChartArea: false}}}},
-      x:  {{ticks: {{maxTicksLimit: 12}}}}
+      y:   {{type: 'linear', position: 'left',  title: {{display: true, text: 'IOPS [Kiops]'}}, beginAtZero: true}},
+      yBW: {{type: 'linear', position: 'left',  title: {{display: true, text: 'BW [MB/s]'}},   beginAtZero: true, grid: {{drawOnChartArea: false}}}},
+      y1:  {{type: 'linear', position: 'right', title: {{display: true, text: '% CPU'}},        beginAtZero: true, grid: {{drawOnChartArea: false}}}},
+      x:   {{ticks: {{maxTicksLimit: 12}}}}
     }}
   }}
 }});

@@ -123,7 +123,76 @@ timestamp,operation,iops_interval,bandwidth_mb_s_interval,q2d_avg_us_interval,d2
 }
 ```
 
-## 5. 리포트 파일 (`report_*.html`, `report_*.md`, `diff_*.md`)
+## 5. HTML 리포트 상단 카드 (Executive Summary)
+
+`report_*.html` 최상단 8장의 카드는 `report/html_report.py::_render_summary` 가 만든다. 모든 카드는 `report/md_report.py::_device_aggregates` (device CSV → op별 stats) + `_system_aggregates` (system CSV → node/iface별 stats) 두 dict에서 추출.
+
+### 카드 매핑 표
+
+| # | 카드 label | 집계 방법 | 입력 CSV 컬럼 | CSV 생성 위치 | 원본 데이터 출처 | 경고 임계 |
+|---|---|---|---|---|---|---|
+| 1 | **Read IOPS (total)** | Σ devices × op∈{read, read_ahead} : `iops.sum` | `iops_interval` | `ebpf/io_profiler.py::parse_and_store_metrics` | BPF `block_rq_complete` → `device_stats[dev].stats[IO_READ].io_count` 인터벌 delta | — |
+| 2 | **Write IOPS (total)** | Σ devices : `iops.sum` (op=write) | `iops_interval` (op=write 행) | 위와 동일 | 위와 동일 (`type=IO_WRITE`) | — |
+| 3 | **Peak BW** | max(devices × ops : `bw.max`) | `bandwidth_mb_s_interval` | 위와 동일 | BPF `target->total_bytes` 인터벌 delta ÷ elapsed | — |
+| 4 | **Worst D2C interval avg** | max(devices × ops : `d2c.max`) | `d2c_avg_us_interval` | 위와 동일 | BPF `block_rq_issue→block_rq_complete` 시간차 (`target->d2c.total / count`) per interval | `>500us` → warn |
+| 5 | **SQ↔CQ diff** | mean(devices : `_sqcq_diff_ratio.avg`) | `sq_cq_diff_ratio` | 위와 동일 | BPF `block_rq_complete`에서 `bpf_get_smp_processor_id()` vs `trace_ctx.issue_cpu` 비교 → `device_qd.sq_cq_{same,diff}` 누적의 인터벌 delta 비율 | `>20%` bad, `>5%` warn |
+| 6 | **CPU iowait peak** | max(nodes : `iowait_pct.max`) | `node{N}_iowait_pct` | `core/monitor.py::_tick` | `/proc/stat` 의 per-CPU iowait jiffies 인터벌 delta → NUMA node 단위 합산 / total × 100 | `>10%` bad, `>2%` warn |
+| 7 | **CPU sys peak** | max(nodes : `sys_pct.max`) | `node{N}_sys_pct` | 위와 동일 | `/proc/stat` sys jiffies | `>50%` warn |
+| 8 | **GPU power peak** *(있을 때만)* | max(gpus : `pwr_w.max`) | `gpu{N}_pwr_w` | `core/monitor.py::_gpu_reader_loop` (background thread) | `nvidia-smi dmon -s pumt` stream의 `pwr` 컬럼 | `>50W` warn |
+
+### "max"의 정확한 의미
+
+`_stats(values)` 헬퍼가 인터벌 값 리스트(예: 7개의 1초 평균)에서 `{n, avg, min, max, sum}` 을 계산. 즉 카드 #3·#4의 "max"는 **인터벌별 평균 중 가장 큰 인터벌** — 전체 누적 평균이 아닌 **가장 격렬했던 1초**.
+
+예) 카드 #4 "Worst D2C interval avg" 값이 7700us = "어떤 1초 동안 d2c 평균이 7.7ms였다". 통상 첫 인터벌(preconditioning) 또는 GC 트리거 시 발생.
+
+### 호출 흐름
+
+```
+build_report(session_dir, sid)
+  ├─ _load_csv(system_metrics_<sid>.csv)            ← row 단위 system_metrics
+  ├─ _system_aggregates(sys_h, sys_r)               ← cpu/mem/irq/gpu/freq stats dict
+  ├─ for dpath in *_<sid>.csv:
+  │     _load_csv(dpath)                            ← row 단위 device CSV
+  │     _device_aggregates(dh, dr)                  ← op별 {iops,bw,q2d,d2c,qd}.stats dict
+  └─ _render_summary(dev_aggs, sys_agg)
+        ├─ 위 8개 값 추출 + 임계값 비교로 card class 결정 (`warn` / `bad` CSS class)
+        ├─ html.escape + <div class='card …'> 생성
+        └─ _top_findings(sys_agg, dev_aggs) 호출 → <ul class='findings'> 렌더
+```
+
+### 한 데이터 흐름으로 본 예시 — 카드 #4
+
+```
+fio randread → 커널 block layer
+  ↓ tp/block_rq_issue: trace_ctx에 issue_ts 저장
+  ↓ tp/block_rq_complete: d2c_lat = now - issue_ts → target->d2c.total += d2c_lat (BPF map device_stats)
+  ↓ io_trace.c (userspace loader): 1초마다 device_stats dump → JSON에 d2c.{total,min,max}
+  ↓ io_profiler.py: prev/curr 누적 delta → d2c_avg_us_interval = (Δtotal / Δcount / 1000)
+  ↓ CSV row append: nvme0n1_<sid>.csv 의 d2c_avg_us_interval 컬럼
+  ↓ md_report._device_aggregates: 인터벌 값 리스트 → _stats → {"max": 가장 큰 인터벌 평균}
+  ↓ html_report._render_summary: dev_aggs[d][op]["d2c"]["max"] → 카드 #4 표시
+```
+
+### Top findings (카드 아래)
+
+`md_report._top_findings(sys_agg, dev_aggs)` 의 heuristic 결과 (markdown 리포트와 동일):
+- SQ↔CQ diff_ratio 평균 → cross-CPU completion 경고 또는 OK
+- iowait peak → I/O wait 경고
+- mem_dirty peak > 100MB → write-back 활용
+- GPU SM peak > 10% → GPU 활동
+- 가장 바쁜 NUMA node 식별
+
+### 임계값 변경 시
+
+`report/html_report.py::_render_summary` 안의 inline 조건문. 예:
+```python
+("Worst D2C interval avg", _fmt_num(peak_d2c_us, " us", 1),
+ "warn" if peak_d2c_us > 500 else "", ...)
+```
+threshold 바꾸면 같은 함수만 수정. CSS class `warn` / `bad` 색 정의는 `HTML_CSS` 변수.
+
+## 6. 리포트 파일 (`report_*.html`, `report_*.md`, `diff_*.md`)
 
 - `report_<sid>.html`: 자기완결 HTML. 외부 리소스는 Chart.js CDN(`jsdelivr.net`) 1개만 사용, 미접속 환경에서는 차트 자리에 "Chart.js CDN unreachable" 표시되고 테이블/SVG는 정상 렌더.
 - `report_<sid>.md`: Top findings + Topology + Device aggregate + System aggregate 요약. 평균/peak 단순 산술평균 (인터벌 outlier에 민감 — P3 follow-up).

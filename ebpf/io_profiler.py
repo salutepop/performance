@@ -20,7 +20,9 @@ except Exception as _e:
     SystemMonitor = None
     print(f"[!] SystemMonitor import 실패: {_e} — system_metrics 수집은 비활성화")
 
-OUTPUT_DIR = "./csv_results"
+# 산출물 위치는 cwd 무관 — io_profiler.py 가 있는 ebpf/ 디렉터리 기준 절대경로.
+# 이전엔 "./csv_results" 상대 경로라 호출 cwd에 따라 다른 디렉터리에 떨어짐.
+OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "csv_results")
 SESSION_ID = datetime.now().strftime("%Y%m%d_%H%M%S")
 
 prev_metrics = {}

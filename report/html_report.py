@@ -272,6 +272,106 @@ def _render_summary(dev_aggs, sys_agg):
     return "".join(out)
 
 
+def _render_nvme_queue_diag(topo, sys_header, sys_rows):
+    """NVMe 컨트롤러별 멀티큐 활용 진단 섹션.
+    topology의 queues affinity (정적) + system_metrics의 active_queues/active_cpus (관측치) 결합.
+    """
+    if not topo:
+        return ""
+    raw = topo.get("raw") or {}
+    ctrls = raw.get("nvme_ctrls") or raw.get("discovered", {}).get("nvme_ctrls") or []
+    if not ctrls:
+        return ""
+
+    # system_metrics에서 ctrl별 active_queues/active_cpus 평균/peak + top_cpu 분포 추출
+    def _stats_col(col_name):
+        if not sys_header or not sys_rows or col_name not in sys_header:
+            return None
+        idx = sys_header.index(col_name)
+        vals = []
+        for r in sys_rows:
+            if idx < len(r) and r[idx] not in ("", None):
+                try:
+                    vals.append(float(r[idx]))
+                except ValueError:
+                    pass
+        if not vals:
+            return None
+        return {"avg": sum(vals)/len(vals), "max": max(vals), "min": min(vals)}
+
+    def _top_cpu_dist(col_name):
+        """top_cpu 컬럼에서 가장 빈번한 CPU 값과 비율."""
+        if not sys_header or not sys_rows or col_name not in sys_header:
+            return None
+        idx = sys_header.index(col_name)
+        counts = {}
+        n = 0
+        for r in sys_rows:
+            if idx < len(r) and r[idx] not in ("", None, "-1"):
+                v = r[idx]
+                counts[v] = counts.get(v, 0) + 1
+                n += 1
+        if not n:
+            return None
+        top_cpu, top_n = max(counts.items(), key=lambda x: x[1])
+        return {"cpu": top_cpu, "ratio": top_n / n, "distinct": len(counts)}
+
+    out = []
+    for c in ctrls:
+        name = c.get("name", "?")
+        qcount = c.get("queue_count", "?")
+        queues = c.get("queues", []) or []
+        # affinity 요약: q1..qN의 effective CPU 리스트를 compact range로
+        eff_cpus_set = set()
+        for q in queues:
+            for cpu in q.get("effective_cpus", []):
+                eff_cpus_set.add(cpu)
+        eff_str = _compact_cpu_list(sorted(eff_cpus_set))
+
+        actq = _stats_col(f"{name}_active_queues")
+        actc = _stats_col(f"{name}_active_cpus")
+        topc = _top_cpu_dist(f"{name}_top_cpu")
+        irq = _stats_col(f"{name}_irq_per_s")
+
+        # 진단 휴리스틱
+        diag = []
+        if actq and isinstance(qcount, int) and qcount > 0:
+            r = (actq["avg"] / qcount)
+            if r < 0.3:
+                diag.append(f"<span class='card-warn'>⚠ 멀티큐 미활용</span> (활성 {actq['avg']:.0f}/{qcount} = {r*100:.0f}%) — 워크로드가 소수 CPU에 집중")
+            elif r > 0.7:
+                diag.append(f"✓ 멀티큐 활용 양호 ({actq['avg']:.0f}/{qcount} = {r*100:.0f}%)")
+            else:
+                diag.append(f"멀티큐 부분 활용 ({actq['avg']:.0f}/{qcount} = {r*100:.0f}%)")
+        if topc and topc["distinct"] == 1 and isinstance(qcount, int) and qcount > 2:
+            diag.append(f"<span class='card-warn'>⚠ top-IRQ CPU 1곳에만 집중</span> (cpu {topc['cpu']}, 모든 인터벌)")
+
+        # 큐별 affinity 짧은 라인 (앞 4개 + ...)
+        q_lines = []
+        for q in queues[:6]:
+            eff = q.get("effective_cpus", [])
+            q_lines.append(f"{q['name']}→cpu{eff[0] if eff else '?'}")
+        more = f" … (+{len(queues)-6} more)" if len(queues) > 6 else ""
+
+        out.append(f"<div class='findings'><strong>{html.escape(name)}</strong> — "
+                   f"queue_count={qcount}, configured effective CPUs: <code>{html.escape(eff_str) or '(none)'}</code>")
+        out.append("<ul>")
+        if actq:
+            out.append(f"<li>활성 queue (인터벌 평균): {actq['avg']:.1f} / {qcount} (peak {actq['max']:.0f})</li>")
+        if actc:
+            out.append(f"<li>IRQ 받은 distinct CPU: {actc['avg']:.1f} (peak {actc['max']:.0f})</li>")
+        if topc:
+            out.append(f"<li>top-IRQ CPU: cpu {topc['cpu']} (전체 인터벌 중 {topc['ratio']*100:.0f}%에서 1위), distinct top CPU 종류: {topc['distinct']}</li>")
+        if irq:
+            out.append(f"<li>총 IRQ rate: avg {irq['avg']:.0f}/s · peak {irq['max']:.0f}/s</li>")
+        if q_lines:
+            out.append(f"<li>큐 매핑 (effective): <code>{html.escape(', '.join(q_lines)+more)}</code></li>")
+        for d in diag:
+            out.append(f"<li>{d}</li>")
+        out.append("</ul></div>")
+    return "".join(out)
+
+
 def _render_correlation_chart(sys_header, sys_rows, device_csv_paths):
     """1개 dual-axis 차트로 I/O와 system load 상관 시각화.
        왼쪽 Y = device 총 IOPS (디바이스별 색 분리), 오른쪽 Y = sys%/iowait% (점선)."""
@@ -857,6 +957,7 @@ HTML_CSS = """
   .card.bad  { border-left-color: #ef4444; background: #fef2f2; }
   .findings { background: #f9fafb; border: 1px solid #e5e7eb; padding: 0.6em 1em; border-radius: 4px; margin: 0.8em 0; }
   .findings li { margin: 0.25em 0; }
+  .card-warn { color: #b45309; font-weight: bold; }
   .chart-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 1em; margin: 1em 0; }
   .chart-cell { background: #fafafa; border: 1px solid #ddd; padding: 0.5em; height: 280px; position: relative; }
   .chart-warn { color: #b00; font-style: italic; }
@@ -912,6 +1013,16 @@ def build_report(session_dir, sid):
 
     parts.append("<h2>1. Topology</h2>")
     parts.append(_render_topology(topo))
+
+    # NVMe 멀티큐 진단 (topology의 queue affinity + system_metrics의 active counts)
+    try:
+        if sys_h_tmp:
+            qd = _render_nvme_queue_diag(topo, sys_h_tmp, sys_r_tmp)
+            if qd:
+                parts.append("<h3>NVMe queue affinity diagnostic</h3>")
+                parts.append(qd)
+    except Exception:
+        pass
 
     parts.append("<h2>2. System metrics (per-second)</h2>")
     h, r = _load_csv(sys_path)

@@ -41,5 +41,5 @@ class ResultReporter:
         lat_us = job[mode]["clat_ns"]["mean"] / 1000
 
         print(
-            f"  >> [{wl_name} 완료] BW: {bw_mb:.2f} MB/s | IOPS: {iops:.0f} | Latency: {lat_us:.2f} us"
+            f"  >> [{wl_name} done] BW: {bw_mb:.2f} MB/s | IOPS: {iops:.0f} | Latency: {lat_us:.2f} us"
         )

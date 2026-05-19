@@ -95,7 +95,7 @@ def _order_pngs(pngs):
 
 def main(argv=None):
     p = argparse.ArgumentParser(
-        description="세션 산출물 → PDF 리포트 (matplotlib 단독, 오프라인 CLI)"
+        description="Session artifacts -> PDF report (matplotlib only, offline CLI)"
     )
     p.add_argument("--session-dir", default="ebpf/csv_results")
     p.add_argument("--session-id", default=None)
@@ -105,7 +105,7 @@ def main(argv=None):
     sd = args.session_dir
     sid = _resolve_sid(sd, args.session_id)
     if not sid:
-        print(f"[pdf_report] 세션 ID를 찾을 수 없음 (topology_*.json 없음): {sd}", file=sys.stderr)
+        print(f"[pdf_report] no session id found (no topology_*.json in {sd})", file=sys.stderr)
         return 1
 
     out_path = args.output or os.path.join(sd, f"report_{sid}.pdf")
@@ -119,7 +119,7 @@ def main(argv=None):
             png_main(["--session-dir", sd, "--session-id", sid])
             pngs = glob.glob(os.path.join(figs_dir, "*.png"))
         except Exception as e:
-            print(f"[pdf_report] PNG 자동 생성 실패: {e}", file=sys.stderr)
+            print(f"[pdf_report] auto-generating PNGs failed: {e}", file=sys.stderr)
 
     pngs = _order_pngs(pngs)
     font_used = _setup_kr_font()
@@ -146,7 +146,7 @@ def main(argv=None):
             _add_image_page(pdf, png)
             pages += 1
 
-    font_note = f"font={font_used}" if font_used else "font=default (한글 깨질 수 있음)"
+    font_note = f"font={font_used}" if font_used else "font=default"
     print(f"[pdf_report] wrote {out_path} ({os.path.getsize(out_path)} bytes, pngs={len(pngs)}, {font_note})")
     return 0
 

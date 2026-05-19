@@ -427,7 +427,7 @@ class SystemMonitor:
                 text=True, bufsize=1,
             )
         except Exception as e:
-            print(f"[SysMon] nvidia-smi dmon start 실패: {e}; GPU 수집 비활성화")
+            print(f"[SysMon] nvidia-smi dmon start failed: {e}; GPU collection disabled")
             self._gpu_proc = None
             return
         self._gpu_thread = threading.Thread(target=self._gpu_reader_loop, daemon=True)

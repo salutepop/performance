@@ -64,12 +64,27 @@ def _xtick_thin(ax, labels, max_ticks=12):
     ax.set_xticklabels([labels[i] for i in range(0, n, step)], rotation=45)
 
 
+def _place_legend(fig, ax, handles=None, labels=None, max_cols=5):
+    """All charts share the same legend slot: centered below the axes, no frame.
+    Reserves bottom margin so the legend never overlaps data."""
+    if labels is None:
+        handles, labels = ax.get_legend_handles_labels()
+    if not labels:
+        return
+    ncol = min(max_cols, len(labels))
+    nrows = (len(labels) + ncol - 1) // ncol
+    ax.legend(handles, labels,
+              loc="upper center", bbox_to_anchor=(0.5, -0.18),
+              ncol=ncol, fontsize=8, frameon=False, handlelength=2.2)
+    # 1 row ~ 0.22, +0.05 per extra row
+    fig.subplots_adjust(bottom=0.22 + 0.05 * max(0, nrows - 1))
+
+
 def _save_line(path, labels, datasets, title, ylabel, colors=None, styles=None):
-    """datasets: dict {label: [values]}, None 허용 (matplotlib는 None을 NaN 처리 안 함 → np.nan 변환).
-    colors/styles: dict {label: color/style}, 누락 시 자동."""
+    """datasets: dict {label: [values]}, None -> NaN for matplotlib gap handling.
+    colors/styles: dict {label: ...}, optional."""
     fig, ax = plt.subplots(figsize=(8, 3.5))
     for i, (name, vals) in enumerate(datasets.items()):
-        # None → NaN (matplotlib에서 연결 끊김 표현)
         y = [v if v is not None else np.nan for v in vals]
         c = (colors or {}).get(name) or _PALETTE[i % len(_PALETTE)]
         s = (styles or {}).get(name) or "-"
@@ -79,9 +94,8 @@ def _save_line(path, labels, datasets, title, ylabel, colors=None, styles=None):
     ax.set_ylabel(ylabel)
     ax.set_xlabel("time")
     ax.grid(True, alpha=0.3)
-    ax.legend(loc="best", ncol=min(4, len(datasets)))
     _xtick_thin(ax, labels)
-    fig.tight_layout()
+    _place_legend(fig, ax)
     fig.savefig(path)
     plt.close(fig)
 
@@ -171,12 +185,12 @@ def _build_correlation_data(sys_header, sys_rows, device_csv_paths):
 
 
 def _save_correlation_chart(path, corr, title):
-    """3축 차트: left=IOPS(Kiops, solid), 'inner left'=BW(MB/s, dashed, 디바이스 색 공유), right=CPU %."""
+    """3-axis chart: left=IOPS [Kiops, solid], outer-right=BW [MB/s, dashed, shares device color], right=CPU %."""
     labels = corr["labels"]
     fig, ax_iops = plt.subplots(figsize=(11, 4))
     ax_bw = ax_iops.twinx()
     ax_cpu = ax_iops.twinx()
-    # BW 축을 안쪽 left에 배치 (오른쪽 outer는 CPU%)
+    # Offset BW spine to the outer right; CPU% stays on the primary right.
     ax_bw.spines["right"].set_position(("axes", 1.08))
     ax_bw.set_frame_on(True); ax_bw.patch.set_visible(False)
 
@@ -207,9 +221,8 @@ def _save_correlation_chart(path, corr, title):
     ax_bw.set_ylabel("BW [MB/s]")
     ax_cpu.set_ylabel("% CPU")
     ax_iops.grid(True, alpha=0.3)
-    ax_iops.legend(handles, lbls, loc="best", fontsize=8, ncol=min(4, len(lbls)))
     _xtick_thin(ax_iops, labels)
-    fig.tight_layout()
+    _place_legend(fig, ax_iops, handles=handles, labels=lbls)
     fig.savefig(path)
     plt.close(fig)
 
@@ -243,7 +256,7 @@ def build_report(session_dir, sid):
     corr = _build_correlation_data(sys_h, sys_r, device_csvs)
     if corr and corr["labels"]:
         path = os.path.join(figs_dir, "correlation.png")
-        _save_correlation_chart(path, corr, "I/O × System correlation")
+        _save_correlation_chart(path, corr, "I/O x System correlation")
         fig_refs["correlation"] = os.path.relpath(path, session_dir)
 
     # 2. Multi-device overview (IOPS, BW)
@@ -402,7 +415,7 @@ def build_report(session_dir, sid):
 
     # Correlation chart
     if "correlation" in fig_refs:
-        lines += ["## I/O × System correlation", "",
+        lines += ["## I/O x System correlation", "",
                   f"![correlation]({fig_refs['correlation']})", ""]
 
     # Topology
@@ -469,7 +482,7 @@ def build_report(session_dir, sid):
                 ])
             if rows:
                 lines.append(_md_table(rows,
-                    ["op", "총 IO", "peak BW(MB/s)", "avg D2C(us)", "peak QD"],
+                    ["op", "total IO", "peak BW(MB/s)", "avg D2C(us)", "peak QD"],
                     ["l"] + ["r"] * 4))
                 lines.append("")
             for fk, alt in [(f"{safe}_iops", "IOPS"),
@@ -493,7 +506,7 @@ def build_report(session_dir, sid):
 
 
 def main(argv=None):
-    p = argparse.ArgumentParser(description="정적 PNG + Markdown 리포트 (오프라인용)")
+    p = argparse.ArgumentParser(description="Static PNG + Markdown report (offline-friendly)")
     p.add_argument("--session-dir", default="ebpf/csv_results")
     p.add_argument("--session-id", default=None)
     p.add_argument("-o", "--output", default=None)
@@ -501,10 +514,10 @@ def main(argv=None):
 
     sd = args.session_dir
     if not os.path.isdir(sd):
-        print(f"[!] 세션 디렉터리 없음: {sd}", file=sys.stderr); return 2
+        print(f"[!] session dir not found: {sd}", file=sys.stderr); return 2
     sid = args.session_id or _discover_session(sd)
     if not sid:
-        print(f"[!] topology_*.json 없음 in {sd}", file=sys.stderr); return 2
+        print(f"[!] no topology_*.json in {sd}", file=sys.stderr); return 2
 
     out_path = args.output or os.path.join(sd, f"report_png_{sid}.md")
     md, refs = build_report(sd, sid)

@@ -70,7 +70,7 @@ def _render_table(header, rows, max_rows=200):
         out.append("</tr>")
     out.append("</tbody></table>")
     if truncated:
-        out.append(f"<p class='note'>… {len(rows) - max_rows} more rows omitted (총 {len(rows)}행)</p>")
+        out.append(f"<p class='note'>... {len(rows) - max_rows} more rows omitted (total {len(rows)} rows)</p>")
     return "".join(out)
 
 
@@ -234,17 +234,17 @@ def _render_summary(dev_aggs, sys_agg):
         ("Write IOPS (total)", _fmt_num(total_write), "", ""),
         ("Peak BW", _fmt_num(peak_bw, " MB/s", 1), "", ""),
         ("Max 1s-window D2C avg", _fmt_num(peak_d2c_us, " us", 1),
-         "warn" if peak_d2c_us > 500 else "", "tail spike 지점 잠재력 (인터벌별 평균 중 최대)"),
-        ("SQ↔CQ diff", f"{sqcq_avg*100:.1f}%",
+         "warn" if peak_d2c_us > 500 else "", "tail spike hint (max of per-interval avg)"),
+        ("SQ-CQ diff", f"{sqcq_avg*100:.1f}%",
          "bad" if sqcq_avg > 0.2 else ("warn" if sqcq_avg > 0.05 else ""),
-         "cross-CPU completion 비율"),
+         "cross-CPU completion ratio"),
         ("CPU iowait peak", f"{iowait_peak:.1f}%",
          "bad" if iowait_peak > 10 else ("warn" if iowait_peak > 2 else ""), ""),
         ("CPU sys peak", f"{sys_peak:.1f}%", "warn" if sys_peak > 50 else "", ""),
     ]
     if gpu_pwr_peak is not None:
         cards.append(("GPU power peak", _fmt_num(gpu_pwr_peak, " W", 0),
-                      "warn" if gpu_pwr_peak > 50 else "", "GPU 활동 흔적"))
+                      "warn" if gpu_pwr_peak > 50 else "", "GPU activity hint"))
 
     out = ["<div class='summary-cards'>"]
     for label, val, klass, hint in cards:
@@ -333,18 +333,18 @@ def _render_nvme_queue_diag(topo, sys_header, sys_rows):
         topc = _top_cpu_dist(f"{name}_top_cpu")
         irq = _stats_col(f"{name}_irq_per_s")
 
-        # 진단 휴리스틱
+        # diagnostic heuristics
         diag = []
         if actq and isinstance(qcount, int) and qcount > 0:
             r = (actq["avg"] / qcount)
             if r < 0.3:
-                diag.append(f"<span class='card-warn'>⚠ 멀티큐 미활용</span> (활성 {actq['avg']:.0f}/{qcount} = {r*100:.0f}%) — 워크로드가 소수 CPU에 집중")
+                diag.append(f"<span class='card-warn'>WARN: multi-queue underused</span> (active {actq['avg']:.0f}/{qcount} = {r*100:.0f}%) - workload concentrated on a few CPUs")
             elif r > 0.7:
-                diag.append(f"✓ 멀티큐 활용 양호 ({actq['avg']:.0f}/{qcount} = {r*100:.0f}%)")
+                diag.append(f"OK: multi-queue well utilized ({actq['avg']:.0f}/{qcount} = {r*100:.0f}%)")
             else:
-                diag.append(f"멀티큐 부분 활용 ({actq['avg']:.0f}/{qcount} = {r*100:.0f}%)")
+                diag.append(f"Partial multi-queue use ({actq['avg']:.0f}/{qcount} = {r*100:.0f}%)")
         if topc and topc["distinct"] == 1 and isinstance(qcount, int) and qcount > 2:
-            diag.append(f"<span class='card-warn'>⚠ top-IRQ CPU 1곳에만 집중</span> (cpu {topc['cpu']}, 모든 인터벌)")
+            diag.append(f"<span class='card-warn'>WARN: top-IRQ CPU pinned to one</span> (cpu {topc['cpu']}, every interval)")
 
         # 큐별 affinity 짧은 라인 (앞 4개 + ...)
         q_lines = []
@@ -357,15 +357,15 @@ def _render_nvme_queue_diag(topo, sys_header, sys_rows):
                    f"queue_count={qcount}, configured effective CPUs: <code>{html.escape(eff_str) or '(none)'}</code>")
         out.append("<ul>")
         if actq:
-            out.append(f"<li>활성 queue (인터벌 평균): {actq['avg']:.1f} / {qcount} (peak {actq['max']:.0f})</li>")
+            out.append(f"<li>Active queues (interval mean): {actq['avg']:.1f} / {qcount} (peak {actq['max']:.0f})</li>")
         if actc:
-            out.append(f"<li>IRQ 받은 distinct CPU: {actc['avg']:.1f} (peak {actc['max']:.0f})</li>")
+            out.append(f"<li>Distinct CPUs receiving IRQs: {actc['avg']:.1f} (peak {actc['max']:.0f})</li>")
         if topc:
-            out.append(f"<li>top-IRQ CPU: cpu {topc['cpu']} (전체 인터벌 중 {topc['ratio']*100:.0f}%에서 1위), distinct top CPU 종류: {topc['distinct']}</li>")
+            out.append(f"<li>Top-IRQ CPU: cpu {topc['cpu']} (rank 1 in {topc['ratio']*100:.0f}% of intervals), distinct top CPUs: {topc['distinct']}</li>")
         if irq:
-            out.append(f"<li>총 IRQ rate: avg {irq['avg']:.0f}/s · peak {irq['max']:.0f}/s</li>")
+            out.append(f"<li>Total IRQ rate: avg {irq['avg']:.0f}/s, peak {irq['max']:.0f}/s</li>")
         if q_lines:
-            out.append(f"<li>큐 매핑 (effective): <code>{html.escape(', '.join(q_lines)+more)}</code></li>")
+            out.append(f"<li>Queue mapping (effective): <code>{html.escape(', '.join(q_lines)+more)}</code></li>")
         for d in diag:
             out.append(f"<li>{d}</li>")
         out.append("</ul></div>")
@@ -607,7 +607,7 @@ def _render_lba_heatmap(dname, header, rows):
     canvas_h = max(320, 40 + ny * 4)
     return f"""<div class='heatmap-cell'>
 <canvas id='heatmap_{safe}' width='720' height='{canvas_h}'></canvas>
-<p class='meta'>LBA 분포 heatmap (bucket 0 = 디스크 앞부분, 마지막 = 뒷부분). 색: log10(인터벌 접근 횟수) — <span style='background:hsl(240,85%,50%);color:#fff;padding:0 4px;border-radius:2px'>차가움</span>→<span style='background:hsl(120,85%,45%);color:#fff;padding:0 4px;border-radius:2px'>중간</span>→<span style='background:hsl(0,85%,40%);color:#fff;padding:0 4px;border-radius:2px'>뜨거움</span>. 회색 = 접근 0.</p>
+<p class='meta'>LBA access heatmap (bucket 0 = start of disk, last = end). Color: log10(accesses per interval) - <span style='background:hsl(240,85%,50%);color:#fff;padding:0 4px;border-radius:2px'>cold</span>-&gt;<span style='background:hsl(120,85%,45%);color:#fff;padding:0 4px;border-radius:2px'>mid</span>-&gt;<span style='background:hsl(0,85%,40%);color:#fff;padding:0 4px;border-radius:2px'>hot</span>. Gray = no access.</p>
 </div>
 <script>(function() {{
 const data = {payload_json};
@@ -623,21 +623,21 @@ const cellH = (H - padT - padB) / ny;
 let mx = 0;
 for (const col of data.buckets) for (const v of col) if (v > mx) mx = v;
 const logMax = Math.log10(mx + 1) || 1;
-// 빈 셀(=0) 명확히 보이게 진한 회색 배경
+// Empty cells (=0) get a slightly darker gray so non-zeros stand out.
 ctx.fillStyle = '#dcdee2'; ctx.fillRect(0, 0, W, H);
-// 차트 영역만 더 짙은 회색 (라벨 영역과 구분)
+// Chart area uses a deeper gray, separating it from the label margin.
 ctx.fillStyle = '#cfd2d7'; ctx.fillRect(padL, padT, W - padL - padR, H - padT - padB);
 for (let xi = 0; xi < nx; xi++) {{
   const col = data.buckets[xi];
   for (let yi = 0; yi < ny; yi++) {{
     const v = col[yi];
-    if (v <= 0) continue;  // 회색 배경 그대로 두고 "값 있음"만 색칠
+    if (v <= 0) continue;  // leave gray background, only color non-zero cells
     const t = Math.log10(v + 1) / logMax;  // 0..1
-    // 파랑(차가움) → 청록 → 노랑 → 빨강(뜨거움). HSL hue 240→0 회전 + 채도/명도 유지.
-    // t=0: hue 240 deg (blue), t=1: hue 0 deg (red). 흰색 영역(L=100%) 회피.
+    // Blue (cold) -> cyan -> yellow -> red (hot). HSL hue 240->0 sweep, fixed saturation.
+    // t=0: hue 240 (blue), t=1: hue 0 (red). Avoid pure white (L=100%).
     const hue = Math.round(240 * (1 - t));
     const sat = 85;
-    const light = 50 - 10 * t;   // 더 뜨거울수록 약간 어둡게 → 채도 강조
+    const light = 50 - 10 * t;   // darken slightly with heat to push saturation
     ctx.fillStyle = `hsl(${{hue}},${{sat}}%,${{light}}%)`;
     ctx.fillRect(padL + xi * cellW, padT + (ny - 1 - yi) * cellH, Math.ceil(cellW), Math.ceil(cellH));
   }}
@@ -698,7 +698,7 @@ def _render_multi_device_overview(device_csv_paths):
     payload = {"labels": all_ts_order, "iops": series_iops, "bw": series_bw}
     payload_json = json.dumps(payload, separators=(",", ":"))
     palette = json.dumps(_PALETTE)
-    return f"""<h3>Overview (디바이스 비교)</h3>
+    return f"""<h3>Overview (devices)</h3>
 <div class='chart-row'>
 <div class='chart-cell'><canvas id='chart_multi_iops'></canvas></div>
 <div class='chart-cell'><canvas id='chart_multi_bw'></canvas></div>
@@ -888,7 +888,7 @@ def _render_topology_svg(topo):
 
 def _render_topology(topo):
     if not topo:
-        return "<p><em>topology.json 없음</em></p>"
+        return "<p><em>no topology.json</em></p>"
     nodes = topo.get("nodes") or []
     nvmes = topo.get("nvme_controllers") or []
     gpus = topo.get("gpus") or []
@@ -905,7 +905,7 @@ def _render_topology(topo):
     out.append(f"<dt>NUMA nodes</dt><dd>{html.escape(', '.join(map(str, nodes)) or '(none)')}</dd>")
     for node in nodes:
         cpus = node_to_cpus.get(str(node), [])
-        out.append(f"<dt>node {html.escape(str(node))} CPUs</dt><dd><code>{html.escape(_compact_cpu_list(cpus))}</code> ({len(cpus)}개)</dd>")
+        out.append(f"<dt>node {html.escape(str(node))} CPUs</dt><dd><code>{html.escape(_compact_cpu_list(cpus))}</code> ({len(cpus)} total)</dd>")
     out.append(f"<dt>NVMe controllers</dt><dd>{html.escape(', '.join(nvmes) or '(none)')}</dd>")
     # nvme controller 상세 (topology.json의 raw.nvme_ctrls — flat 구조)
     raw = topo.get("raw") or {}
@@ -1025,11 +1025,11 @@ def build_report(session_dir, sid):
                 dev_aggs[dn] = _device_aggregates(dh, dr)
         parts.append(_render_summary(dev_aggs, sys_agg))
         # I/O × System 상관 차트 — summary 직후, 어느 섹션보다 위.
-        parts.append("<h2>I/O × System correlation</h2>")
-        parts.append("<p class='meta'>IOPS 변화와 CPU iowait/sys% 변화를 같은 시간축에서 본다. dual y-axis (왼쪽: IOPS, 오른쪽: %).</p>")
+        parts.append("<h2>I/O x System correlation</h2>")
+        parts.append("<p class='meta'>IOPS and CPU iowait/sys% on the same time axis. Left axes: IOPS [Kiops] + BW [MB/s]. Right axis: CPU %.</p>")
         parts.append(_render_correlation_chart(sys_h_tmp, sys_r_tmp, device_csvs))
     except Exception as e:
-        parts.append(f"<p class='meta'>(summary 생성 실패: {html.escape(str(e))})</p>")
+        parts.append(f"<p class='meta'>(summary build failed: {html.escape(str(e))})</p>")
 
     parts.append("<h2>1. Topology</h2>")
     parts.append(_render_topology(topo))
@@ -1047,23 +1047,23 @@ def build_report(session_dir, sid):
     parts.append("<h2>2. System metrics (per-second)</h2>")
     h, r = _load_csv(sys_path)
     if h is None:
-        parts.append("<p><em>system_metrics CSV 없음</em></p>")
+        parts.append("<p><em>no system_metrics CSV</em></p>")
     else:
-        parts.append(f"<p class='meta'>{len(r)}행 × {len(h)}컬럼 · 원본: <code>{html.escape(os.path.basename(sys_path))}</code></p>")
+        parts.append(f"<p class='meta'>{len(r)} rows x {len(h)} cols, source: <code>{html.escape(os.path.basename(sys_path))}</code></p>")
         sys_payload = _build_system_series(h, r)
         parts.append(_render_system_charts(sys_payload))
         parts.append(_render_table(h, r))
 
     parts.append("<h2>3. Device I/O metrics</h2>")
     if not device_csvs:
-        parts.append("<p><em>device CSV 없음</em></p>")
+        parts.append("<p><em>no device CSV</em></p>")
     else:
         parts.append(_render_multi_device_overview(device_csvs))
         for dpath in device_csvs:
             dname = os.path.basename(dpath)
             parts.append(f"<h3>{html.escape(dname)}</h3>")
             h, r = _load_csv(dpath)
-            parts.append(f"<p class='meta'>{len(r)}행 × {len(h)}컬럼</p>")
+            parts.append(f"<p class='meta'>{len(r)} rows x {len(h)} cols</p>")
             parts.append(_render_device_charts(dname, h, r))
             parts.append(_render_lba_heatmap(dname, h, r))
             parts.append(_render_table(h, r))
@@ -1073,22 +1073,22 @@ def build_report(session_dir, sid):
 
 
 def main(argv=None):
-    p = argparse.ArgumentParser(description="세션 산출물을 자기완결 HTML 리포트로 변환")
+    p = argparse.ArgumentParser(description="Build a self-contained HTML report from session artifacts")
     p.add_argument("--session-dir", default="ebpf/csv_results",
-                   help="세션 CSV/JSON 산출물 디렉터리 (기본: ebpf/csv_results)")
+                   help="Directory holding session CSV/JSON artifacts (default: ebpf/csv_results)")
     p.add_argument("--session-id", default=None,
-                   help="세션 ID (YYYYMMDD_HHMMSS). 생략 시 가장 최근 자동 선택")
+                   help="Session ID (YYYYMMDD_HHMMSS). If omitted, picks the most recent one")
     p.add_argument("-o", "--output", default=None,
-                   help="출력 HTML 경로 (기본: <session-dir>/report_<sid>.html)")
+                   help="Output HTML path (default: <session-dir>/report_<sid>.html)")
     args = p.parse_args(argv)
 
     sd = args.session_dir
     if not os.path.isdir(sd):
-        print(f"[!] 세션 디렉터리 없음: {sd}", file=sys.stderr)
+        print(f"[!] session dir not found: {sd}", file=sys.stderr)
         return 2
     sid = args.session_id or _discover_session(sd)
     if not sid:
-        print(f"[!] topology_*.json 없음 in {sd}", file=sys.stderr)
+        print(f"[!] no topology_*.json in {sd}", file=sys.stderr)
         return 2
 
     out = args.output or os.path.join(sd, f"report_{sid}.html")

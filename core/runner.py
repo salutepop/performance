@@ -16,10 +16,10 @@ def run_fio_job(disk, workload, numa_node=None, fio_path="fio", runtime_override
     # [수정] disk가 리스트인 경우 콜론(:)으로 연결하여 여러 장치 동시 부하 지원
     if isinstance(disk, list):
         target_filename = ":".join(disk)
-        print(f"\n[FIO Run] 멀티 디스크 ({len(disk)}개) | 워크로드: {job_name} 시작...")
+        print(f"\n[FIO Run] multi-disk ({len(disk)}) | workload: {job_name}...")
     else:
         target_filename = disk
-        print(f"\n[FIO Run] 디스크: {disk} | 워크로드: {job_name} 시작...")
+        print(f"\n[FIO Run] disk: {disk} | workload: {job_name}...")
 
     abs_fio = shutil.which(fio_path) or fio_path
     prefix = [] if os.geteuid() == 0 else ["sudo", "-n"]
@@ -54,12 +54,12 @@ def run_fio_job(disk, workload, numa_node=None, fio_path="fio", runtime_override
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
         return json.loads(result.stdout)
     except subprocess.CalledProcessError as e:
-        print(f"[Error] {fio_path} 실행 중 오류 발생: {e}")
+        print(f"[Error] {fio_path} execution failed: {e}")
         print(f"[Error Output]\n{e.stderr}")
         return None
     except json.JSONDecodeError:
-        print("[Error] 결과를 JSON으로 파싱할 수 없습니다.")
+        print("[Error] cannot parse fio output as JSON")
         return None
     except FileNotFoundError:
-        print(f"[Error] 지정한 fio 실행 파일을 찾을 수 없습니다: {fio_path}")
+        print(f"[Error] fio binary not found: {fio_path}")
         return None

@@ -16,12 +16,12 @@ import sys
 def main(argv=None):
     p = argparse.ArgumentParser(
         prog="python3 -m report",
-        description="세션 산출물 → html/md/json 일괄 리포트 (편의 진입점). diff는 -m report.diff로 직접 호출."
+        description="Session artifacts -> html/md/json/png/pdf bundled report (convenience entry). Use -m report.diff for session diff."
     )
     p.add_argument("--session-dir", default="ebpf/csv_results")
     p.add_argument("--session-id", default=None)
     p.add_argument("--format", default="all",
-                   help="html,md,json,png,pdf 콤마 구분 또는 'all' (기본: all = html+md+json+png+pdf). matplotlib 없으면 png/pdf는 자동 skip.")
+                   help="Comma-separated subset of html,md,json,png,pdf or 'all' (default: all). png/pdf auto-skip when matplotlib is missing.")
     args = p.parse_args(argv)
 
     targets = ["html", "md", "json", "png", "pdf"] if args.format == "all" else [t.strip() for t in args.format.split(",")]
@@ -43,14 +43,14 @@ def main(argv=None):
         try:
             from .png_report import main as png_main
         except ImportError as e:
-            print(f"[!] PNG 리포트 skip (matplotlib 미설치 또는 import 실패): {e}")
+            print(f"[!] PNG report skipped (matplotlib missing or import failed): {e}")
         else:
             rc |= png_main(base_argv) or 0
     if "pdf" in targets:
         try:
             from .pdf_report import main as pdf_main
         except ImportError as e:
-            print(f"[!] PDF 리포트 skip (matplotlib 미설치 또는 import 실패): {e}")
+            print(f"[!] PDF report skipped (matplotlib missing or import failed): {e}")
         else:
             rc |= pdf_main(base_argv) or 0
     return rc

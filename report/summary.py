@@ -163,7 +163,7 @@ def build_summary(session_dir, sid):
 
 
 def main(argv=None):
-    p = argparse.ArgumentParser(description="세션 산출물을 단일 JSON 요약으로 평탄화")
+    p = argparse.ArgumentParser(description="Flatten session artifacts into a single JSON summary")
     p.add_argument("--session-dir", default="ebpf/csv_results")
     p.add_argument("--session-id", default=None)
     p.add_argument("-o", "--output", default=None)
@@ -171,10 +171,10 @@ def main(argv=None):
 
     sd = args.session_dir
     if not os.path.isdir(sd):
-        print(f"[!] 세션 디렉터리 없음: {sd}", file=sys.stderr); return 2
+        print(f"[!] session dir not found: {sd}", file=sys.stderr); return 2
     sid = args.session_id or _discover_session(sd)
     if not sid:
-        print(f"[!] topology_*.json 없음 in {sd}", file=sys.stderr); return 2
+        print(f"[!] no topology_*.json in {sd}", file=sys.stderr); return 2
 
     out_path = args.output or os.path.join(sd, f"summary_{sid}.json")
     data = build_summary(sd, sid)

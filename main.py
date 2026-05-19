@@ -35,7 +35,7 @@ def _start_monitor(session_dir, sys_info):
         mon.start()
         return mon, sid
     except Exception as e:
-        print(f"  [!] SystemMonitor 시작 실패 (리포트는 fio JSON 기반으로만 생성): {e}")
+        print(f"  [!] SystemMonitor start failed (reports will use fio JSON only): {e}")
         return None, sid
 
 
@@ -45,7 +45,7 @@ def _stop_monitor(mon):
     try:
         mon.stop()
     except Exception as e:
-        print(f"  [!] SystemMonitor 정지 중 오류: {e}")
+        print(f"  [!] SystemMonitor stop error: {e}")
 
 
 def _ebpf_available():
@@ -67,15 +67,15 @@ def _start_ebpf(session_dir, sid, mode, interval):
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     except Exception as e:
-        print(f"  [!] eBPF tracer 시작 실패: {e}")
+        print(f"  [!] eBPF tracer start failed: {e}")
         return None
-    # io_trace attach 안정화 대기 (io_profiler 내부는 1.5s sleep 후 SIGUSR1 reset)
+    # wait for io_trace attach to settle (io_profiler sleeps 1.5s then SIGUSR1 reset)
     time.sleep(2.5)
     if proc.poll() is not None:
         err = proc.stderr.read().decode("utf-8", "replace") if proc.stderr else ""
-        print(f"  [!] eBPF tracer가 즉시 종료됨 (rc={proc.returncode}): {err.strip()[:300]}")
+        print(f"  [!] eBPF tracer exited immediately (rc={proc.returncode}): {err.strip()[:300]}")
         return None
-    print(f"  [eBPF] tracer started (mode={mode}, interval={interval}s) → {session_dir}")
+    print(f"  [eBPF] tracer started (mode={mode}, interval={interval}s) -> {session_dir}")
     return proc
 
 
@@ -87,12 +87,12 @@ def _stop_ebpf(proc):
         try:
             proc.wait(timeout=15)
         except subprocess.TimeoutExpired:
-            print("  [!] eBPF tracer 응답 없음 — SIGTERM")
+            print("  [!] eBPF tracer not responding - sending SIGTERM")
             proc.terminate()
             proc.wait(timeout=5)
         print(f"  [eBPF] tracer stopped (rc={proc.returncode})")
     except Exception as e:
-        print(f"  [!] eBPF tracer 정지 중 오류: {e}")
+        print(f"  [!] eBPF tracer stop error: {e}")
 
 
 def _run_reports(session_dir, sid, formats):
@@ -102,7 +102,7 @@ def _run_reports(session_dir, sid, formats):
     try:
         from report.__main__ import main as report_main
     except ImportError as e:
-        print(f"  [!] 리포트 모듈 import 실패: {e}")
+        print(f"  [!] report module import failed: {e}")
         return
     rc = report_main([
         "--session-dir", session_dir,
@@ -110,9 +110,9 @@ def _run_reports(session_dir, sid, formats):
         "--format", formats,
     ])
     if rc:
-        print(f"  [!] 일부 리포트 생성 실패 (rc={rc}) — {session_dir}")
+        print(f"  [!] some reports failed (rc={rc}) - {session_dir}")
     else:
-        print(f"  [*] 리포트 생성 완료 → {session_dir}")
+        print(f"  [*] reports written -> {session_dir}")
 
 
 def execute_json_tc(
@@ -136,13 +136,13 @@ def execute_json_tc(
                     f.truncate(1 * 1024 * 1024 * 1024)  # 1 GiB
 
     print(f"\n==================================================")
-    print(f"▶ [JSON 시나리오] {tc_name}")
-    print(f"▶ 설명: {tc_data.get('description', '')}")
+    print(f"> [JSON scenario] {tc_name}")
+    print(f"> desc: {tc_data.get('description', '')}")
     print(f"==================================================")
 
     for disk in tc_disks:
         disk_label = disk.split("/")[-1]
-        print(f"\n[*] 타겟 디스크: {disk} ------------------------")
+        print(f"\n[*] target disk: {disk} ------------------------")
 
         session_dir = reporter.create_session_dir(tc_name, disk_label)
         reporter.save_json(
@@ -174,7 +174,7 @@ def execute_python_tc(tc_file, disks, numa_node, sys_info, reporter, bound_runne
     try:
         spec.loader.exec_module(module)
     except Exception as e:
-        print(f"[Error] {tc_file} 로드 중 오류 발생: {e}")
+        print(f"[Error] failed to load {tc_file}: {e}")
         return
 
     # 2. 시나리오 실행
@@ -182,8 +182,8 @@ def execute_python_tc(tc_file, disks, numa_node, sys_info, reporter, bound_runne
         scenario = module.Scenario()
 
         print(f"\n==================================================")
-        print(f"▶ [Python 시나리오] {getattr(scenario, 'tc_name', module_name)}")
-        print(f"▶ 설명: {getattr(scenario, 'description', '')}")
+        print(f"> [Python scenario] {getattr(scenario, 'tc_name', module_name)}")
+        print(f"> desc: {getattr(scenario, 'description', '')}")
         print(f"==================================================")
 
         # [수정] 시나리오가 모든 디스크를 한꺼번에 제어하고 싶어하는 경우 (예: Scalability 측정)
@@ -240,7 +240,7 @@ def execute_python_tc(tc_file, disks, numa_node, sys_info, reporter, bound_runne
                     _stop_monitor(mon)
                 _run_reports(session_dir, sid, report_formats)
     else:
-        print(f"  -> [Skip] {tc_file} 내부에 'Scenario' 클래스가 없습니다.")
+        print(f"  -> [Skip] {tc_file} has no 'Scenario' class")
 
 
 def main():
@@ -252,28 +252,27 @@ def main():
         "-t",
         "--tc",
         type=str,
-        help="실행할 특정 테스트 케이스의 이름이나 키워드 (예: tc03)",
+        help="Run a specific test case by name or substring (e.g. tc03)",
     )
     parser.add_argument(
         "-q",
         "--quick",
         action="store_true",
-        help="빠른 검증 모드 (모든 테스트를 1초 내외로 실행)",
+        help="Quick mode: every workload runs ~1s (for fast sanity checks)",
     )
     parser.add_argument(
         "-a",
         "--all",
         action="store_true",
-        help="모든 테스트 케이스를 실행 (기본값은 tc00_smoke만 실행)",
+        help="Run every test case (default runs tc00_smoke only)",
     )
     parser.add_argument(
         "--report",
         default="html,md,json,png,pdf",
         help=(
-            "자동 생성할 리포트 포맷 콤마 구분 (html,md,json,png,pdf 또는 'none'). "
-            "기본: 'html,md,json,png,pdf' — SystemMonitor가 세션별로 topology/CSV를 "
-            "수집하고 종료 후 report.* 모듈로 일괄 생성. pdf는 matplotlib만 사용 "
-            "(오프라인 CLI 환경에서도 동작)."
+            "Comma-separated report formats (html,md,json,png,pdf) or 'none'. "
+            "Default: 'html,md,json,png,pdf' - SystemMonitor collects topology/CSV per session "
+            "and report.* modules emit each format. PDF uses matplotlib only (works offline/CLI)."
         ),
     )
     parser.add_argument(
@@ -281,21 +280,21 @@ def main():
         choices=["auto", "on", "off"],
         default="auto",
         help=(
-            "eBPF I/O tracer 가동 여부 (기본 auto: ebpf/io_trace 바이너리 존재 시 자동 on, "
-            "없으면 skip). on은 강제, off는 강제 비활성."
+            "eBPF I/O tracer toggle (default auto: enable if ebpf/io_trace binary exists, "
+            "skip otherwise). 'on' forces enable, 'off' forces disable."
         ),
     )
     parser.add_argument(
         "--ebpf-mode",
         choices=["generic", "libaio", "iouring"],
         default="libaio",
-        help="eBPF tracer 모드 (기본 libaio: U2Q/C2A/A2U 페이즈까지 측정).",
+        help="eBPF tracer mode (default libaio: also measures U2Q/C2A/A2U phases).",
     )
     parser.add_argument(
         "--ebpf-interval",
         type=float,
         default=1.0,
-        help="eBPF CSV 폴링 간격 초 (기본 1.0). 0이면 timeseries 비활성, 최종 summary만.",
+        help="eBPF CSV polling interval in seconds (default 1.0). 0 disables timeseries (final summary only).",
     )
     args = parser.parse_args()
 
@@ -318,61 +317,61 @@ def main():
     # 만약 config에 target_disks가 비어있다면 발견된 NVMe 장치로 자동 설정
     if not sys_info.get("target_disks"):
         sys_info["target_disks"] = [d["path"] for d in sys_info_discovered["storage"]]
-        print(f"[*] 발견된 NVMe 장치를 테스트 대상으로 자동 설정합니다: {sys_info['target_disks']}")
+        print(f"[*] auto-set target disks from discovered NVMe: {sys_info['target_disks']}")
 
     disks = sys_info.get("target_disks", [])
     numa_node = sys_info.get("numa_node")
     fio_path = sys_info.get("fio_path", "fio")
 
     if not disks:
-        print("[Error] 테스트할 장치를 찾을 수 없습니다. (config/system.json 또는 자동 탐색 실패)")
+        print("[Error] no target disks (check config/system.json or auto-discovery)")
         sys.exit(1)
 
     reporter = ResultReporter()
-    print(f"[*] 이번 평가 결과 폴더: {reporter.run_dir}")
+    print(f"[*] run output dir: {reporter.run_dir}")
     tc_files = sorted(glob.glob("test_cases/*.json") + glob.glob("test_cases/*.py"))
 
     # [추가] 터미널에서 --tc 옵션을 주었다면, 해당 키워드가 포함된 파일만 필터링
     if args.tc:
         filtered_files = [f for f in tc_files if args.tc.lower() in f.lower()]
         if not filtered_files:
-            print(f"[Error] test_cases/ 폴더에 '{args.tc}'가 포함된 파일이 없습니다.")
+            print(f"[Error] no test_cases/ file matches '{args.tc}'")
             sys.exit(1)
         tc_files = filtered_files
-        print(f"[*] 타겟 실행 모드: '{args.tc}' 키워드가 포함된 시나리오만 실행합니다.")
+        print(f"[*] running only scenarios matching '{args.tc}'")
     elif not args.all:
         # 기본 동작: tc00_smoke만 실행. -a/--all 또는 -t로 명시할 때만 전체/지정 TC 실행
         smoke_files = [f for f in tc_files if "tc00" in os.path.basename(f).lower()]
         if not smoke_files:
-            print("[Error] 기본 스모크 테스트(tc00_*)를 찾을 수 없습니다. -a 옵션으로 전체 실행하거나 -t로 TC를 지정하세요.")
+            print("[Error] default smoke (tc00_*) not found. Use -a for all TCs or -t to pick one.")
             sys.exit(1)
         tc_files = smoke_files
-        print("[*] 기본 스모크 모드: tc00_smoke만 실행합니다. 전체 TC 실행은 -a/--all 옵션을 사용하세요.")
+        print("[*] default smoke mode: running tc00_smoke only. Use -a/--all for every TC.")
     else:
-        print(f"[*] 전체 TC 실행 모드: {len(tc_files)}개의 시나리오를 순차 실행합니다.")
+        print(f"[*] all-TC mode: {len(tc_files)} scenarios will run sequentially")
 
     # [수정] Quick 모드인 경우 런타임을 1초로 고정하는 오버라이드 설정
     runtime_val = 1 if args.quick else None
     bound_runner = functools.partial(run_fio_job, fio_path=fio_path, runtime_override=runtime_val)
     
     if args.quick:
-        print("[!] Quick 모드가 활성화되었습니다. 모든 테스트는 1초 동안만 수행됩니다.\n")
+        print("[!] Quick mode: every workload forced to 1s runtime\n")
 
     # eBPF 활성 여부 resolve
     if args.ebpf == "off":
         resolved_ebpf_mode = "off"
     elif args.ebpf == "on":
         if not _ebpf_available():
-            print(f"[Error] --ebpf on 인데 ebpf/io_trace 바이너리가 없거나 실행 불가. cd ebpf && make 후 재시도.")
+            print(f"[Error] --ebpf on but ebpf/io_trace binary missing or not executable. Run `cd ebpf && make` first.")
             sys.exit(1)
         resolved_ebpf_mode = args.ebpf_mode
     else:  # auto
         if _ebpf_available():
             resolved_ebpf_mode = args.ebpf_mode
-            print(f"[*] eBPF tracer 자동 활성 (mode={resolved_ebpf_mode}, interval={args.ebpf_interval}s)")
+            print(f"[*] eBPF tracer auto-on (mode={resolved_ebpf_mode}, interval={args.ebpf_interval}s)")
         else:
             resolved_ebpf_mode = "off"
-            print("[*] eBPF tracer skip (ebpf/io_trace 미빌드). 활성하려면 cd ebpf && make")
+            print("[*] eBPF tracer skipped (ebpf/io_trace not built). Run `cd ebpf && make` to enable.")
 
     for tc_file in tc_files:
         ext = os.path.splitext(tc_file)[1].lower()

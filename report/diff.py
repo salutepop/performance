@@ -138,7 +138,7 @@ def build_diff(base_dir, base_sid, cand_dir, cand_sid):
             iops_d = _diff_device_metric(b, c, op, "iops", "sum", "{:,.0f}")
             rows.append([op, iops_d, bw_d, d2c_d, qd_d])
         if rows:
-            lines.append(_md_table(rows, ["op", "총 IO", "avg BW(MB/s)", "avg D2C(us)", "peak QD"],
+            lines.append(_md_table(rows, ["op", "total IO", "avg BW(MB/s)", "avg D2C(us)", "peak QD"],
                                    ["l"] + ["l"] * 4))
         else:
             lines.append("_no ops_")
@@ -158,7 +158,7 @@ def build_diff(base_dir, base_sid, cand_dir, cand_sid):
             b = base_cpu.get(k, {}).get("avg")
             c = cand_cpu.get(k, {}).get("avg")
             rows.append([k, _fmt_diff(b, c, _pct_change(b, c))])
-        lines.append(_md_table(rows, ["metric", "baseline → candidate"], ["l", "l"]))
+        lines.append(_md_table(rows, ["metric", "baseline -> candidate"], ["l", "l"]))
         lines.append("")
 
     base_irq = base_sys.get("nvme_irq", {})
@@ -172,7 +172,7 @@ def build_diff(base_dir, base_sid, cand_dir, cand_sid):
             b = base_irq.get(k, {}).get("avg")
             c = cand_irq.get(k, {}).get("avg")
             rows.append([k.replace("_irq_per_s", ""), _fmt_diff(b, c, _pct_change(b, c), "{:.0f}")])
-        lines.append(_md_table(rows, ["controller", "baseline → candidate (avg IRQ/s)"], ["l", "l"]))
+        lines.append(_md_table(rows, ["controller", "baseline -> candidate (avg IRQ/s)"], ["l", "l"]))
         lines.append("")
 
     base_gpu = base_sys.get("gpu", {})
@@ -186,27 +186,27 @@ def build_diff(base_dir, base_sid, cand_dir, cand_sid):
             b = base_gpu.get(k, {}).get("max")
             c = cand_gpu.get(k, {}).get("max")
             rows.append([k, _fmt_diff(b, c, _pct_change(b, c), "{:.0f}")])
-        lines.append(_md_table(rows, ["metric", "baseline → candidate (peak)"], ["l", "l"]))
+        lines.append(_md_table(rows, ["metric", "baseline -> candidate (peak)"], ["l", "l"]))
         lines.append("")
 
     return "\n".join(lines) + "\n"
 
 
 def main(argv=None):
-    p = argparse.ArgumentParser(description="두 세션을 비교해 regression 후보를 강조하는 diff 리포트")
-    p.add_argument("--baseline", required=True, help="baseline SID 또는 폴더 경로")
-    p.add_argument("--candidate", required=True, help="candidate SID 또는 폴더 경로")
+    p = argparse.ArgumentParser(description="Diff report between two sessions, flags regression candidates")
+    p.add_argument("--baseline", required=True, help="baseline SID or folder path")
+    p.add_argument("--candidate", required=True, help="candidate SID or folder path")
     p.add_argument("--session-dir", default="ebpf/csv_results",
-                   help="SID로 입력 시 어느 디렉터리에서 찾을지 (기본: ebpf/csv_results)")
+                   help="Where to look up SIDs (default: ebpf/csv_results)")
     p.add_argument("-o", "--output", default=None)
     args = p.parse_args(argv)
 
     base_dir, base_sid = _resolve_session(args.baseline, args.session_dir)
     cand_dir, cand_sid = _resolve_session(args.candidate, args.session_dir)
     if not base_sid:
-        print(f"[!] baseline 세션 찾을 수 없음: {args.baseline}", file=sys.stderr); return 2
+        print(f"[!] baseline session not found: {args.baseline}", file=sys.stderr); return 2
     if not cand_sid:
-        print(f"[!] candidate 세션 찾을 수 없음: {args.candidate}", file=sys.stderr); return 2
+        print(f"[!] candidate session not found: {args.candidate}", file=sys.stderr); return 2
 
     out = args.output or os.path.join(args.session_dir or ".", f"diff_{base_sid}_vs_{cand_sid}.md")
     md = build_diff(base_dir, base_sid, cand_dir, cand_sid)

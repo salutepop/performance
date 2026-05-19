@@ -169,17 +169,17 @@ def _top_findings(sys_agg, dev_aggs):
     """heuristic 기반 자동 코멘트."""
     findings = []
 
-    # SQ/CQ divergence (모든 device 평균)
+    # SQ/CQ divergence (averaged across devices)
     diff_rates = [da.get("_sqcq_diff_ratio", {}).get("avg") for da in dev_aggs.values()]
     diff_rates = [d for d in diff_rates if d is not None]
     if diff_rates:
         avg_diff = sum(diff_rates) / len(diff_rates)
         if avg_diff > 0.2:
-            findings.append(f"**SQ↔CQ cross-CPU completion 비중 높음** ({avg_diff*100:.1f}% 평균) — NVMe IRQ affinity 확인 권장")
+            findings.append(f"**High SQ-CQ cross-CPU completion** ({avg_diff*100:.1f}% mean) - check NVMe IRQ affinity")
         elif avg_diff > 0.05:
-            findings.append(f"SQ↔CQ divergence 일부 발생 ({avg_diff*100:.1f}% 평균) — 정상 범위")
+            findings.append(f"Some SQ-CQ divergence ({avg_diff*100:.1f}% mean) - within normal range")
         else:
-            findings.append(f"SQ↔CQ NUMA-local OK ({avg_diff*100:.2f}% diff)")
+            findings.append(f"SQ-CQ NUMA-local OK ({avg_diff*100:.2f}% diff)")
 
     # iowait peak
     cpu = sys_agg.get("cpu", {})
@@ -187,18 +187,18 @@ def _top_findings(sys_agg, dev_aggs):
     if iowait_peaks:
         peak = max(iowait_peaks)
         if peak > 10:
-            findings.append(f"**iowait peak 높음** ({peak:.1f}%) — block-layer 대기 발생")
+            findings.append(f"**High iowait peak** ({peak:.1f}%) - block-layer stalls")
         elif peak > 2:
-            findings.append(f"iowait peak {peak:.1f}% (낮음, direct I/O 정상)")
+            findings.append(f"iowait peak {peak:.1f}% (low, direct I/O looks fine)")
 
     # Memory dirty / writeback
     mem = sys_agg.get("mem", {})
     dirty_peak = mem.get("mem_dirty_mb", {}).get("max")
     if dirty_peak is not None:
         if dirty_peak > 100:
-            findings.append(f"**Write-back cache 활용** (dirty peak {dirty_peak:.1f} MB) — buffered I/O 가능성")
+            findings.append(f"**Write-back cache in use** (dirty peak {dirty_peak:.1f} MB) - buffered I/O likely")
         elif dirty_peak < 5:
-            findings.append(f"dirty cache 거의 0 ({dirty_peak:.1f} MB) → direct I/O 검증")
+            findings.append(f"dirty cache near 0 ({dirty_peak:.1f} MB) - direct I/O verified")
 
     # GPU activity
     gpu = sys_agg.get("gpu", {})
@@ -206,7 +206,7 @@ def _top_findings(sys_agg, dev_aggs):
     pwr_peak = max((s.get("max", 0) or 0) for k, s in gpu.items() if "_pwr_w" in k) if gpu else 0
     if gpu:
         if sm_peak > 10:
-            findings.append(f"**GPU 활동 감지** (SM peak {sm_peak:.0f}%, power peak {pwr_peak:.0f}W)")
+            findings.append(f"**GPU active** (SM peak {sm_peak:.0f}%, power peak {pwr_peak:.0f}W)")
         else:
             findings.append(f"GPU idle (SM peak {sm_peak:.0f}%, power {pwr_peak:.0f}W)")
 
@@ -215,7 +215,7 @@ def _top_findings(sys_agg, dev_aggs):
     if user_avgs:
         top_node, top_avg = max(user_avgs.items(), key=lambda x: x[1])
         node_id = top_node.replace("_user_pct", "").replace("node", "")
-        findings.append(f"가장 바쁜 NUMA node: {node_id} (user avg {top_avg:.1f}%)")
+        findings.append(f"Busiest NUMA node: {node_id} (user avg {top_avg:.1f}%)")
 
     return findings
 
@@ -302,19 +302,19 @@ def build_report(session_dir, sid):
         else:
             lines.append("- GPUs: (none)")
     else:
-        lines.append("_topology.json 없음_")
+        lines.append("_no topology.json_")
     lines.append("")
 
     # Device I/O aggregate
     lines.append("## 2. Device I/O aggregate")
     lines.append("")
     if not dev_aggs:
-        lines.append("_device CSV 없음_")
+        lines.append("_no device CSV_")
     for dname, da in dev_aggs.items():
         lines.append(f"### {dname}")
         lines.append("")
         sqcq = da.get("_sqcq_diff_ratio", {})
-        lines.append(f"_SQ↔CQ diff ratio: avg {_fmt(sqcq.get('avg'), '{:.3f}')} / max {_fmt(sqcq.get('max'), '{:.3f}')}_")
+        lines.append(f"_SQ-CQ diff ratio: avg {_fmt(sqcq.get('avg'), '{:.3f}')} / max {_fmt(sqcq.get('max'), '{:.3f}')}_")
         lines.append("")
         rows = []
         for op in ("read", "write", "read_ahead", "flush", "discard"):
@@ -331,7 +331,7 @@ def build_report(session_dir, sid):
                          _fmt(q2d_avg, "{:.2f}"), _fmt(d2c_avg, "{:.2f}"), _fmt(qd_peak, "{:.0f}")])
         if rows:
             lines.append(_md_table(rows,
-                ["op", "총 IO", "peak BW(MB/s)", "avg BW(MB/s)", "avg Q2D(us)", "avg D2C(us)", "peak QD"],
+                ["op", "total IO", "peak BW(MB/s)", "avg BW(MB/s)", "avg Q2D(us)", "avg D2C(us)", "peak QD"],
                 ["l"] + ["r"] * 6))
         lines.append("")
 
@@ -410,7 +410,7 @@ def build_report(session_dir, sid):
 
 
 def main(argv=None):
-    p = argparse.ArgumentParser(description="세션 산출물을 Markdown 요약으로 변환")
+    p = argparse.ArgumentParser(description="Build a Markdown summary report from session artifacts")
     p.add_argument("--session-dir", default="ebpf/csv_results")
     p.add_argument("--session-id", default=None)
     p.add_argument("-o", "--output", default=None)
@@ -418,11 +418,11 @@ def main(argv=None):
 
     sd = args.session_dir
     if not os.path.isdir(sd):
-        print(f"[!] 세션 디렉터리 없음: {sd}", file=sys.stderr)
+        print(f"[!] session dir not found: {sd}", file=sys.stderr)
         return 2
     sid = args.session_id or _discover_session(sd)
     if not sid:
-        print(f"[!] topology_*.json 없음 in {sd}", file=sys.stderr)
+        print(f"[!] no topology_*.json in {sd}", file=sys.stderr)
         return 2
 
     out = args.output or os.path.join(sd, f"report_{sid}.md")

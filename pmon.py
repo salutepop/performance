@@ -1,75 +1,146 @@
 #!/usr/bin/env python3
 """
-pmon — performance monitoring CLI 통합 진입점.
+pmon — performance monitoring CLI.
+
+Monitoring is the headline; workloads are an optional input.
 
 Subcommands:
-  run      : fio 워크로드 + io_profiler eBPF 측정 + 자동 리포트 생성
-  report   : 기존 세션 산출물에서 HTML/MD/JSON 리포트 생성
-  diff     : 두 세션 비교 diff 리포트
-  summary  : 단일 세션 JSON 평탄화 export
+  monitor  : observe the system (optionally while a workload runs)
+  report   : render reports for an existing session
+  diff     : compare two sessions
+  summary  : flatten a session into a single JSON
+  debug    : developer self-test for code-change verification
+  run      : (deprecated alias for monitor)
 
-Usage examples:
-  ./pmon.py run --fio "fio --name=t --filename=/tmp/x --rw=randread --bs=4k --iodepth=8 --size=64M --runtime=3 --time_based --direct=1 --ioengine=libaio"
-  ./pmon.py run --script ebpf/fio.sh -m libaio -i 1
-  ./pmon.py report                                            # 가장 최근 세션
-  ./pmon.py report --session-id 20260519_002145
-  ./pmon.py diff --baseline 20260519_001707 --candidate 20260519_002145
-  ./pmon.py summary
+Usage:
+  ./pmon.py monitor --duration 30
+  ./pmon.py monitor --fio "fio --name=t --filename=/tmp/x ..." --label adhoc
+  ./pmon.py monitor --script ebpf/fio.sh --ebpf on
+  ./pmon.py report                        # most recent session
+  ./pmon.py diff --baseline SID1 --candidate SID2
+  ./pmon.py debug                         # quick self-test, no sudo
+  ./pmon.py debug --with-fio --with-ebpf  # full E2E
 """
 
 import argparse
+import datetime
+import glob
+import json
 import os
 import subprocess
 import sys
 import time
-from datetime import datetime
-
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_SESSION_DIR = os.path.join(ROOT, "ebpf", "csv_results")
+RESULTS_DIR = os.path.join(ROOT, "results")
+LEGACY_SESSION_DIR = os.path.join(ROOT, "ebpf", "csv_results")
+SMOKE_IMG = os.path.join(ROOT, ".smoke", "smoke.img")
 
 
-def cmd_run(args):
-    """io_profiler.py 호출 → 종료 후 report 자동 생성."""
-    if not args.fio and not args.script:
-        print("[pmon] --fio 또는 --script 중 하나는 필수", file=sys.stderr)
+# ---------------------------------------------------------------------------- helpers
+
+def _newest_session_dir():
+    """Find the most recent session directory under results/, recursively.
+
+    A session dir is one containing a topology_*.json. Falls back to
+    LEGACY_SESSION_DIR if nothing found.
+    """
+    candidates = []
+    for topo in glob.glob(os.path.join(RESULTS_DIR, "**", "topology_*.json"), recursive=True):
+        candidates.append((os.path.getmtime(topo), os.path.dirname(topo)))
+    if not candidates:
+        return LEGACY_SESSION_DIR
+    candidates.sort(reverse=True)
+    return candidates[0][1]
+
+
+def _discover_sys_info():
+    from core.discovery import SystemDiscovery
+    return SystemDiscovery().discover_all()
+
+
+def _build_session_dir(label):
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    name = f"{ts}_monitor" if not label else f"{ts}_monitor_{label}"
+    path = os.path.join(RESULTS_DIR, name)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+# ---------------------------------------------------------------------------- monitor
+
+def cmd_monitor(args):
+    """Run SystemMonitor (+ optional eBPF) for a window. Workload is optional."""
+    inputs = sum(bool(x) for x in (args.duration, args.fio, args.script))
+    if inputs == 0:
+        print("[pmon] one of --duration / --fio / --script is required", file=sys.stderr)
+        return 2
+    if inputs > 1:
+        print("[pmon] --duration / --fio / --script are mutually exclusive", file=sys.stderr)
         return 2
 
-    ebpf_dir = os.path.join(ROOT, "ebpf")
-    cmd = ["python3", "io_profiler.py", "-m", args.mode, "-i", str(args.interval)]
-    if args.fio:
-        cmd += ["-c", args.fio]
-    else:
-        cmd += ["-f", args.script]
+    from core.session import Session, resolve_ebpf_mode
 
-    print(f"[pmon] run start (mode={args.mode}, interval={args.interval}s)")
-    rc = subprocess.call(cmd, cwd=ebpf_dir)
-    if rc != 0:
-        print(f"[pmon] io_profiler exit={rc}", file=sys.stderr)
-        return rc
+    sys_info = _discover_sys_info()
+    session_dir = _build_session_dir(args.label)
+    ebpf_mode = resolve_ebpf_mode(args.ebpf, args.ebpf_mode)
 
-    # 자동 리포트 — 가장 최근 세션이 방금 만든 것.
-    if args.report != "none":
-        time.sleep(0.5)  # 파일시스템 stat 안정화
-        _generate_reports(DEFAULT_SESSION_DIR, None, args.report)
-    return 0
+    metadata = {
+        "system": {"discovered": sys_info},
+        "type": "monitor",
+        "input": {
+            "duration": args.duration,
+            "fio": args.fio,
+            "script": args.script,
+        },
+    }
+    with open(os.path.join(session_dir, "metadata.json"), "w") as f:
+        json.dump(metadata, f, indent=4)
 
+    print(f"[pmon] monitor start -> {session_dir} (ebpf={ebpf_mode})")
+
+    rc = 0
+    with Session(
+        session_dir,
+        sys_info,
+        ebpf_mode=ebpf_mode,
+        ebpf_interval=args.ebpf_interval,
+        reports=args.report,
+    ):
+        if args.duration:
+            try:
+                time.sleep(args.duration)
+            except KeyboardInterrupt:
+                print("[pmon] interrupted — closing session")
+        elif args.fio:
+            rc = subprocess.call(args.fio, shell=True)
+        elif args.script:
+            rc = subprocess.call(["bash", args.script])
+
+    print(f"[pmon] monitor done -> {session_dir} (workload rc={rc})")
+    return rc
+
+
+# ---------------------------------------------------------------------------- report / diff / summary
 
 def cmd_report(args):
-    return 0 if _generate_reports(args.session_dir, args.session_id, args.format) else 2
+    session_dir = args.session_dir or _newest_session_dir()
+    return 0 if _generate_reports(session_dir, args.session_id, args.format) else 2
 
 
 def cmd_diff(args):
     from report.diff import main as diff_main
-    return diff_main(["--baseline", args.baseline,
-                      "--candidate", args.candidate,
-                      "--session-dir", args.session_dir]
-                     + (["-o", args.output] if args.output else []))
+    session_dir = args.session_dir or _newest_session_dir()
+    argv = ["--baseline", args.baseline, "--candidate", args.candidate, "--session-dir", session_dir]
+    if args.output:
+        argv += ["-o", args.output]
+    return diff_main(argv)
 
 
 def cmd_summary(args):
     from report.summary import main as summary_main
-    argv = ["--session-dir", args.session_dir]
+    session_dir = args.session_dir or _newest_session_dir()
+    argv = ["--session-dir", session_dir]
     if args.session_id:
         argv += ["--session-id", args.session_id]
     if args.output:
@@ -78,62 +149,218 @@ def cmd_summary(args):
 
 
 def _generate_reports(session_dir, session_id, fmt):
-    """fmt는 콤마 구분 (html, md, json) 또는 'all', 'none'."""
+    """fmt: comma-separated subset of html,md,json,png,pdf, or 'all'/'none'."""
     if fmt == "none":
         return True
-    targets = ["html", "md", "json"] if fmt == "all" else [f.strip() for f in fmt.split(",")]
-    base_argv = ["--session-dir", session_dir]
+    from report.__main__ import main as report_main
+    argv = ["--session-dir", session_dir, "--format", fmt]
     if session_id:
-        base_argv += ["--session-id", session_id]
+        argv += ["--session-id", session_id]
+    return report_main(argv) == 0
 
-    ok = True
-    if "html" in targets:
-        from report.html_report import main as html_main
-        ok &= html_main(base_argv) == 0
-    if "md" in targets:
-        from report.md_report import main as md_main
-        ok &= md_main(base_argv) == 0
-    if "json" in targets:
-        from report.summary import main as summary_main
-        ok &= summary_main(base_argv) == 0
-    if "png" in targets:
-        from report.png_report import main as png_main
-        ok &= png_main(base_argv) == 0
-    return ok
+
+# ---------------------------------------------------------------------------- debug
+
+def cmd_debug(args):
+    """Developer self-test. Default: 2s monitor-only smoke (no sudo)."""
+    from core.session import Session, ebpf_available
+
+    if args.full:
+        args.with_ebpf = True
+        args.with_fio = True
+
+    if args.with_ebpf and not ebpf_available():
+        print("[debug] --with-ebpf requested but ebpf/io_trace not built; "
+              "run `cd ebpf && make`", file=sys.stderr)
+        return 2
+    if args.with_fio and not os.path.isfile(SMOKE_IMG):
+        print(f"[debug] --with-fio requested but {SMOKE_IMG} missing; "
+              f"create a 1GiB ext4 image there first", file=sys.stderr)
+        return 2
+
+    sys_info = _discover_sys_info()
+    label_parts = ["debug"]
+    if args.with_ebpf:
+        label_parts.append("ebpf")
+    if args.with_fio:
+        label_parts.append("fio")
+    session_dir = _build_session_dir("_".join(label_parts))
+
+    ebpf_mode = "libaio" if args.with_ebpf else "off"
+    duration = max(1, int(args.duration))
+
+    print(f"[debug] session -> {session_dir}")
+    print(f"[debug] config: duration={duration}s, ebpf={ebpf_mode}, "
+          f"fio={'on' if args.with_fio else 'off'}")
+
+    with Session(
+        session_dir,
+        sys_info,
+        ebpf_mode=ebpf_mode,
+        ebpf_interval=1.0,
+        reports="md",  # minimal report to verify the pipeline
+    ):
+        if args.with_fio:
+            fio_cmd = (
+                f"sudo fio --name=debug --filename={SMOKE_IMG} "
+                f"--rw=randread --bs=4k --iodepth=4 --size=64M "
+                f"--runtime={duration} --time_based=1 --direct=1 --ioengine=libaio "
+                f"--output-format=json --output={session_dir}/fio_debug.json "
+                f"--group_reporting=1"
+            )
+            rc = subprocess.call(fio_cmd, shell=True)
+            if rc != 0:
+                print(f"[debug] fio exited rc={rc} (continuing to artifact check)")
+        else:
+            time.sleep(duration)
+
+    # ----- artifact checks
+    print("\n[debug] checking artifacts...")
+    failures = []
+    sid = os.path.basename(session_dir)
+
+    topo = os.path.join(session_dir, f"topology_{sid}.json")
+    if not os.path.isfile(topo):
+        failures.append(f"missing topology_{sid}.json")
+    else:
+        try:
+            with open(topo) as f:
+                t = json.load(f)
+            if not t.get("nodes"):
+                failures.append("topology has no 'nodes'")
+            print(f"  [OK] topology: {len(t.get('nodes', []))} NUMA nodes, "
+                  f"{len(t.get('nvme_controllers', []))} NVMe ctrls")
+        except Exception as e:
+            failures.append(f"topology parse error: {e}")
+
+    csv_path = os.path.join(session_dir, f"system_metrics_{sid}.csv")
+    if not os.path.isfile(csv_path):
+        failures.append(f"missing system_metrics_{sid}.csv")
+    else:
+        with open(csv_path) as f:
+            rows = sum(1 for _ in f) - 1  # minus header
+        if rows < 1:
+            failures.append(f"system_metrics_{sid}.csv has {rows} data rows (expected >=1)")
+        print(f"  [OK] system_metrics: {rows} rows")
+
+    md_path = glob.glob(os.path.join(session_dir, "report_*.md"))
+    if not md_path:
+        failures.append("no report_*.md generated")
+    else:
+        print(f"  [OK] report: {os.path.basename(md_path[0])}")
+
+    if args.with_fio:
+        fio_json = os.path.join(session_dir, "fio_debug.json")
+        if not os.path.isfile(fio_json):
+            failures.append("missing fio_debug.json")
+        else:
+            print(f"  [OK] fio output: fio_debug.json")
+
+    if args.with_ebpf:
+        # io_profiler writes <device>_<sid>.csv per traced device (e.g. nvme0n1_<sid>.csv)
+        io_csvs = [
+            p for p in glob.glob(os.path.join(session_dir, f"*_{sid}.csv"))
+            if not os.path.basename(p).startswith("system_metrics_")
+        ]
+        if not io_csvs:
+            failures.append("no eBPF device CSV produced (tracer may have failed)")
+        else:
+            devs = [os.path.basename(p).split("_")[0] for p in io_csvs]
+            print(f"  [OK] eBPF csv: {len(io_csvs)} device(s) — {', '.join(devs)}")
+
+    print()
+    if failures:
+        print(f"[debug] FAIL — {len(failures)} issue(s):")
+        for f in failures:
+            print(f"  - {f}")
+        return 1
+    print("[debug] PASS")
+    return 0
+
+
+# ---------------------------------------------------------------------------- run (compat shim)
+
+def cmd_run(args):
+    """Deprecated. Forwards to `monitor`."""
+    print("[pmon] 'run' is deprecated; use 'monitor' instead.", file=sys.stderr)
+    # Map old --mode to new --ebpf-mode; old run implied eBPF on.
+    args.duration = None
+    args.label = "adhoc"
+    args.ebpf = "on"
+    args.ebpf_mode = args.mode
+    args.ebpf_interval = args.interval
+    return cmd_monitor(args)
+
+
+# ---------------------------------------------------------------------------- entry
+
+def _add_ebpf_args(parser):
+    parser.add_argument("--ebpf", choices=["auto", "on", "off"], default="auto",
+                        help="eBPF I/O tracer toggle (default auto)")
+    parser.add_argument("--ebpf-mode", choices=["generic", "libaio", "iouring"],
+                        default="libaio", help="eBPF mode (default libaio)")
+    parser.add_argument("--ebpf-interval", type=float, default=1.0,
+                        help="eBPF CSV polling interval seconds (default 1.0)")
 
 
 def main(argv=None):
     p = argparse.ArgumentParser(prog="pmon", description="Performance Monitoring CLI")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    pr = sub.add_parser("run", help="fio + eBPF + 자동 리포트")
-    pr.add_argument("--fio", help="fio 명령행 (따옴표로 감싸기). --script와 배타적")
-    pr.add_argument("--script", help="fio 워크로드 스크립트 파일 경로")
-    pr.add_argument("-m", "--mode", default="libaio", choices=["generic", "libaio", "iouring"])
-    pr.add_argument("-i", "--interval", type=float, default=1.0)
-    pr.add_argument("--report", default="all",
-                    help="자동 생성할 리포트 포맷: html,md,json 콤마구분 or 'all' or 'none' (기본: all)")
-    pr.set_defaults(func=cmd_run)
+    pm = sub.add_parser("monitor", help="observe the system (workload optional)")
+    pm.add_argument("--duration", type=int, default=None,
+                    help="seconds to observe with no workload")
+    pm.add_argument("--fio", default=None,
+                    help='fio command line (quoted). Mutually exclusive with --script/--duration')
+    pm.add_argument("--script", default=None,
+                    help="path to a shell script that issues the workload")
+    pm.add_argument("--label", default=None,
+                    help="label appended to the session directory name")
+    pm.add_argument("--report", default="all",
+                    help="report formats to render: html,md,json,png,pdf comma-list or 'all'/'none' (default all)")
+    _add_ebpf_args(pm)
+    pm.set_defaults(func=cmd_monitor)
 
-    prep = sub.add_parser("report", help="기존 세션 산출물에서 리포트 생성")
-    prep.add_argument("--session-dir", default=DEFAULT_SESSION_DIR)
-    prep.add_argument("--session-id", default=None)
-    prep.add_argument("--format", default="all",
-                      help="html,md,json 콤마구분 or 'all' (기본: all)")
-    prep.set_defaults(func=cmd_report)
+    pr = sub.add_parser("report", help="render reports for an existing session")
+    pr.add_argument("--session-dir", default=None,
+                    help="session directory (default: most recent under results/)")
+    pr.add_argument("--session-id", default=None)
+    pr.add_argument("--format", default="all")
+    pr.set_defaults(func=cmd_report)
 
-    pdi = sub.add_parser("diff", help="두 세션 비교 diff 리포트")
-    pdi.add_argument("--baseline", required=True)
-    pdi.add_argument("--candidate", required=True)
-    pdi.add_argument("--session-dir", default=DEFAULT_SESSION_DIR)
-    pdi.add_argument("-o", "--output", default=None)
-    pdi.set_defaults(func=cmd_diff)
+    pd = sub.add_parser("diff", help="compare two sessions")
+    pd.add_argument("--baseline", required=True)
+    pd.add_argument("--candidate", required=True)
+    pd.add_argument("--session-dir", default=None)
+    pd.add_argument("-o", "--output", default=None)
+    pd.set_defaults(func=cmd_diff)
 
-    psu = sub.add_parser("summary", help="단일 세션 JSON 평탄화")
-    psu.add_argument("--session-dir", default=DEFAULT_SESSION_DIR)
-    psu.add_argument("--session-id", default=None)
-    psu.add_argument("-o", "--output", default=None)
-    psu.set_defaults(func=cmd_summary)
+    ps = sub.add_parser("summary", help="flatten a session into a single JSON")
+    ps.add_argument("--session-dir", default=None)
+    ps.add_argument("--session-id", default=None)
+    ps.add_argument("-o", "--output", default=None)
+    ps.set_defaults(func=cmd_summary)
+
+    pdbg = sub.add_parser("debug", help="developer self-test for code-change verification")
+    pdbg.add_argument("--duration", type=int, default=2,
+                      help="seconds the smoke window observes (default 2)")
+    pdbg.add_argument("--with-ebpf", action="store_true",
+                      help="include eBPF I/O tracer (needs sudo + io_trace built)")
+    pdbg.add_argument("--with-fio", action="store_true",
+                      help="run a small fio against .smoke/smoke.img (needs sudo)")
+    pdbg.add_argument("--full", action="store_true",
+                      help="enable both --with-ebpf and --with-fio")
+    pdbg.set_defaults(func=cmd_debug)
+
+    # Deprecated alias for backward compatibility.
+    prun = sub.add_parser("run", help="(deprecated) alias for monitor")
+    prun.add_argument("--fio")
+    prun.add_argument("--script")
+    prun.add_argument("-m", "--mode", default="libaio",
+                      choices=["generic", "libaio", "iouring"])
+    prun.add_argument("-i", "--interval", type=float, default=1.0)
+    prun.add_argument("--report", default="all")
+    prun.set_defaults(func=cmd_run)
 
     args = p.parse_args(argv)
     return args.func(args)

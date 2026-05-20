@@ -2,22 +2,13 @@ import json
 import os
 import sys
 import glob
-import signal
-import shutil
-import subprocess
-import time
 import importlib.util
 import functools
 import argparse
 
 from core.runner import run_fio_job
 from core.reporter import ResultReporter
-from core.monitor import SystemMonitor
-
-
-_PROJ_ROOT = os.path.dirname(os.path.abspath(__file__))
-_IO_TRACE_BIN = os.path.join(_PROJ_ROOT, "ebpf", "io_trace")
-_IO_PROFILER_PY = os.path.join(_PROJ_ROOT, "ebpf", "io_profiler.py")
+from core.session import Session, resolve_ebpf_mode
 
 
 def load_json(file_path):
@@ -25,94 +16,6 @@ def load_json(file_path):
         return {}
     with open(file_path, "r", encoding="utf-8") as f:
         return json.load(f)
-
-
-def _start_monitor(session_dir, sys_info):
-    """session_dir에 SystemMonitor를 띄움. session_id는 디렉터리 basename."""
-    sid = os.path.basename(session_dir)
-    try:
-        mon = SystemMonitor(session_dir, session_id=sid, interval=1.0, sys_info=sys_info)
-        mon.start()
-        return mon, sid
-    except Exception as e:
-        print(f"  [!] SystemMonitor start failed (reports will use fio JSON only): {e}")
-        return None, sid
-
-
-def _stop_monitor(mon):
-    if not mon:
-        return
-    try:
-        mon.stop()
-    except Exception as e:
-        print(f"  [!] SystemMonitor stop error: {e}")
-
-
-def _ebpf_available():
-    """io_trace 바이너리 + io_profiler.py가 둘 다 있으면 True."""
-    return os.path.isfile(_IO_TRACE_BIN) and os.access(_IO_TRACE_BIN, os.X_OK) \
-        and os.path.isfile(_IO_PROFILER_PY)
-
-
-def _start_ebpf(session_dir, sid, mode, interval):
-    """io_profiler.py를 subprocess로 띄워 eBPF tracer 가동. 워크로드는 main.py가 별도로 돌림."""
-    cmd = [
-        sys.executable, _IO_PROFILER_PY,
-        "-m", mode,
-        "-i", str(interval),
-        "--output-dir", session_dir,
-        "--session-id", sid,
-        "--no-sysmon",  # SystemMonitor는 main.py가 띄움 (중복 방지)
-    ]
-    try:
-        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-    except Exception as e:
-        print(f"  [!] eBPF tracer start failed: {e}")
-        return None
-    # wait for io_trace attach to settle (io_profiler sleeps 1.5s then SIGUSR1 reset)
-    time.sleep(2.5)
-    if proc.poll() is not None:
-        err = proc.stderr.read().decode("utf-8", "replace") if proc.stderr else ""
-        print(f"  [!] eBPF tracer exited immediately (rc={proc.returncode}): {err.strip()[:300]}")
-        return None
-    print(f"  [eBPF] tracer started (mode={mode}, interval={interval}s) -> {session_dir}")
-    return proc
-
-
-def _stop_ebpf(proc):
-    if not proc:
-        return
-    try:
-        proc.send_signal(signal.SIGINT)
-        try:
-            proc.wait(timeout=15)
-        except subprocess.TimeoutExpired:
-            print("  [!] eBPF tracer not responding - sending SIGTERM")
-            proc.terminate()
-            proc.wait(timeout=5)
-        print(f"  [eBPF] tracer stopped (rc={proc.returncode})")
-    except Exception as e:
-        print(f"  [!] eBPF tracer stop error: {e}")
-
-
-def _run_reports(session_dir, sid, formats):
-    """report.__main__.main()을 호출해 html/md/json/png 일괄 생성."""
-    if not formats or formats == "none":
-        return
-    try:
-        from report.__main__ import main as report_main
-    except ImportError as e:
-        print(f"  [!] report module import failed: {e}")
-        return
-    rc = report_main([
-        "--session-dir", session_dir,
-        "--session-id", sid,
-        "--format", formats,
-    ])
-    if rc:
-        print(f"  [!] some reports failed (rc={rc}) - {session_dir}")
-    else:
-        print(f"  [*] reports written -> {session_dir}")
 
 
 def execute_json_tc(
@@ -149,19 +52,19 @@ def execute_json_tc(
             session_dir, "metadata.json", {"system": sys_info, "tc": tc_data}
         )
 
-        mon, sid = _start_monitor(session_dir, sys_info)
-        ebpf_proc = _start_ebpf(session_dir, sid, ebpf_mode, ebpf_interval) if ebpf_mode != "off" else None
-        try:
+        with Session(
+            session_dir,
+            sys_info,
+            ebpf_mode=ebpf_mode,
+            ebpf_interval=ebpf_interval,
+            reports=report_formats,
+        ):
             for wl in tc_data.get("workloads", []):
                 result_data = bound_runner(disk=disk, workload=wl, numa_node=numa_node)
                 if result_data:
                     filename = f"fio_{wl['name']}.json"
                     reporter.save_json(session_dir, filename, result_data)
                     reporter.print_summary(wl["name"], result_data)
-        finally:
-            _stop_ebpf(ebpf_proc)
-            _stop_monitor(mon)
-        _run_reports(session_dir, sid, report_formats)
 
 
 def execute_python_tc(tc_file, disks, numa_node, sys_info, reporter, bound_runner,
@@ -196,21 +99,21 @@ def execute_python_tc(tc_file, disks, numa_node, sys_info, reporter, bound_runne
                 "metadata.json",
                 {"system": sys_info, "type": "python_multi_disk_scenario"},
             )
-            mon, sid = _start_monitor(session_dir, sys_info)
-            ebpf_proc = _start_ebpf(session_dir, sid, ebpf_mode, ebpf_interval) if ebpf_mode != "off" else None
-            try:
+            with Session(
+                session_dir,
+                sys_info,
+                ebpf_mode=ebpf_mode,
+                ebpf_interval=ebpf_interval,
+                reports=report_formats,
+            ):
                 scenario.execute(
-                    disks=disks, # 단일 disk가 아닌 disks 리스트 전달
+                    disks=disks,
                     runner_func=bound_runner,
                     reporter=reporter,
                     session_dir=session_dir,
                     numa_node=numa_node,
-                    sys_info=sys_info,  # [추가] 시스템 정보 전달
+                    sys_info=sys_info,
                 )
-            finally:
-                _stop_ebpf(ebpf_proc)
-                _stop_monitor(mon)
-            _run_reports(session_dir, sid, report_formats)
         else:
             for disk in disks:
                 disk_label = disk.split("/")[-1]
@@ -223,22 +126,21 @@ def execute_python_tc(tc_file, disks, numa_node, sys_info, reporter, bound_runne
                     {"system": sys_info, "type": "python_scenario"},
                 )
 
-                mon, sid = _start_monitor(session_dir, sys_info)
-                ebpf_proc = _start_ebpf(session_dir, sid, ebpf_mode, ebpf_interval) if ebpf_mode != "off" else None
-                try:
-                    # 플러그인에 제어권 넘기기
+                with Session(
+                    session_dir,
+                    sys_info,
+                    ebpf_mode=ebpf_mode,
+                    ebpf_interval=ebpf_interval,
+                    reports=report_formats,
+                ):
                     scenario.execute(
                         disk=disk,
                         runner_func=bound_runner,
                         reporter=reporter,
                         session_dir=session_dir,
                         numa_node=numa_node,
-                        sys_info=sys_info,  # [추가] 시스템 정보 전달
+                        sys_info=sys_info,
                     )
-                finally:
-                    _stop_ebpf(ebpf_proc)
-                    _stop_monitor(mon)
-                _run_reports(session_dir, sid, report_formats)
     else:
         print(f"  -> [Skip] {tc_file} has no 'Scenario' class")
 
@@ -357,21 +259,12 @@ def main():
     if args.quick:
         print("[!] Quick mode: every workload forced to 1s runtime\n")
 
-    # eBPF 활성 여부 resolve
-    if args.ebpf == "off":
-        resolved_ebpf_mode = "off"
-    elif args.ebpf == "on":
-        if not _ebpf_available():
-            print(f"[Error] --ebpf on but ebpf/io_trace binary missing or not executable. Run `cd ebpf && make` first.")
-            sys.exit(1)
-        resolved_ebpf_mode = args.ebpf_mode
-    else:  # auto
-        if _ebpf_available():
-            resolved_ebpf_mode = args.ebpf_mode
-            print(f"[*] eBPF tracer auto-on (mode={resolved_ebpf_mode}, interval={args.ebpf_interval}s)")
-        else:
-            resolved_ebpf_mode = "off"
+    resolved_ebpf_mode = resolve_ebpf_mode(args.ebpf, args.ebpf_mode)
+    if resolved_ebpf_mode == "off":
+        if args.ebpf == "auto":
             print("[*] eBPF tracer skipped (ebpf/io_trace not built). Run `cd ebpf && make` to enable.")
+    else:
+        print(f"[*] eBPF tracer on (mode={resolved_ebpf_mode}, interval={args.ebpf_interval}s)")
 
     for tc_file in tc_files:
         ext = os.path.splitext(tc_file)[1].lower()

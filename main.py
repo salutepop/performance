@@ -182,8 +182,9 @@ def main():
         choices=["auto", "on", "off"],
         default="auto",
         help=(
-            "eBPF I/O tracer toggle (default auto: enable if ebpf/io_trace binary exists, "
-            "skip otherwise). 'on' forces enable, 'off' forces disable."
+            "eBPF I/O tracer toggle (default auto: enable if io_trace binary exists "
+            "in monitoring/collectors/ebpf_io/src/, skip otherwise). "
+            "'on' forces enable, 'off' forces disable."
         ),
     )
     parser.add_argument(
@@ -262,7 +263,7 @@ def main():
     resolved_ebpf_mode = resolve_ebpf_mode(args.ebpf, args.ebpf_mode)
     if resolved_ebpf_mode == "off":
         if args.ebpf == "auto":
-            print("[*] eBPF tracer skipped (ebpf/io_trace not built). Run `cd ebpf && make` to enable.")
+            print("[*] eBPF tracer skipped (io_trace not built). Run `make -C monitoring/collectors/ebpf_io/src` to enable.")
     else:
         print(f"[*] eBPF tracer on (mode={resolved_ebpf_mode}, interval={args.ebpf_interval}s)")
 

@@ -11,7 +11,7 @@ __pycache__/
 *.o
 *.bin
 *testfile*
-ebpf/io_trace
+monitoring/collectors/ebpf_io/src/io_trace
 
 # Distribution / packaging
 .Python

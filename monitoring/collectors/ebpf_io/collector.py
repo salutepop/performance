@@ -9,20 +9,19 @@ import threading
 import csv
 from datetime import datetime
 
-# sysmon은 프로젝트 루트의 core/ 모듈에 있음 — 상대 import 가능하도록 path 보정
-_PROJ_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# Allow `python3 -m monitoring.collectors.ebpf_io.collector` standalone invocation.
+_PROJ_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 if _PROJ_ROOT not in sys.path:
     sys.path.insert(0, _PROJ_ROOT)
 
 try:
-    from core.monitor import SystemMonitor
+    from monitoring.collectors.system import SystemMonitor
 except Exception as _e:
     SystemMonitor = None
     print(f"[!] SystemMonitor import 실패: {_e} — system_metrics 수집은 비활성화")
 
-# 산출물 위치는 cwd 무관 — io_profiler.py 가 있는 ebpf/ 디렉터리 기준 절대경로.
-# 이전엔 "./csv_results" 상대 경로라 호출 cwd에 따라 다른 디렉터리에 떨어짐.
-OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "csv_results")
+# Default output dir for standalone runs. Session-managed runs override via --output-dir.
+OUTPUT_DIR = os.path.join(_PROJ_ROOT, "results", "ebpf_standalone")
 SESSION_ID = datetime.now().strftime("%Y%m%d_%H%M%S")
 
 prev_metrics = {}
@@ -41,7 +40,7 @@ _LIBAIO_OP_KEY = {
 
 
 LAT_HIST_BUCKETS = 32
-LBA_BUCKETS = 128  # MUST match ebpf/io_trace.h. 변경 시 BPF 재빌드 필요.
+LBA_BUCKETS = 128  # MUST match src/io_trace.h. 변경 시 BPF 재빌드 필요.
 
 
 def compute_percentiles(hist, pcts=(50, 95, 99, 99.9)):
@@ -624,8 +623,8 @@ def run_workload_thread(cmd, script_file):
 
 
 def run_benchmark(mode="generic", cmd=None, script_file=None, interval=1, enable_sysmon=True):
-    # io_trace 바이너리는 ebpf/ 안에 있음. cwd 무관하게 동작하도록 절대 경로 사용.
-    io_trace_bin = os.path.join(os.path.dirname(os.path.abspath(__file__)), "io_trace")
+    # io_trace binary is built into src/ next to collector.py.
+    io_trace_bin = os.path.join(os.path.dirname(os.path.abspath(__file__)), "src", "io_trace")
     trace_cmd = ["sudo", io_trace_bin, "-i", str(interval)]
     if mode != "generic":
         trace_cmd.extend(["-m", mode])
@@ -773,7 +772,7 @@ if __name__ == "__main__":
         "--output-dir",
         type=str,
         default=None,
-        help="CSV/SystemMonitor 산출물 저장 디렉터리 (기본: ebpf/csv_results). main.py가 세션 단위로 호출할 때 session_dir을 주입.",
+        help="CSV/SystemMonitor output directory. Session-managed runs inject session_dir; standalone defaults to results/ebpf_standalone/.",
     )
     parser.add_argument(
         "--session-id",

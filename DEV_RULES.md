@@ -58,7 +58,8 @@
 
 ## 권한 / 도구
 
-- `sudo` NOPASSWD: `/home/cm/src/cm/performance/ebpf/io_trace`, `/usr/bin/fio`, `/usr/bin/tee /proc/sys/vm/drop_caches`
+- `sudo` NOPASSWD: `/home/cm/src/cm/performance/monitoring/collectors/ebpf_io/src/io_trace`, `/usr/bin/fio`, `/usr/bin/tee /proc/sys/vm/drop_caches`
+  - io_trace 경로가 옮겨졌으므로 sudoers 규칙도 갱신 필요 (옛 경로: `ebpf/io_trace`)
 - 그 외 sudo는 동작 안 함 — 그 경로 막히면 task BLOCKED 처리
 - fio 파일은 `/tmp/fio_smoke.dat` 사용 (NVMe raw write 금지)
 

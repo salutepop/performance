@@ -27,10 +27,10 @@ $(APP): $(APP).c $(SKEL_H)
 run: $(APP)
 	sudo ./$(APP)
 
-# BPF 개발 워크플로: bpf 코드 수정 → 빌드 → tc00 스모크로 attach+측정+CSV+리포트 전체 sanity.
-# (Q2D/D2C 값이 0이 아니고 device CSV가 채워지면 정상. fio raw + sysmon + eBPF + report 자동 모두 검증)
+# BPF dev workflow: edit bpf -> build -> run pmon.py debug --full as the E2E smoke
+# (passes only if Q2D/D2C latencies are non-zero and the device CSV is populated).
 smoke: $(APP)
-	cd .. && python3 main.py -t tc00 -q
+	cd ../../../.. && python3 pmon.py debug --full --duration 3
 
 # 정리
 clean:

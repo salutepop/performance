@@ -33,7 +33,7 @@ import time
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 RESULTS_DIR = os.path.join(ROOT, "results")
-LEGACY_SESSION_DIR = os.path.join(ROOT, "ebpf", "csv_results")
+LEGACY_SESSION_DIR = os.path.join(ROOT, "monitoring", "collectors", "ebpf_io", "csv_results")
 SMOKE_IMG = os.path.join(ROOT, ".smoke", "smoke.img")
 
 
@@ -170,8 +170,8 @@ def cmd_debug(args):
         args.with_fio = True
 
     if args.with_ebpf and not ebpf_available():
-        print("[debug] --with-ebpf requested but ebpf/io_trace not built; "
-              "run `cd ebpf && make`", file=sys.stderr)
+        print("[debug] --with-ebpf requested but io_trace not built; "
+              "run `make -C monitoring/collectors/ebpf_io/src`", file=sys.stderr)
         return 2
     if args.with_fio and not os.path.isfile(SMOKE_IMG):
         print(f"[debug] --with-fio requested but {SMOKE_IMG} missing; "

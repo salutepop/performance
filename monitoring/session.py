@@ -29,8 +29,9 @@ from .collectors.system import SystemMonitor
 
 
 _PROJ_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_IO_TRACE_BIN = os.path.join(_PROJ_ROOT, "ebpf", "io_trace")
-_IO_PROFILER_PY = os.path.join(_PROJ_ROOT, "ebpf", "io_profiler.py")
+_EBPF_IO_DIR = os.path.join(_PROJ_ROOT, "monitoring", "collectors", "ebpf_io")
+_IO_TRACE_BIN = os.path.join(_EBPF_IO_DIR, "src", "io_trace")
+_IO_PROFILER_PY = os.path.join(_EBPF_IO_DIR, "collector.py")
 
 
 def ebpf_available():
@@ -53,8 +54,8 @@ def resolve_ebpf_mode(toggle, mode):
     if toggle == "on":
         if not ebpf_available():
             print(
-                "[Error] --ebpf on but ebpf/io_trace binary missing or not executable. "
-                "Run `cd ebpf && make` first.",
+                f"[Error] --ebpf on but io_trace binary missing or not executable. "
+                f"Build with `make -C monitoring/collectors/ebpf_io/src` first.",
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -153,7 +154,8 @@ class Session:
     def _start_ebpf(self):
         if not ebpf_available():
             print(
-                "  [!] eBPF requested but io_trace binary missing — skipping",
+                f"  [!] eBPF requested but io_trace binary missing — skipping "
+                f"(build with `make -C {os.path.relpath(_EBPF_IO_DIR, _PROJ_ROOT)}/src`)",
                 file=sys.stderr,
             )
             return

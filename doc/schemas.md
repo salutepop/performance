@@ -4,7 +4,7 @@
 
 ## 1. `<device>_<session_id>.csv` (device per-second I/O CSV)
 
-`io_profiler.py`가 1초 단위(또는 `-i` 옵션 값)로 디바이스별 op 행을 추가. 한 행 = 한 (timestamp, operation) 조합.
+`collector.py`가 1초 단위(또는 `-i` 옵션 값)로 디바이스별 op 행을 추가. 한 행 = 한 (timestamp, operation) 조합.
 
 | 컬럼 | 단위/타입 | 의미 |
 |---|---|---|
@@ -36,7 +36,7 @@ timestamp,operation,iops_interval,bandwidth_mb_s_interval,q2d_avg_us_interval,d2
 00:21:48,read,47599,185.93,4.12,93.58,2.34,0.75,206.13,0.0001,82.0,256.0,8.0,8,28,...
 ```
 
-**Phase 정의**: U2Q · Q2D · D2C · C2A · A2U → I/O 한 건 전체 latency를 5단계로 나눈 ebpf/CLAUDE.md "Full-Stack Latency Breakdown" 참고.
+**Phase 정의**: U2Q · Q2D · D2C · C2A · A2U → I/O 한 건 전체 latency를 5단계로 나눈 monitoring/collectors/ebpf_io/CLAUDE.md "Full-Stack Latency Breakdown" 참고.
 
 ## 2. `system_metrics_<session_id>.csv` (system metrics CSV)
 
@@ -131,14 +131,14 @@ timestamp,operation,iops_interval,bandwidth_mb_s_interval,q2d_avg_us_interval,d2
 
 | # | 카드 label | 집계 방법 | 입력 CSV 컬럼 | CSV 생성 위치 | 원본 데이터 출처 | 경고 임계 |
 |---|---|---|---|---|---|---|
-| 1 | **Read IOPS (total)** | Σ devices × op∈{read, read_ahead} : `iops.sum` | `iops_interval` | `ebpf/io_profiler.py::parse_and_store_metrics` | BPF `block_rq_complete` → `device_stats[dev].stats[IO_READ].io_count` 인터벌 delta | — |
+| 1 | **Read IOPS (total)** | Σ devices × op∈{read, read_ahead} : `iops.sum` | `iops_interval` | `monitoring/collectors/ebpf_io/collector.py::parse_and_store_metrics` | BPF `block_rq_complete` → `device_stats[dev].stats[IO_READ].io_count` 인터벌 delta | — |
 | 2 | **Write IOPS (total)** | Σ devices : `iops.sum` (op=write) | `iops_interval` (op=write 행) | 위와 동일 | 위와 동일 (`type=IO_WRITE`) | — |
 | 3 | **Peak BW** | max(devices × ops : `bw.max`) | `bandwidth_mb_s_interval` | 위와 동일 | BPF `target->total_bytes` 인터벌 delta ÷ elapsed | — |
 | 4 | **Worst D2C interval avg** | max(devices × ops : `d2c.max`) | `d2c_avg_us_interval` | 위와 동일 | BPF `block_rq_issue→block_rq_complete` 시간차 (`target->d2c.total / count`) per interval | `>500us` → warn |
 | 5 | **SQ↔CQ diff** | mean(devices : `_sqcq_diff_ratio.avg`) | `sq_cq_diff_ratio` | 위와 동일 | BPF `block_rq_complete`에서 `bpf_get_smp_processor_id()` vs `trace_ctx.issue_cpu` 비교 → `device_qd.sq_cq_{same,diff}` 누적의 인터벌 delta 비율 | `>20%` bad, `>5%` warn |
-| 6 | **CPU iowait peak** | max(nodes : `iowait_pct.max`) | `node{N}_iowait_pct` | `core/monitor.py::_tick` | `/proc/stat` 의 per-CPU iowait jiffies 인터벌 delta → NUMA node 단위 합산 / total × 100 | `>10%` bad, `>2%` warn |
+| 6 | **CPU iowait peak** | max(nodes : `iowait_pct.max`) | `node{N}_iowait_pct` | `monitoring/collectors/system.py::_tick` | `/proc/stat` 의 per-CPU iowait jiffies 인터벌 delta → NUMA node 단위 합산 / total × 100 | `>10%` bad, `>2%` warn |
 | 7 | **CPU sys peak** | max(nodes : `sys_pct.max`) | `node{N}_sys_pct` | 위와 동일 | `/proc/stat` sys jiffies | `>50%` warn |
-| 8 | **GPU power peak** *(있을 때만)* | max(gpus : `pwr_w.max`) | `gpu{N}_pwr_w` | `core/monitor.py::_gpu_reader_loop` (background thread) | `nvidia-smi dmon -s pumt` stream의 `pwr` 컬럼 | `>50W` warn |
+| 8 | **GPU power peak** *(있을 때만)* | max(gpus : `pwr_w.max`) | `gpu{N}_pwr_w` | `monitoring/collectors/system.py::_gpu_reader_loop` (background thread) | `nvidia-smi dmon -s pumt` stream의 `pwr` 컬럼 | `>50W` warn |
 
 ### "max"의 정확한 의미
 
@@ -168,7 +168,7 @@ fio randread → 커널 block layer
   ↓ tp/block_rq_issue: trace_ctx에 issue_ts 저장
   ↓ tp/block_rq_complete: d2c_lat = now - issue_ts → target->d2c.total += d2c_lat (BPF map device_stats)
   ↓ io_trace.c (userspace loader): 1초마다 device_stats dump → JSON에 d2c.{total,min,max}
-  ↓ io_profiler.py: prev/curr 누적 delta → d2c_avg_us_interval = (Δtotal / Δcount / 1000)
+  ↓ collector.py: prev/curr 누적 delta → d2c_avg_us_interval = (Δtotal / Δcount / 1000)
   ↓ CSV row append: nvme0n1_<sid>.csv 의 d2c_avg_us_interval 컬럼
   ↓ md_report._device_aggregates: 인터벌 값 리스트 → _stats → {"max": 가장 큰 인터벌 평균}
   ↓ html_report._render_summary: dev_aggs[d][op]["d2c"]["max"] → 카드 #4 표시

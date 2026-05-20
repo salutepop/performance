@@ -1,7 +1,7 @@
 """예시 scenario — 4K randread 5초, d2c p99 < 1ms 검증.
 
 실행:
-  python3 -m scenarios.sample_randread
+  python3 -m workloads.scenarios.sample_randread
 """
 
 import sys

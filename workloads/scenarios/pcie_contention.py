@@ -8,7 +8,7 @@ PCIe 트래픽이 아니므로 의미 없음 — 그 경우 gpu_pcie_{rx,tx}_mb_
 유지되는 것 자체가 결과 (uniform memory 검증).
 
 실행:
-  python3 -m scenarios.pcie_contention
+  python3 -m workloads.scenarios.pcie_contention
 """
 
 import os

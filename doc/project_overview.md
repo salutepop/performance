@@ -1,43 +1,44 @@
-# SSD 성능 측정 및 분석 프레임워크 (Performance Evaluation Framework)
+# 시스템 관측 & SSD 성능 분석 프레임워크
 
-이 프로젝트는 다양한 SSD(Solid State Drive)의 성능을 정밀하게 측정하고 분석하기 위한 자동화 프레임워크입니다. `fio`(Flexible I/O Tester)를 기반으로 하며, 단순한 성능 측정을 넘어 복잡한 시나리오 테스트를 지원합니다.
+이 프로젝트는 **시스템 관측(monitoring)**을 1차 목적으로 한다. 어떤 시스템/워크로드가 돌지 모르는 상황에서 모니터링 도구로 데이터를 수집하는 게 핵심이고, 시스템 병목을 분석하기 위한 워크로드(`fio` 기반 test case)를 돌리는 건 2차 목적이다.
 
-## 🎯 최종 목적
-- **다양한 SSD 성능 측정**: 대역폭(BW), IOPS, 지연 시간(Latency) 등을 다양한 워크로드에서 측정.
-- **성능 분석**: 데이터 수집 및 분석을 통해 특정 조건(예: GC 발생, NUMA 노드 차이 등)에서의 성능 변화 파악.
-- **자동화**: 반복적인 테스트 과정을 코드화하여 일관성 있는 결과 도출.
+## 🎯 목적
+- **1차 — 관측**: SystemMonitor(/proc·/sys·nvidia-smi) + eBPF block-layer I/O tracer로 시스템 상태를 세션 단위로 수집. 워크로드가 없어도 그냥 관측 가능.
+- **2차 — 분석용 워크로드**: BW/IOPS/Latency를 다양한 조건(GC, NUMA distance, core affinity 등)에서 측정해 병목을 드러낸다.
 
 ## 📁 프로젝트 구조
-- **`main.py`**: 프레임워크의 진입점. 설정을 로드하고 테스트 케이스를 실행합니다.
-- **`config/`**: 시스템 및 테스트 환경 설정 파일 (`system.json`).
-- **`core/`**: 프레임워크 핵심 로직.
-  - `runner.py`: `fio` 명령어를 생성하고 실행하는 로직.
-  - `reporter.py`: 테스트 결과를 저장하고 요약 보고서를 생성하는 로직.
-  - `monitor.py`: 테스트 중 시스템 리소스를 모니터링하는 로직.
-- **`test_cases/`**: 성능 테스트 시나리오 정의.
-  - `.json`: 단순한 fio 워크로드 정의.
-  - `.py`: 복잡한 로직(예: 전처리, 동적 파라미터 변경 등)이 포함된 시나리오 클래스.
-- **`results/`**: 테스트 실행 후 생성된 세션별 결과(JSON) 저장소.
-- **`scripts/`**: `iostat`, `mpstat` 등 시스템 상태 수집을 위한 보조 쉘 스크립트.
+- **`pmon.py`**: 유일한 진입점. `monitor` / `report` / `diff` / `summary` / `debug` 서브커맨드.
+- **`monitoring/`**: 관측 플랫폼 (1차).
+  - `session.py`: `Session` — 관측 윈도우(컨텍스트 매니저). collector들을 구동하고 종료 시 리포트.
+  - `discovery.py`: `SystemDiscovery` — CPU/NUMA/NVMe/메모리/GPU 자동 탐색.
+  - `collectors/`: 관측 소스. `base.py`(Collector ABC), `system.py`(SystemMonitor), `ebpf_io/`(eBPF I/O tracer).
+- **`workloads/`**: 워크로드 (2차, 관측의 옵션 입력).
+  - `fio_runner.py`: `fio` 명령 빌드/실행.
+  - `reporter.py`: TC 결과 디렉터리 layout.
+  - `tc_runner.py`: test case 발견/실행.
+  - `cases/`: test case 본체 (`.json` 정적 워크로드 / `.py` 동적 시나리오).
+  - `scenarios/`: self-checking Scenario 프레임워크.
+- **`report/`**: 세션 산출물 → HTML/MD/JSON/PNG/PDF 리포트.
+- **`config/`**: 시스템 설정 (`system.json`).
+- **`results/`**: 세션 산출물 저장소.
 
 ## 🚀 주요 기능
-1. **다양한 테스트 케이스 지원**: JSON과 Python 기반의 테스트 케이스를 모두 지원하여 유연한 테스트 설계가 가능합니다.
-2. **NUMA 및 CPU Affinity 제어**: 하이엔드 SSD 성능 측정 시 중요한 NUMA 노드 설정 및 특정 코어 할당 기능을 지원합니다.
-3. **세션 기반 결과 관리**: 각 테스트 실행마다 고유한 타임스탬프 폴더를 생성하여 메타데이터와 결과 JSON 파일을 관리합니다.
-4. **실시간 요약 출력**: 테스트 완료 직후 BW, IOPS, Latency 정보를 터미널에 즉시 출력합니다.
+1. **워크로드 무관 관측**: `pmon.py monitor --duration N`으로 아무 워크로드 없이 시스템을 관측.
+2. **collector 확장성**: `Collector` ABC를 상속해 새 관측 소스를 추가.
+3. **JSON/Python test case**: 정적 워크로드와 동적 시나리오 모두 지원.
+4. **NUMA / CPU Affinity 제어**: NUMA 노드 설정 및 코어 할당.
+5. **세션 기반 결과 관리**: 실행마다 타임스탬프 디렉터리.
 
 ## 🛠 사용 방법
-1. `config/system.json`에서 테스트할 타겟 디스크(`target_disks`)와 `fio` 경로를 설정합니다.
-2. `main.py`를 실행합니다.
+1. `config/system.json`에서 타겟 디스크(`target_disks`)와 `fio` 경로를 설정 (비워두면 자동 탐색).
+2. 관측 실행:
    ```bash
-   python3 main.py
-   ```
-3. 특정 테스트 케이스만 실행하려면 `-t` 옵션을 사용합니다.
-   ```bash
-   python3 main.py -t tc01
+   ./pmon.py monitor --duration 60          # 워크로드 없이 관측
+   ./pmon.py monitor --tc tc03              # test case와 함께
+   ./pmon.py monitor --tc all -q            # 전체 TC, quick 모드
    ```
 
 ## 📈 테스트 시나리오 예시
-- `tc01_basic.json`: 기본적인 순차/무작위 읽기/쓰기 성능 측정.
+- `tc00_smoke.json`: 4대 성능(Seq/Rand × R/W) 스모크.
 - `tc02_dirty_gc.py`: SSD를 Dirty 상태로 만든 후 Garbage Collection의 영향을 측정.
-- `tc03_core_distance.py`: CPU 코어와 SSD 간의 거리에 따른 성능 차이 분석.
+- `tc03_core_distance.py`: CPU 코어와 SSD 간 거리에 따른 성능 차이 분석.

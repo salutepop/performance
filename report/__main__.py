@@ -18,7 +18,7 @@ def main(argv=None):
         prog="python3 -m report",
         description="Session artifacts -> html/md/json/png/pdf bundled report (convenience entry). Use -m report.diff for session diff."
     )
-    p.add_argument("--session-dir", default="ebpf/csv_results")
+    p.add_argument("--session-dir", default="results")
     p.add_argument("--session-id", default=None)
     p.add_argument("--format", default="all",
                    help="Comma-separated subset of html,md,json,png,pdf or 'all' (default: all). png/pdf auto-skip when matplotlib is missing.")

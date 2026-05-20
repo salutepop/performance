@@ -5,8 +5,8 @@
 baseline 버전: 표 dump + topology 요약. 차트는 후속 task.
 
 CLI:
-  python3 -m report.html_report --session-dir csv_results/ [--session-id SID] [-o out.html]
-  python3 -m report.html_report  # cwd 기준 ebpf/csv_results 자동 탐색
+  python3 -m report.html_report --session-dir <session_dir> [--session-id SID] [-o out.html]
+  python3 -m report.html_report  # cwd 기준 results 자동 탐색
 """
 
 import argparse
@@ -1074,8 +1074,8 @@ def build_report(session_dir, sid):
 
 def main(argv=None):
     p = argparse.ArgumentParser(description="Build a self-contained HTML report from session artifacts")
-    p.add_argument("--session-dir", default="ebpf/csv_results",
-                   help="Directory holding session CSV/JSON artifacts (default: ebpf/csv_results)")
+    p.add_argument("--session-dir", default="results",
+                   help="Directory holding session CSV/JSON artifacts (default: results)")
     p.add_argument("--session-id", default=None,
                    help="Session ID (YYYYMMDD_HHMMSS). If omitted, picks the most recent one")
     p.add_argument("-o", "--output", default=None,

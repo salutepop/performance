@@ -196,8 +196,8 @@ def main(argv=None):
     p = argparse.ArgumentParser(description="Diff report between two sessions, flags regression candidates")
     p.add_argument("--baseline", required=True, help="baseline SID or folder path")
     p.add_argument("--candidate", required=True, help="candidate SID or folder path")
-    p.add_argument("--session-dir", default="ebpf/csv_results",
-                   help="Where to look up SIDs (default: ebpf/csv_results)")
+    p.add_argument("--session-dir", default="results",
+                   help="Where to look up SIDs (default: results)")
     p.add_argument("-o", "--output", default=None)
     args = p.parse_args(argv)
 

@@ -10,7 +10,7 @@ raw NVMe partition으로 바꾸면 더 직접적이지만 destructive하므로 �
 p99 변화는 HTML report (report_<sid>.html)의 d2c p99 차트로 시각화됨.
 
 실행:
-  python3 -m scenarios.gc_stress
+  python3 -m workloads.scenarios.gc_stress
 """
 
 import sys

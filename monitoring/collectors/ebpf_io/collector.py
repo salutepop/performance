@@ -653,7 +653,7 @@ def run_benchmark(mode="generic", cmd=None, script_file=None, interval=1, enable
         )
 
     # SystemMonitor: CPU/Mem/IRQ/GPU 통합 메트릭. interval>0일 때만 활성.
-    # main.py에서 호출될 때는 SystemMonitor를 외부에서 띄우므로 enable_sysmon=False로 중복 방지.
+    # Session이 구동할 때는 SystemMonitor를 외부에서 띄우므로 enable_sysmon=False로 중복 방지.
     sysmon = None
     if enable_sysmon and interval > 0 and SystemMonitor is not None:
         try:
@@ -783,7 +783,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--no-sysmon",
         action="store_true",
-        help="SystemMonitor 비활성 (main.py가 별도 인스턴스를 띄우는 경우 중복 방지).",
+        help="SystemMonitor 비활성 (Session이 별도 인스턴스를 띄우는 경우 중복 방지).",
     )
 
     args = parser.parse_args()

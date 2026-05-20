@@ -5,7 +5,7 @@
 auto-extracted "Top findings" (sq/cq divergence, iowait peak, GPU 활동 등).
 
 CLI:
-  python3 -m report.md_report --session-dir csv_results/ [--session-id SID] [-o out.md]
+  python3 -m report.md_report --session-dir <session_dir> [--session-id SID] [-o out.md]
 """
 
 import argparse
@@ -411,7 +411,7 @@ def build_report(session_dir, sid):
 
 def main(argv=None):
     p = argparse.ArgumentParser(description="Build a Markdown summary report from session artifacts")
-    p.add_argument("--session-dir", default="ebpf/csv_results")
+    p.add_argument("--session-dir", default="results")
     p.add_argument("--session-id", default=None)
     p.add_argument("-o", "--output", default=None)
     args = p.parse_args(argv)

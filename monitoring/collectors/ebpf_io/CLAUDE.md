@@ -1,4 +1,8 @@
-# ebpf/ — Block-layer I/O Profiler
+# ebpf_io/ — Block-layer I/O Profiler collector
+
+> 위치: `monitoring/collectors/ebpf_io/`. Python orchestrator는 `collector.py`,
+> C/BPF 소스 + Makefile은 `src/`. `Session`은 `EbpfIoCollector`(`__init__.py`)를
+> 통해 이걸 구동한다.
 
 eBPF 기반 full-stack I/O 지연 분석 도구. fio(또는 임의 워크로드)가 도는 동안 커널 블록 계층 + libaio 경로의 각 구간 지연을 maps에 누적하고, 사용자 공간에서 JSON으로 뽑아 페이즈별 breakdown 테이블을 생성한다.
 
@@ -36,7 +40,7 @@ io_trace.bpf.c   (kernel BPF programs)   ── attach to tracepoints/kprobes
 io_trace.c       (C userspace loader)    ── libbpf로 skeleton open/load/attach
        │                                    SIGUSR1 reset / 주기적으로
        ▼                                    print_json_report()로 stdout 출력
-io_profiler.py   (Python orchestrator)   ── io_trace를 Popen, 워크로드 thread 실행
+collector.py     (Python orchestrator)   ── io_trace를 Popen, 워크로드 thread 실행
                                             JSON 마커 파싱 → CSV + 최종 리포트
 ```
 
@@ -125,9 +129,9 @@ JSON 스키마 (이게 layer 사이 contract):
 
 ### Cross-cutting: System metrics
 
-`io_profiler.py`는 워크로드 thread 시작 직전에 `from core.monitor import SystemMonitor`로 통합 시스템 메트릭 수집기를 띄운다. eBPF I/O CSV (`{dev}_{session}.csv`)와 같은 디렉터리(`csv_results/`)에 `system_metrics_{session}.csv` + `topology_{session}.json`이 함께 떨어진다. timestamp 컬럼으로 join 가능. SystemMonitor 자체는 eBPF와 무관하므로 손댈 일 있으면 `core/monitor.py`만 보면 됨.
+`collector.py`는 standalone 실행 시 워크로드 thread 시작 직전에 `from monitoring.collectors.system import SystemMonitor`로 통합 시스템 메트릭 수집기를 띄운다 (`--no-sysmon`이면 생략 — `Session`이 띄울 때). eBPF I/O CSV (`{dev}_{session}.csv`)와 같은 디렉터리에 `system_metrics_{session}.csv` + `topology_{session}.json`이 함께 떨어진다. timestamp 컬럼으로 join 가능. SystemMonitor 자체는 eBPF와 무관하므로 손댈 일 있으면 `monitoring/collectors/system.py`만 보면 됨.
 
-### Layer 3: `io_profiler.py` — Python orchestrator
+### Layer 3: `collector.py` — Python orchestrator
 
 `run_benchmark(mode, cmd|script_file, interval)`:
 1. `sudo ./io_trace -i {interval} [-m {mode}]`을 `Popen`(stdout=PIPE).
@@ -137,24 +141,26 @@ JSON 스키마 (이게 layer 사이 contract):
 5. 매 JSON마다 `parse_and_store_metrics()`로 누적값을 **delta**로 변환해 IOPS/BW/avg-lat 계산, 5초마다 `save_csv_buffers()`로 flush.
 6. 종료 시 마지막 JSON으로 `print_final_summary()` — phase × {Total, READ, WRITE, READ-AHEAD, FLUSH}의 Call/Sum(ms)/Avg(us) 테이블 출력. operation별 `Q2D pct`, `D2C pct` 라인에 p50/p95/p99/p99.9 (`compute_percentiles(hist)`가 log2 bucket을 선형 보간하여 us로 변환).
 
-CSV 출력 위치: `./csv_results/{real_dev_name}_{SESSION_ID}.csv` (SESSION_ID는 모듈 로드 시 한 번 생성). 디바이스 이름은 `dev(maj:min)` → `/sys/dev/block/maj:min` realpath로 `nvme0n1` 같은 실명으로 변환.
+CSV 출력 위치: `{output_dir}/{real_dev_name}_{SESSION_ID}.csv`. `Session`이 구동할 땐 `--output-dir`로 세션 디렉터리가 주입되고, standalone 실행 시엔 `results/ebpf_standalone/`. 디바이스 이름은 `dev(maj:min)` → `/sys/dev/block/maj:min` realpath로 `nvme0n1` 같은 실명으로 변환.
 
 CSV 컬럼: timestamp, operation, iops_interval, bandwidth_mb_s_interval, q2d_avg_us_interval, d2c_avg_us_interval, **u2q_avg_us_interval, c2a_avg_us_interval, a2u_avg_us_interval** (libaio 모드에서만 0 이상 값), **sq_cq_diff_ratio** (디바이스 단위, 같은 인터벌의 모든 op row에 동일), **d2c_p50_us, d2c_p99_us, q2d_p99_us** (인터벌 히스토그램 delta에서 계산한 percentile — `prev_hists` 글로벌 dict로 추적), current_qd, max_qd, total_io_count, total_bytes, q2d/d2c {total,min,max}_ns, size_hist_{4k,32k,128k,large}, lba_0 … lba_63. u2q는 글로벌(같은 인터벌 내 모든 행 동일). c2a/a2u는 op별이며 read_ahead/discard는 libaio 경로 없어 0.
 
 ## Build / Run
 
 ```bash
-# 빌드
-cd ebpf
-make            # vmlinux.h 생성 → BPF obj 컴파일 → skeleton 생성 → io_trace 빌드
-make clean
+# 빌드 (프로젝트 어디서든)
+make -C monitoring/collectors/ebpf_io/src         # vmlinux.h → BPF obj → skeleton → io_trace
+make -C monitoring/collectors/ebpf_io/src clean
 
 # 단독 실행 (raw JSON을 stdout에 흘림)
-sudo ./io_trace -m libaio -i 1
+sudo monitoring/collectors/ebpf_io/src/io_trace -m libaio -i 1
 
-# 워크로드와 함께 실행 (권장 경로)
-sudo python3 io_profiler.py -m generic -i 1 -c "fio --name=test --filename=/dev/nvme0n1 ..."
-sudo python3 io_profiler.py -m libaio  -i 0 -f ./fio.sh
+# 워크로드와 함께 실행 (Session 밖 standalone 경로)
+python3 monitoring/collectors/ebpf_io/collector.py -m generic -i 1 -c "fio --name=t --filename=/dev/nvme0n1 ..."
+python3 monitoring/collectors/ebpf_io/collector.py -m libaio  -i 0 -f src/fio.sh
+
+# 보통은 pmon.py가 EbpfIoCollector를 통해 구동 (권장)
+./pmon.py monitor --fio "fio ..." --ebpf on
 ```
 
 옵션:
@@ -181,9 +187,9 @@ sudo python3 io_profiler.py -m libaio  -i 0 -f ./fio.sh
 - **iouring 모드 미구현** — argparse `choices`에는 있고 generic으로 fall-through. `io_uring_enter`/`io_uring_complete`에 해당하는 tracepoint/probe attach가 추가되어야 함.
 - **PERCPU_HASH max_entries=256** — 디바이스 수 상한. 일반 시스템에선 충분하지만 멀티-경로/멀티-디스크 환경에서 한계 가능.
 - **루프 unroll `#pragma unroll for (i=0; i<256; i++)`** — `io_getevents` 결과 256개까지만 처리. nr > 256인 거대한 batch는 일부 누락.
-- ~~**`opt_interval`이 1초 미만이 안 됨**~~ — `io_trace.c` 메인 루프가 이제 `nanosleep` + float `opt_interval` 사용. `-i 0.5` 등 sub-second 가능 (최소 50ms로 clamp). `io_profiler.py`의 `-i` 도 float. **단** SystemMonitor의 nvidia-smi dmon은 1초 미만 인터벌 지원 안 함 → `int(max(1, interval))`로 clamp되어 GPU 메트릭만 1초 주기 유지.
+- ~~**`opt_interval`이 1초 미만이 안 됨**~~ — `io_trace.c` 메인 루프가 이제 `nanosleep` + float `opt_interval` 사용. `-i 0.5` 등 sub-second 가능 (최소 50ms로 clamp). `collector.py`의 `-i` 도 float. **단** SystemMonitor의 nvidia-smi dmon은 1초 미만 인터벌 지원 안 함 → `int(max(1, interval))`로 clamp되어 GPU 메트릭만 1초 주기 유지.
 - **CSV는 append 모드** — 같은 디렉터리에서 재실행하면 `SESSION_ID`가 달라져 새 파일이 생기지만, 디바이스 이름이 충돌하면 같은 파일에 이어붙는다. 의도된 동작인지 검토.
-- **`sample.log`, `sample.txt`, `io_trace.bpf.o`, `io_trace.skel.h`, `io_trace`(바이너리)** — 빌드/실험 산출물. `.gitignore`에 `ebpf/io_trace`, `*.o`는 들어 있지만 skel.h, sample.* 는 추적 중. 새 워크플로 추가 시 정리 여부 결정.
+- **`sample.txt`, `io_trace.bpf.o`, `io_trace.skel.h`, `io_trace`(바이너리)** — 빌드/실험 산출물. `.gitignore`에 `monitoring/collectors/ebpf_io/src/io_trace`, `*.o`는 들어 있지만 skel.h, sample.txt는 추적 중. 새 워크플로 추가 시 정리 여부 결정.
 - **`vmlinux.h`가 4MB 가까이 됨** — 시스템 커널 BTF 덤프. 다른 커널/머신에서 빌드하려면 `make vmlinux.h`로 재생성 필요.
 - **fio.sh의 워크로드** — 현재 Seq Write/Read 1M만 활성, Random 4K는 주석 처리. 테스트 시나리오 바꿀 일 잦으니 인자화 고려.
 
@@ -192,7 +198,7 @@ sudo python3 io_profiler.py -m libaio  -i 0 -f ./fio.sh
 | 하고 싶은 일 | 손대야 할 곳 |
 | --- | --- |
 | 새 페이즈/지연 추가 (예: scheduler 큐 진입) | `io_trace.h`의 struct → `io_trace.bpf.c`에 hook 추가 → maps에 누적 → `print_json_report`에 필드 추가 → Python `phase_stats`/CSV 컬럼 추가 |
-| 새 ioengine 지원 (iouring 등) | `io_trace.bpf.c`에 해당 syscall tracepoint 추가 → `opt_trace_*` rodata 플래그 패턴 따라가기 → `io_trace.c`의 mode 분기에 autoattach 토글 추가 → `io_profiler.py`의 `choices`와 모드 분기 |
-| 출력 포맷 추가 (예: Prometheus, parquet) | `io_profiler.py::parse_and_store_metrics`/`print_final_summary`만 건드리면 됨 — JSON 컨트랙트는 유지 |
+| 새 ioengine 지원 (iouring 등) | `io_trace.bpf.c`에 해당 syscall tracepoint 추가 → `opt_trace_*` rodata 플래그 패턴 따라가기 → `io_trace.c`의 mode 분기에 autoattach 토글 추가 → `collector.py`의 `choices`와 모드 분기 |
+| 출력 포맷 추가 (예: Prometheus, parquet) | `collector.py::parse_and_store_metrics`/`print_final_summary`만 건드리면 됨 — JSON 컨트랙트는 유지 |
 | 새 메트릭 (예: p99 latency) | BPF 단에서 히스토그램 추가 (현재는 mean/min/max만 있음). `lat_stats`에 bucket array 추가하는 게 표준 패턴 |
-| LBA 해상도 변경 | `io_trace.h::LBA_BUCKETS` → `io_profiler.py`의 `lba_{i}` 컬럼 생성 루프 및 `+ [f"lba_{i}" for i in range(64)]` 동기화 |
+| LBA 해상도 변경 | `io_trace.h::LBA_BUCKETS` → `collector.py`의 `lba_{i}` 컬럼 생성 루프 및 `+ [f"lba_{i}" for i in range(64)]` 동기화 |

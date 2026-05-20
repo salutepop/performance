@@ -164,7 +164,7 @@ def build_summary(session_dir, sid):
 
 def main(argv=None):
     p = argparse.ArgumentParser(description="Flatten session artifacts into a single JSON summary")
-    p.add_argument("--session-dir", default="ebpf/csv_results")
+    p.add_argument("--session-dir", default="results")
     p.add_argument("--session-id", default=None)
     p.add_argument("-o", "--output", default=None)
     args = p.parse_args(argv)

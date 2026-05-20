@@ -272,6 +272,13 @@ def cmd_debug(args):
             devs = [os.path.basename(p).split("_")[0] for p in io_csvs]
             print(f"  [OK] eBPF csv: {len(io_csvs)} device(s) — {', '.join(devs)}")
 
+        analysis = os.path.join(session_dir, f"ebpf_analysis_{sid}.txt")
+        if not os.path.isfile(analysis) or os.path.getsize(analysis) == 0:
+            failures.append("no eBPF analysis text (full-stack breakdown missing)")
+        else:
+            print(f"  [OK] eBPF analysis: ebpf_analysis_{sid}.txt "
+                  f"({os.path.getsize(analysis)} bytes)")
+
     # every report format
     expected_reports = {
         "md": f"report_{sid}.md",

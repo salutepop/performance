@@ -20,8 +20,7 @@ Usage:
   ./pmon.py monitor --tc all -q           # run every test case, quick mode
   ./pmon.py report                        # most recent session
   ./pmon.py diff --baseline SID1 --candidate SID2
-  ./pmon.py debug                         # quick self-test, no sudo
-  ./pmon.py debug --with-fio --with-ebpf  # full E2E
+  ./pmon.py debug                         # 4-phase fio + monitoring + all reports
 """
 
 import argparse
@@ -177,63 +176,60 @@ def _generate_reports(session_dir, session_id, fmt):
 
 # ---------------------------------------------------------------------------- debug
 
+# debug exercises the full pipeline with the same 4-phase workload as tc00_smoke:
+# seq write -> seq read -> rand write -> rand read.
+_DEBUG_WORKLOADS = [
+    {"name": "seq_write_128k", "rw": "write",     "bs": "128k", "iodepth": 32, "numjobs": 1, "size": "1G"},
+    {"name": "seq_read_128k",  "rw": "read",      "bs": "128k", "iodepth": 32, "numjobs": 1, "size": "1G"},
+    {"name": "rand_write_4k",  "rw": "randwrite", "bs": "4k",   "iodepth": 32, "numjobs": 8, "size": "1G"},
+    {"name": "rand_read_4k",   "rw": "randread",  "bs": "4k",   "iodepth": 32, "numjobs": 8, "size": "1G"},
+]
+
+
 def cmd_debug(args):
-    """Developer self-test. Default: 2s monitor-only smoke (no sudo)."""
-    from monitoring import Session, ebpf_available
+    """Developer self-test: 4-phase fio workload + monitoring + every report.
 
-    if args.full:
-        args.with_ebpf = True
-        args.with_fio = True
+    Creates a test file, runs seq write -> seq read -> rand write -> rand read
+    (each `--duration` seconds) inside a monitored Session, renders all report
+    formats, then validates artifacts. Exit code: 0 PASS / 1 FAIL.
+    """
+    from monitoring import Session, resolve_ebpf_mode
+    from workloads.fio_runner import run_fio_job
 
-    if args.with_ebpf and not ebpf_available():
-        print("[debug] --with-ebpf requested but io_trace not built; "
-              "run `make -C monitoring/collectors/ebpf_io/src`", file=sys.stderr)
-        return 2
-    if args.with_fio and not os.path.isfile(SMOKE_IMG):
-        print(f"[debug] --with-fio requested but {SMOKE_IMG} missing; "
-              f"create a 1GiB ext4 image there first", file=sys.stderr)
-        return 2
-
-    sys_info = _discover_sys_info()
-    label_parts = ["debug"]
-    if args.with_ebpf:
-        label_parts.append("ebpf")
-    if args.with_fio:
-        label_parts.append("fio")
-    session_dir = _build_session_dir("_".join(label_parts))
-
-    ebpf_mode = "libaio" if args.with_ebpf else "off"
     duration = max(1, int(args.duration))
 
-    print(f"[debug] session -> {session_dir}")
-    print(f"[debug] config: duration={duration}s, ebpf={ebpf_mode}, "
-          f"fio={'on' if args.with_fio else 'off'}")
+    # Ensure the test file exists (user-owned 1 GiB, so a sudo fio run won't
+    # leave a root-owned file behind).
+    if not os.path.isfile(SMOKE_IMG):
+        os.makedirs(os.path.dirname(SMOKE_IMG), exist_ok=True)
+        with open(SMOKE_IMG, "wb") as f:
+            f.truncate(1 * 1024 * 1024 * 1024)
+        print(f"[debug] created test file {SMOKE_IMG} (1 GiB)")
 
-    with Session(
-        session_dir,
-        sys_info,
-        ebpf_mode=ebpf_mode,
-        ebpf_interval=1.0,
-        reports="md",  # minimal report to verify the pipeline
-    ):
-        if args.with_fio:
-            fio_cmd = (
-                f"sudo fio --name=debug --filename={SMOKE_IMG} "
-                f"--rw=randread --bs=4k --iodepth=4 --size=64M "
-                f"--runtime={duration} --time_based=1 --direct=1 --ioengine=libaio "
-                f"--output-format=json --output={session_dir}/fio_debug.json "
-                f"--group_reporting=1"
-            )
-            rc = subprocess.call(fio_cmd, shell=True)
-            if rc != 0:
-                print(f"[debug] fio exited rc={rc} (continuing to artifact check)")
-        else:
-            time.sleep(duration)
+    sys_info = _discover_sys_info()
+    session_dir = _build_session_dir("debug")
+    sid = os.path.basename(session_dir)
+    ebpf_mode = resolve_ebpf_mode("auto", "libaio")
+
+    print(f"[debug] session -> {session_dir}")
+    print(f"[debug] config: 4 workloads x {duration}s, ebpf={ebpf_mode}, reports=all")
+
+    fio_done = []
+    with Session(session_dir, sys_info, ebpf_mode=ebpf_mode,
+                 ebpf_interval=1.0, reports="all"):
+        for wl in _DEBUG_WORKLOADS:
+            result = run_fio_job(disk=SMOKE_IMG, workload=wl,
+                                 fio_path="fio", runtime_override=duration)
+            if result:
+                with open(os.path.join(session_dir, f"fio_{wl['name']}.json"), "w") as f:
+                    json.dump(result, f, indent=4)
+                fio_done.append(wl["name"])
+            else:
+                print(f"[debug] workload {wl['name']} produced no result")
 
     # ----- artifact checks
     print("\n[debug] checking artifacts...")
     failures = []
-    sid = os.path.basename(session_dir)
 
     topo = os.path.join(session_dir, f"topology_{sid}.json")
     if not os.path.isfile(topo):
@@ -256,24 +252,16 @@ def cmd_debug(args):
         with open(csv_path) as f:
             rows = sum(1 for _ in f) - 1  # minus header
         if rows < 1:
-            failures.append(f"system_metrics_{sid}.csv has {rows} data rows (expected >=1)")
+            failures.append(f"system_metrics_{sid}.csv has {rows} data rows")
         print(f"  [OK] system_metrics: {rows} rows")
 
-    md_path = glob.glob(os.path.join(session_dir, "report_*.md"))
-    if not md_path:
-        failures.append("no report_*.md generated")
+    if len(fio_done) != len(_DEBUG_WORKLOADS):
+        missing = [w["name"] for w in _DEBUG_WORKLOADS if w["name"] not in fio_done]
+        failures.append(f"fio workloads missing output: {', '.join(missing)}")
     else:
-        print(f"  [OK] report: {os.path.basename(md_path[0])}")
+        print(f"  [OK] fio workloads: {len(fio_done)}/4 — {', '.join(fio_done)}")
 
-    if args.with_fio:
-        fio_json = os.path.join(session_dir, "fio_debug.json")
-        if not os.path.isfile(fio_json):
-            failures.append("missing fio_debug.json")
-        else:
-            print(f"  [OK] fio output: fio_debug.json")
-
-    if args.with_ebpf:
-        # io_profiler writes <device>_<sid>.csv per traced device (e.g. nvme0n1_<sid>.csv)
+    if ebpf_mode != "off":
         io_csvs = [
             p for p in glob.glob(os.path.join(session_dir, f"*_{sid}.csv"))
             if not os.path.basename(p).startswith("system_metrics_")
@@ -283,6 +271,21 @@ def cmd_debug(args):
         else:
             devs = [os.path.basename(p).split("_")[0] for p in io_csvs]
             print(f"  [OK] eBPF csv: {len(io_csvs)} device(s) — {', '.join(devs)}")
+
+    # every report format
+    expected_reports = {
+        "html": f"report_{sid}.html",
+        "md": f"report_{sid}.md",
+        "json": f"summary_{sid}.json",
+        "png": f"report_png_{sid}.md",
+        "pdf": f"report_{sid}.pdf",
+    }
+    found = [fmt for fmt, name in expected_reports.items()
+             if os.path.isfile(os.path.join(session_dir, name))]
+    missing = [fmt for fmt in expected_reports if fmt not in found]
+    if missing:
+        failures.append(f"reports missing: {', '.join(missing)}")
+    print(f"  [{'OK' if not missing else '!!'}] reports: {len(found)}/5 — {', '.join(found)}")
 
     print()
     if failures:
@@ -364,15 +367,10 @@ def main(argv=None):
     ps.add_argument("-o", "--output", default=None)
     ps.set_defaults(func=cmd_summary)
 
-    pdbg = sub.add_parser("debug", help="developer self-test for code-change verification")
-    pdbg.add_argument("--duration", type=int, default=2,
-                      help="seconds the smoke window observes (default 2)")
-    pdbg.add_argument("--with-ebpf", action="store_true",
-                      help="include eBPF I/O tracer (needs sudo + io_trace built)")
-    pdbg.add_argument("--with-fio", action="store_true",
-                      help="run a small fio against .smoke/smoke.img (needs sudo)")
-    pdbg.add_argument("--full", action="store_true",
-                      help="enable both --with-ebpf and --with-fio")
+    pdbg = sub.add_parser("debug",
+                          help="developer self-test: 4-phase fio + monitoring + all reports")
+    pdbg.add_argument("--duration", type=int, default=3,
+                      help="seconds per workload phase (default 3)")
     pdbg.set_defaults(func=cmd_debug)
 
     # Deprecated alias for backward compatibility.

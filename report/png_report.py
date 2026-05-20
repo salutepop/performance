@@ -28,6 +28,7 @@ import numpy as np
 
 from .datasource import (
     _discover_session, _load_topology, _load_csv, _dev_name,
+    _timestamp_window, _crop_rows,
     _build_device_series, _build_system_series, _build_lba_heatmap,
     _OP_COLORS, _PALETTE,
 )
@@ -440,9 +441,12 @@ _READ_OPS = {"read", "read_ahead"}
 _WRITE_OPS = {"write", "discard"}
 
 
-def _build_size_timeline(header, rows):
+def _build_size_timeline(header, rows, timeline=None):
     """device CSV -> (labels, read_series, write_series), each [[4k],[32k],
     [128k],[large]] per-interval counts.
+
+    timeline: 주입된 마스터 타임라인. 주면 그 위로 reindex (결손 인터벌은 0),
+    없으면 device CSV 자체 timestamp 순서를 쓴다.
 
     size_hist_* columns are cumulative BPF counters; delta consecutive samples
     per op, then sum the deltas per timestamp into the read vs write family."""
@@ -477,9 +481,10 @@ def _build_size_timeline(header, rows):
         if tgt is not None:
             for b in range(4):
                 tgt[ts][b] += delta[b]
-    read_series = [[read_ts[t][b] for t in labels] for b in range(4)]
-    write_series = [[write_ts[t][b] for t in labels] for b in range(4)]
-    return labels, read_series, write_series
+    out = timeline if timeline is not None else labels
+    read_series = [[read_ts.get(t, (0, 0, 0, 0))[b] for t in out] for b in range(4)]
+    write_series = [[write_ts.get(t, (0, 0, 0, 0))[b] for t in out] for b in range(4)]
+    return out, read_series, write_series
 
 
 def _save_io_timeline(path, dname, labels, read_series, write_series,
@@ -617,6 +622,22 @@ def build_report(session_dir, sid):
         if not os.path.basename(p).startswith("system_metrics_")
     )
 
+    # SystemMonitor opens a beat before the eBPF tracer subprocess, and device
+    # CSVs skip idle intervals (no I/O → row omitted) — both shift index-based
+    # time-series charts out of alignment. Crop the system rows to the device
+    # window, then use the cropped (gap-free, one-sample-per-interval) system
+    # timestamps as the master timeline every per-device chart reindexes onto.
+    timeline = None
+    if sys_h and sys_r and device_csvs:
+        win_t0, win_t1 = _timestamp_window(device_csvs)
+        if win_t0 is not None:
+            sys_r = _crop_rows(sys_h, sys_r, win_t0, win_t1)
+        try:
+            _ti = sys_h.index("timestamp")
+            timeline = [r[_ti] for r in sys_r if _ti < len(r)] or None
+        except ValueError:
+            timeline = None
+
     figs_dir = os.path.join(session_dir, f"figs_{sid}")
     os.makedirs(figs_dir, exist_ok=True)
 
@@ -686,7 +707,7 @@ def build_report(session_dir, sid):
         if not h:
             continue
         dname = _dev_name(dpath)
-        labels, series = _build_device_series(h, r)
+        labels, series = _build_device_series(h, r, timeline)
         if not labels or not series:
             continue
         safe = _safe_filename(dname)
@@ -722,9 +743,9 @@ def build_report(session_dir, sid):
                 fig_refs[f"{safe}_lat"] = os.path.relpath(path, session_dir)
 
         # I/O size mix (IOPS) + LBA access region over a shared time axis
-        s_labels, s_read, s_write = _build_size_timeline(h, r)
-        lba_r = _build_lba_heatmap(h, r, _READ_OPS)
-        lba_w = _build_lba_heatmap(h, r, _WRITE_OPS)
+        s_labels, s_read, s_write = _build_size_timeline(h, r, timeline)
+        lba_r = _build_lba_heatmap(h, r, _READ_OPS, timeline)
+        lba_w = _build_lba_heatmap(h, r, _WRITE_OPS, timeline)
         path = os.path.join(figs_dir, f"{safe}_iotime.png")
         if _save_io_timeline(path, dname, s_labels, s_read, s_write,
                              lba_r, lba_w):

@@ -56,6 +56,40 @@ def _load_csv(path):
         rows = list(r)
     return header, rows
 
+
+def _timestamp_window(csv_paths):
+    """주어진 CSV들의 `timestamp` 컬럼을 통틀어 [first, last] 윈도우 반환.
+
+    timestamp는 "HH:MM:SS" 문자열이라 세션 범위 안에서는 lexical min/max가
+    곧 시간순. 행이 있는 CSV가 하나도 없으면 (None, None)."""
+    firsts, lasts = [], []
+    for p in csv_paths:
+        h, r = _load_csv(p)
+        if not h or not r:
+            continue
+        try:
+            ti = h.index("timestamp")
+        except ValueError:
+            continue
+        ts = [row[ti] for row in r if ti < len(row) and row[ti]]
+        if ts:
+            firsts.append(min(ts))
+            lasts.append(max(ts))
+    if not firsts:
+        return None, None
+    return min(firsts), max(lasts)
+
+
+def _crop_rows(header, rows, t0, t1):
+    """`timestamp`가 [t0, t1] 범위에 드는 행만 남긴다."""
+    if not header or rows is None or t0 is None:
+        return rows
+    try:
+        ti = header.index("timestamp")
+    except ValueError:
+        return rows
+    return [r for r in rows if ti < len(r) and t0 <= r[ti] <= t1]
+
 _OP_COLORS = {
     "read": "#0a84ff", "write": "#ff453a",
     "read_ahead": "#30d158", "flush": "#bf5af2", "discard": "#8e8e93",
@@ -105,8 +139,11 @@ def _build_system_series(header, rows):
     return {"labels": labels, "cpu": cpu_series, "irq": irq_series, "mem": mem_series, "gpu": gpu_series}
 
 
-def _build_device_series(header, rows):
-    """device CSV → (labels[], series{op:{iops,bw,d2c,p50,p99}}). 모든 op timestamp 통합·정렬."""
+def _build_device_series(header, rows, timeline=None):
+    """device CSV → (labels[], series{op:{iops,bw,d2c,p50,p99}}). 모든 op timestamp 통합·정렬.
+
+    timeline: 주입된 마스터 타임라인. 주면 그 위로 reindex (결손 인터벌은 None),
+    없으면 device CSV 자체 timestamp 순서를 쓴다."""
     if not header or not rows:
         return [], {}
     try:
@@ -142,22 +179,25 @@ def _build_device_series(header, rows):
             "p50":  _f(row[p50_i])  if 0 <= p50_i < len(row) else None,
             "p99":  _f(row[p99_i])  if 0 <= p99_i < len(row) else None,
         }
+    out = timeline if timeline is not None else labels
     series = {}
     for op, by_ts in op_data.items():
         series[op] = {
-            "iops": [by_ts.get(t, {}).get("iops") for t in labels],
-            "bw":   [by_ts.get(t, {}).get("bw")   for t in labels],
-            "d2c":  [by_ts.get(t, {}).get("d2c")  for t in labels],
-            "p50":  [by_ts.get(t, {}).get("p50")  for t in labels],
-            "p99":  [by_ts.get(t, {}).get("p99")  for t in labels],
+            "iops": [by_ts.get(t, {}).get("iops") for t in out],
+            "bw":   [by_ts.get(t, {}).get("bw")   for t in out],
+            "d2c":  [by_ts.get(t, {}).get("d2c")  for t in out],
+            "p50":  [by_ts.get(t, {}).get("p50")  for t in out],
+            "p99":  [by_ts.get(t, {}).get("p99")  for t in out],
         }
-    return labels, series
+    return out, series
 
 
-def _build_lba_heatmap(header, rows, op_filter=None):
+def _build_lba_heatmap(header, rows, op_filter=None, timeline=None):
     """device CSV → {timestamps:[], buckets: [[delta per bucket] per ts]}.
 
     op_filter: set of operation names to include (None = all ops).
+    timeline: 주입된 마스터 타임라인. 주면 그 위로 reindex (결손 인터벌은 0),
+    없으면 device CSV 자체 timestamp 순서를 쓴다.
     lba_N 컬럼은 op별 누적값 — op별로 인터벌 delta를 구한 뒤 timestamp 단위로
     합산한다 (delta-then-sum). op이 인터벌마다 등장/소멸해도 안전.
     """
@@ -206,4 +246,6 @@ def _build_lba_heatmap(header, rows, op_filter=None):
             per_ts_delta[ts][b] += max(0, cur[b] - p[b])
         prev[op] = cur
 
-    return {"timestamps": ts_order, "buckets": [per_ts_delta[t] for t in ts_order]}
+    out = timeline if timeline is not None else ts_order
+    return {"timestamps": out,
+            "buckets": [per_ts_delta.get(t, [0] * nb) for t in out]}

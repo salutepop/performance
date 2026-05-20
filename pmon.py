@@ -15,7 +15,9 @@ Subcommands:
 Usage:
   ./pmon.py monitor --duration 30
   ./pmon.py monitor --fio "fio --name=t --filename=/tmp/x ..." --label adhoc
-  ./pmon.py monitor --script ebpf/fio.sh --ebpf on
+  ./pmon.py monitor --script monitoring/collectors/ebpf_io/src/fio.sh --ebpf on
+  ./pmon.py monitor --tc tc03             # run one test case
+  ./pmon.py monitor --tc all -q           # run every test case, quick mode
   ./pmon.py report                        # most recent session
   ./pmon.py diff --baseline SID1 --candidate SID2
   ./pmon.py debug                         # quick self-test, no sudo
@@ -71,12 +73,26 @@ def _build_session_dir(label):
 
 def cmd_monitor(args):
     """Run SystemMonitor (+ optional eBPF) for a window. Workload is optional."""
+    # --tc delegates to the test-case runner, which manages its own sessions.
+    if args.tc is not None:
+        from workloads.tc_runner import run_test_cases
+        return run_test_cases(
+            tc_filter=args.tc,
+            quick=args.quick,
+            report_formats=args.report,
+            ebpf_toggle=args.ebpf,
+            ebpf_mode=args.ebpf_mode,
+            ebpf_interval=args.ebpf_interval,
+        )
+
     inputs = sum(bool(x) for x in (args.duration, args.fio, args.script))
     if inputs == 0:
-        print("[pmon] one of --duration / --fio / --script is required", file=sys.stderr)
+        print("[pmon] one of --duration / --fio / --script / --tc is required",
+              file=sys.stderr)
         return 2
     if inputs > 1:
-        print("[pmon] --duration / --fio / --script are mutually exclusive", file=sys.stderr)
+        print("[pmon] --duration / --fio / --script / --tc are mutually exclusive",
+              file=sys.stderr)
         return 2
 
     from monitoring import Session, resolve_ebpf_mode
@@ -285,6 +301,8 @@ def cmd_run(args):
     print("[pmon] 'run' is deprecated; use 'monitor' instead.", file=sys.stderr)
     # Map old --mode to new --ebpf-mode; old run implied eBPF on.
     args.duration = None
+    args.tc = None
+    args.quick = False
     args.label = "adhoc"
     args.ebpf = "on"
     args.ebpf_mode = args.mode
@@ -311,9 +329,14 @@ def main(argv=None):
     pm.add_argument("--duration", type=int, default=None,
                     help="seconds to observe with no workload")
     pm.add_argument("--fio", default=None,
-                    help='fio command line (quoted). Mutually exclusive with --script/--duration')
+                    help="fio command line (quoted)")
     pm.add_argument("--script", default=None,
                     help="path to a shell script that issues the workload")
+    pm.add_argument("--tc", default=None,
+                    help="run test case(s) from workloads/cases/: a name substring "
+                         "(e.g. tc03) or 'all'. Mutually exclusive with --duration/--fio/--script")
+    pm.add_argument("-q", "--quick", action="store_true",
+                    help="quick mode: force every TC workload to ~1s (with --tc)")
     pm.add_argument("--label", default=None,
                     help="label appended to the session directory name")
     pm.add_argument("--report", default="all",

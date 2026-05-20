@@ -1,5 +1,5 @@
 """
-세션 산출물 → Markdown 요약 리포트. HTML 리포트의 자매 도구.
+세션 산출물 → Markdown 요약 리포트.
 
 표 + 핵심 숫자(총 IOPS, peak BW, latency 평균/피크, GPU peak, IRQ 분포)와
 auto-extracted "Top findings" (sq/cq divergence, iowait peak, GPU 활동 등).
@@ -14,7 +14,7 @@ import os
 import sys
 from datetime import datetime
 
-from .html_report import _discover_session, _load_topology, _load_csv
+from .datasource import _discover_session, _load_topology, _load_csv
 
 
 def _col_index(header, name):

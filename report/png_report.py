@@ -1,7 +1,7 @@
 """
 정적 PNG + Markdown 리포트 — 오프라인/GUI 없는 서버 환경용.
 
-HTML 리포트와 같은 데이터에서 차트는 matplotlib로 PNG 파일로 저장,
+세션 산출물에서 차트를 matplotlib로 PNG 파일로 저장,
 markdown이 ![](figs_<sid>/foo.png) 형태로 참조. CDN 의존 없음, JS 실행 없음.
 
 CLI:
@@ -26,8 +26,8 @@ matplotlib.use("Agg")  # headless backend - no GUI required
 import matplotlib.pyplot as plt
 import numpy as np
 
-from .html_report import (
-    _discover_session, _load_topology, _load_csv,
+from .datasource import (
+    _discover_session, _load_topology, _load_csv, _dev_name,
     _build_device_series, _build_system_series, _build_lba_heatmap,
     _OP_COLORS, _PALETTE,
 )
@@ -52,17 +52,6 @@ plt.rcParams.update({
 
 def _safe_filename(s):
     return re.sub(r"[^a-zA-Z0-9._-]", "_", s)
-
-
-def _dev_name(csv_path):
-    """Device CSV is `{device}_{sid}.csv` -> return the bare `{device}`.
-
-    A block device name never contains '_' (nvme0n1, sda, ...), and the sid
-    follows the first '_', so split on it. This is robust to the session-id
-    format (it may carry a label like `..._monitor_debug`), unlike the old
-    `_\\d{8}_\\d{6}.csv$` regex which assumed a bare timestamp suffix.
-    """
-    return os.path.basename(csv_path).split("_", 1)[0]
 
 
 def _xtick_thin(ax, labels, max_ticks=12):
@@ -427,7 +416,7 @@ def build_report(session_dir, sid):
             lines.append(f"- {f}")
         lines.append("")
 
-    # Summary block (HTML 카드와 동일 8개 숫자)
+    # Summary block (8개 핵심 숫자)
     lines += ["## Summary", ""]
     total_read = 0.0; total_write = 0.0; peak_bw = 0.0; peak_d2c = 0.0
     sqcq_avgs = []

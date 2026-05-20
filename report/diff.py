@@ -16,7 +16,7 @@ import re
 import sys
 from datetime import datetime
 
-from .html_report import _load_csv
+from .datasource import _load_csv
 from .md_report import _device_aggregates, _system_aggregates, _md_table
 
 

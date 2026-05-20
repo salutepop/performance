@@ -136,7 +136,7 @@ def _discover_cases(tc_filter, all_tcs):
 
 
 def run_test_cases(tc_filter=None, all_tcs=False, quick=False,
-                   report_formats="html,md,json,png,pdf",
+                   report_formats="md,json,png,pdf",
                    ebpf_toggle="auto", ebpf_mode="libaio", ebpf_interval=1.0):
     """Discover and run test cases inside monitoring Sessions.
 

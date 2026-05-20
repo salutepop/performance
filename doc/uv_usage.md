@@ -165,13 +165,13 @@ uv python install 3.12
 
 ## 9. 자주 쓰는 워크플로 예
 
-**경우 A**: 새 SSD 도착, 기본 성능 측정 + 브라우저로 리포트 확인
+**경우 A**: 새 SSD 도착, 기본 성능 측정 + 리포트 확인
 ```bash
 uv sync
 uv run ./pmon.py monitor --fio "fio --name=baseline --filename=/dev/nvme1n1 \
     --rw=randread --bs=4k --iodepth=128 --numjobs=4 --runtime=60 \
     --time_based --direct=1 --ioengine=libaio --group_reporting"
-xdg-open results/report_*.html
+xdg-open results/*/report_*.pdf      # PDF 리포트 (차트 포함)
 ```
 
 **경우 B**: 변경 전후 성능 비교
@@ -211,16 +211,7 @@ uv run python -m workloads.scenarios.pcie_contention
 # analyze 결과로 exit code (pass/fail)
 ```
 
-**경우 E**: HTML 리포트를 PDF 로
-```bash
-LATEST_HTML=$(ls -t results/report_*.html | head -1)
-chromium --headless --no-sandbox \
-    --print-to-pdf=/tmp/report.pdf \
-    "file://$LATEST_HTML"
-# 또는 브라우저에서 열어 Ctrl+P → "PDF로 저장"
-```
-
-**경우 E-2**: 오프라인/GUI 없는 서버 — 정적 PNG + Markdown 리포트
+**경우 E**: 오프라인/GUI 없는 서버 — 정적 PNG + Markdown 리포트
 ```bash
 uv run python -m report.png_report
 # 출력:

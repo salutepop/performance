@@ -46,7 +46,7 @@ import re
 import sys
 from datetime import datetime
 
-from .html_report import _discover_session, _load_topology, _load_csv
+from .datasource import _discover_session, _load_topology, _load_csv
 from .md_report import _device_aggregates, _system_aggregates
 
 

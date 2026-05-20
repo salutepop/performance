@@ -18,7 +18,7 @@
   - `tc_runner.py`: test case 발견/실행.
   - `cases/`: test case 본체 (`.json` 정적 워크로드 / `.py` 동적 시나리오).
   - `scenarios/`: self-checking Scenario 프레임워크.
-- **`report/`**: 세션 산출물 → HTML/MD/JSON/PNG/PDF 리포트.
+- **`report/`**: 세션 산출물 → MD/JSON/PNG/PDF 리포트.
 - **`config/`**: 시스템 설정 (`system.json`).
 - **`results/`**: 세션 산출물 저장소.
 

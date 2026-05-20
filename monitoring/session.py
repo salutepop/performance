@@ -77,7 +77,7 @@ class Session:
     ebpf_interval / monitor_interval : float
         Polling intervals, used only when collectors is None.
     reports : str
-        "none", "all", or a comma-list of html,md,json,png,pdf.
+        "none", "all", or a comma-list of md,json,png,pdf.
     verbose : bool
         Print lifecycle messages.
     """

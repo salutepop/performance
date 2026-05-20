@@ -30,7 +30,7 @@ class Scenario:
     name: str = "scenario"
     mode: str = "libaio"       # generic / libaio / iouring
     interval: float = 1.0
-    report_formats: str = "all"  # auto report formats (all/html/md/json/none)
+    report_formats: str = "all"  # auto report formats (all/md/json/png/pdf/none)
 
     def fio_cmd(self) -> str:
         """Return the fio command string (fio --name=... --filename=... ...)."""

@@ -164,7 +164,7 @@ def cmd_summary(args):
 
 
 def _generate_reports(session_dir, session_id, fmt):
-    """fmt: comma-separated subset of html,md,json,png,pdf, or 'all'/'none'."""
+    """fmt: comma-separated subset of md,json,png,pdf, or 'all'/'none'."""
     if fmt == "none":
         return True
     from report.__main__ import main as report_main
@@ -274,7 +274,6 @@ def cmd_debug(args):
 
     # every report format
     expected_reports = {
-        "html": f"report_{sid}.html",
         "md": f"report_{sid}.md",
         "json": f"summary_{sid}.json",
         "png": f"report_png_{sid}.md",
@@ -285,7 +284,8 @@ def cmd_debug(args):
     missing = [fmt for fmt in expected_reports if fmt not in found]
     if missing:
         failures.append(f"reports missing: {', '.join(missing)}")
-    print(f"  [{'OK' if not missing else '!!'}] reports: {len(found)}/5 — {', '.join(found)}")
+    print(f"  [{'OK' if not missing else '!!'}] reports: "
+          f"{len(found)}/{len(expected_reports)} — {', '.join(found)}")
 
     print()
     if failures:
@@ -343,7 +343,7 @@ def main(argv=None):
     pm.add_argument("--label", default=None,
                     help="label appended to the session directory name")
     pm.add_argument("--report", default="all",
-                    help="report formats to render: html,md,json,png,pdf comma-list or 'all'/'none' (default all)")
+                    help="report formats to render: md,json,png,pdf comma-list or 'all'/'none' (default all)")
     _add_ebpf_args(pm)
     pm.set_defaults(func=cmd_monitor)
 

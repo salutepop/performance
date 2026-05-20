@@ -69,7 +69,7 @@ performance/
     tc_runner.py                       #   run_test_cases — TC 발견/실행 (pmon monitor --tc의 본체)
     cases/                             #   test case 본체 (tcXX_*.json / tcXX_*.py)
     scenarios/                         #   self-checking Scenario 프레임워크 (별개)
-  report/                              # 세션 산출물 → HTML/MD/JSON/PNG/PDF 리포트
+  report/                              # 세션 산출물 → MD/JSON/PNG/PDF 리포트
   config/                              # system.json (target_disks, fio_path 등)
   doc/                                 # 문서
   results/                             # 세션 산출물 저장소
@@ -157,11 +157,12 @@ python3 monitoring/collectors/ebpf_io/collector.py -m libaio -i 1 -c "fio ..."
 
 세션 산출물(`topology_*.json`, `system_metrics_*.csv`, `<device>_*.csv`)을 자기완결 리포트로 변환. session-id 생략 시 가장 최근 `topology_*.json` 자동 선택. Session이 종료 시 자동 호출하지만 `python3 -m report.X`로 단독 호출도 가능.
 
-- **HTML** (`report.html_report`) — topology 요약 + CSV 테이블 + 디바이스별 시계열 차트 3개. Chart.js CDN 로드 — 오프라인에서는 차트 자리에 안내문, 테이블은 정상.
 - **Markdown** (`report.md_report`) — Top findings + Topology/Device/System aggregate 요약 (~1.5KB 포터블 텍스트).
-- **Session diff** (`report.diff`) — 두 세션 aggregate 비교. 변동 ≥5% ⚠, ≥20% ⛔.
 - **JSON summary** (`report.summary`) — 단일 평탄화 JSON export (`summary_{sid}.json`). 스키마 stable — 컬럼 추가만 허용.
-- **PNG + Markdown** (`report.png_report`) / **PDF** (`report.pdf_report`) — matplotlib(Agg) 기반, 오프라인/GUI 없는 서버용.
+- **PNG + Markdown** (`report.png_report`) — matplotlib(Agg)로 차트를 PNG로 렌더, markdown이 참조. 오프라인/GUI 없는 서버용.
+- **PDF** (`report.pdf_report`) — 표지(markdown 구조 렌더) + PNG 차트 페이지를 묶은 단일 PDF.
+- **Session diff** (`report.diff`) — 두 세션 aggregate 비교. 변동 ≥5% ⚠, ≥20% ⛔.
+- 공통 데이터 로딩/시리즈 빌더는 `report.datasource`에 모여 있다 (렌더링 무관 순수 데이터 레이어).
 
 ### Result layout
 
@@ -173,7 +174,7 @@ results/{YYYYMMDD_HHMMSS}_monitor[_{label}]/            # ad-hoc 관측 (pmon mo
   system_metrics_{sid}.csv  # SystemMonitor 1초 주기 누적
   {device}_{sid}.csv        # eBPF I/O 트레이서 (디바이스별)
   fio_{workload}.json       # workload 단위 fio raw JSON (TC만)
-  report_{sid}.{html,md}    # 리포트
+  report_{sid}.md / .pdf    # 리포트 (+ summary_{sid}.json, report_png_{sid}.md, figs_{sid}/)
 ```
 
 Multi-disk 시나리오(`run_all_disks=True`)는 `disk_label="multi_disk"`로 떨어진다.

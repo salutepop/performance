@@ -55,7 +55,7 @@ def _newest_session_dir():
 
 
 def _discover_sys_info():
-    from core.discovery import SystemDiscovery
+    from monitoring import SystemDiscovery
     return SystemDiscovery().discover_all()
 
 
@@ -79,7 +79,7 @@ def cmd_monitor(args):
         print("[pmon] --duration / --fio / --script are mutually exclusive", file=sys.stderr)
         return 2
 
-    from core.session import Session, resolve_ebpf_mode
+    from monitoring import Session, resolve_ebpf_mode
 
     sys_info = _discover_sys_info()
     session_dir = _build_session_dir(args.label)
@@ -163,7 +163,7 @@ def _generate_reports(session_dir, session_id, fmt):
 
 def cmd_debug(args):
     """Developer self-test. Default: 2s monitor-only smoke (no sudo)."""
-    from core.session import Session, ebpf_available
+    from monitoring import Session, ebpf_available
 
     if args.full:
         args.with_ebpf = True

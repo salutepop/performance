@@ -8,7 +8,7 @@ import argparse
 
 from core.runner import run_fio_job
 from core.reporter import ResultReporter
-from core.session import Session, resolve_ebpf_mode
+from monitoring import Session, resolve_ebpf_mode
 
 
 def load_json(file_path):
@@ -200,7 +200,7 @@ def main():
     )
     args = parser.parse_args()
 
-    from core.discovery import SystemDiscovery
+    from monitoring import SystemDiscovery
 
     print("=== Advanced SSD Performance Evaluation Framework ===\n")
 

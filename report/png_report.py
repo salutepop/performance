@@ -102,47 +102,6 @@ def _save_line(path, labels, datasets, title, ylabel, colors=None, styles=None):
     plt.close(fig)
 
 
-def _save_lba_split(path, lba_read, lba_write, dname):
-    """LBA access heatmap, read and write side by side (timestamps x buckets).
-
-    Both panels share a log color scale so read vs write intensity compares
-    directly. A family with no I/O is skipped."""
-    panels = []
-    for lba, fam in [(lba_read, "read"), (lba_write, "write")]:
-        if lba and lba["buckets"] and any(any(r) for r in lba["buckets"]):
-            panels.append((fam, lba))
-    if not panels:
-        return False
-
-    allmax = 0
-    for _, lba in panels:
-        for r in lba["buckets"]:
-            allmax = max(allmax, max(r) if r else 0)
-    vmax = np.log10(allmax + 1) if allmax > 0 else 1.0
-
-    nb = max(len(lba["buckets"][0]) if lba["buckets"] else 0 for _, lba in panels)
-    fig_h = max(3.2, nb * 0.045)
-    fig, axes = plt.subplots(1, len(panels), figsize=(6.0 * len(panels), fig_h),
-                             squeeze=False)
-    im = None
-    for ax, (fam, lba) in zip(axes[0], panels):
-        arr = np.array(lba["buckets"], dtype=float).T  # (buckets, timestamps)
-        im = ax.imshow(np.log10(arr + 1), aspect="auto", origin="lower",
-                       cmap="turbo", interpolation="nearest", vmin=0, vmax=vmax)
-        ax.set_title(fam)
-        ax.set_xlabel("time")
-        ax.set_ylabel("LBA bucket (0 = start of device .. N = end)")
-        bstep = max(1, arr.shape[0] // 8)
-        ax.set_yticks(range(0, arr.shape[0], bstep))
-        _xtick_thin(ax, lba["timestamps"])
-    fig.suptitle(f"{dname} — LBA access heatmap (read vs write, log scale)")
-    fig.colorbar(im, ax=list(axes[0]), label="log10(access count + 1)",
-                 shrink=0.85, pad=0.02)
-    fig.savefig(path)
-    plt.close(fig)
-    return True
-
-
 def _build_correlation_data(sys_header, sys_rows, device_csv_paths):
     """correlation chart 데이터: IOPS(Kiops), BW(MB/s), iowait/sys% per timestamp."""
     if not sys_header or not sys_rows or not device_csv_paths:
@@ -523,35 +482,96 @@ def _build_size_timeline(header, rows):
     return labels, read_series, write_series
 
 
-def _save_size_area(path, labels, read_series, write_series, dname):
-    """Two 100%-stacked areas — I/O size mix over time, read vs write split."""
-    if not labels:
-        return False
-    has_r = any(any(s) for s in read_series)
-    has_w = any(any(s) for s in write_series)
-    if not has_r and not has_w:
-        return False
+def _save_io_timeline(path, dname, labels, read_series, write_series,
+                      lba_read, lba_write):
+    """One figure per device — I/O size mix and LBA access region over a shared
+    time axis. Four rows (read size mix, read LBA heatmap, write size mix,
+    write LBA heatmap), all sharing the x axis, so the size composition and the
+    LBA region hit at each instant line up vertically.
+
+    Size rows are non-normalized stacked areas: the eBPF interval is 1 s, so the
+    stack height equals IOPS for that interval and each band is the IOPS of one
+    size class. Both heatmaps share a log color scale."""
     n = len(labels)
+    if n == 0:
+        return False
+    has_size = (any(any(s) for s in read_series)
+                or any(any(s) for s in write_series))
 
-    def _pct(series):
-        totals = [sum(series[b][i] for b in range(4)) or 1 for i in range(n)]
-        return [[series[b][i] / totals[i] * 100 for i in range(n)] for b in range(4)]
+    def _lba_arr(lba):
+        if lba and lba["buckets"] and any(any(rr) for rr in lba["buckets"]):
+            return np.array(lba["buckets"], dtype=float).T  # (buckets, ts)
+        return None
 
-    fig, (ax_r, ax_w) = plt.subplots(2, 1, figsize=(11, 6), sharex=True)
-    for ax, series, fam in [(ax_r, read_series, "read (read + read_ahead)"),
-                            (ax_w, write_series, "write")]:
+    arr_r = _lba_arr(lba_read)
+    arr_w = _lba_arr(lba_write)
+    if not has_size and arr_r is None and arr_w is None:
+        return False
+
+    allmax = 0.0
+    for a in (arr_r, arr_w):
+        if a is not None and a.size:
+            allmax = max(allmax, float(a.max()))
+    vmax = np.log10(allmax + 1) if allmax > 0 else 1.0
+    nb = max((a.shape[0] for a in (arr_r, arr_w) if a is not None), default=8)
+    xlim = (-0.5, (n - 0.5) if n > 1 else 0.5)
+
+    heat_h = max(1.8, nb * 0.035)
+    fig = plt.figure(figsize=(12, 2 * 1.5 + 2 * heat_h + 1.4))
+    gs = fig.add_gridspec(4, 2, width_ratios=[1.0, 0.018], wspace=0.03,
+                          height_ratios=[1.5, heat_h, 1.5, heat_h], hspace=0.14)
+    ax_sr = fig.add_subplot(gs[0, 0])
+    ax_hr = fig.add_subplot(gs[1, 0], sharex=ax_sr)
+    ax_sw = fig.add_subplot(gs[2, 0], sharex=ax_sr)
+    ax_hw = fig.add_subplot(gs[3, 0], sharex=ax_sr)
+    cax = fig.add_subplot(gs[:, 1])
+
+    def _area(ax, series, fam):
         if any(any(s) for s in series):
-            ax.stackplot(range(n), *_pct(series), labels=_SIZE_LABELS, colors=_SIZE_COLORS)
+            ax.stackplot(range(n), *series, colors=_SIZE_COLORS)
+            ax.set_ylim(0, None)
         else:
-            ax.text(0.5, 0.5, f"no {fam.split()[0]} I/O", ha="center", va="center",
+            ax.text(0.5, 0.5, f"no {fam} I/O", ha="center", va="center",
                     transform=ax.transAxes, color="#999")
-        ax.set_xlim(0, n - 1 if n > 1 else 1)
-        ax.set_ylim(0, 100)
-        ax.set_ylabel(f"{fam}\nshare of I/O [%]", fontsize=8)
-    ax_w.set_xlabel("time")
-    _xtick_thin(ax_w, labels)
-    ax_r.set_title(f"{dname} — I/O size mix over time (read vs write)")
-    _place_legend(fig, ax_w, max_cols=4)
+        ax.set_ylabel(f"{fam}\nIOPS", fontsize=8)
+
+    def _heat(ax, arr, fam):
+        if arr is None:
+            ax.text(0.5, 0.5, f"no {fam} I/O", ha="center", va="center",
+                    transform=ax.transAxes, color="#999")
+            ax.set_ylabel(f"{fam} LBA", fontsize=8)
+            return None
+        im = ax.imshow(np.log10(arr + 1), aspect="auto", origin="lower",
+                       cmap="turbo", interpolation="nearest", vmin=0, vmax=vmax,
+                       extent=[xlim[0], xlim[1], 0, arr.shape[0]])
+        ax.set_ylabel(f"{fam} LBA bucket\n(0=start .. N=end)", fontsize=8)
+        bstep = max(1, arr.shape[0] // 6)
+        ax.set_yticks(range(0, arr.shape[0] + 1, bstep))
+        return im
+
+    _area(ax_sr, read_series, "read")
+    im_r = _heat(ax_hr, arr_r, "read")
+    _area(ax_sw, write_series, "write")
+    im_w = _heat(ax_hw, arr_w, "write")
+
+    ax_sr.set_xlim(*xlim)
+    for ax in (ax_sr, ax_hr, ax_sw):
+        ax.tick_params(labelbottom=False)
+    ax_hw.set_xlabel("time")
+    _xtick_thin(ax_hw, labels)
+
+    im = im_r if im_r is not None else im_w
+    if im is not None:
+        fig.colorbar(im, cax=cax, label="log10(access count + 1)")
+    else:
+        cax.axis("off")
+
+    handles = [plt.Rectangle((0, 0), 1, 1, color=c) for c in _SIZE_COLORS]
+    fig.legend(handles, _SIZE_LABELS, loc="upper center", ncol=4,
+               bbox_to_anchor=(0.5, 0.955), fontsize=8, frameon=False)
+    fig.suptitle(f"{dname} — I/O size mix (IOPS) & LBA region over time "
+                 f"(read top, write bottom)", y=0.995)
+    fig.subplots_adjust(top=0.90, bottom=0.10, left=0.10, right=0.93)
     fig.savefig(path)
     plt.close(fig)
     return True
@@ -701,19 +721,14 @@ def build_report(session_dir, sid):
                            styles={"d2c avg": "-", "d2c p50": "--", "d2c p99": "-"})
                 fig_refs[f"{safe}_lat"] = os.path.relpath(path, session_dir)
 
-        # I/O size mix over time (read vs write, 100%-stacked area)
+        # I/O size mix (IOPS) + LBA access region over a shared time axis
         s_labels, s_read, s_write = _build_size_timeline(h, r)
-        if s_labels:
-            path = os.path.join(figs_dir, f"{safe}_sizemix.png")
-            if _save_size_area(path, s_labels, s_read, s_write, dname):
-                fig_refs[f"{safe}_sizemix"] = os.path.relpath(path, session_dir)
-
-        # LBA heatmap — read vs write split
         lba_r = _build_lba_heatmap(h, r, _READ_OPS)
         lba_w = _build_lba_heatmap(h, r, _WRITE_OPS)
-        path = os.path.join(figs_dir, f"{safe}_lba.png")
-        if _save_lba_split(path, lba_r, lba_w, dname):
-            fig_refs[f"{safe}_lba"] = os.path.relpath(path, session_dir)
+        path = os.path.join(figs_dir, f"{safe}_iotime.png")
+        if _save_io_timeline(path, dname, s_labels, s_read, s_write,
+                             lba_r, lba_w):
+            fig_refs[f"{safe}_iotime"] = os.path.relpath(path, session_dir)
 
     # 4. System metrics (CPU per-NUMA, NVMe IRQ, Memory, GPU)
     sys_payload = _build_system_series(sys_h, sys_r) if sys_h else None
@@ -874,8 +889,7 @@ def build_report(session_dir, sid):
             for fk, alt in [(f"{safe}_iops", "IOPS"),
                             (f"{safe}_bw", "Bandwidth"),
                             (f"{safe}_lat", "Latency"),
-                            (f"{safe}_sizemix", "I/O size mix"),
-                            (f"{safe}_lba", "LBA heatmap")]:
+                            (f"{safe}_iotime", "I/O size mix & LBA region")]:
                 if fk in fig_refs:
                     lines.append(f"![{alt}]({fig_refs[fk]})")
                     lines.append("")

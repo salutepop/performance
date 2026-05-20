@@ -270,6 +270,106 @@ def _save_correlation_chart(path, corr, title):
     plt.close(fig)
 
 
+# eBPF full-stack phases, in pipeline order. D2C (actual disk time) is the
+# warm highlight; the software-overhead phases use cooler tones.
+_PHASE_ORDER = ["u2q", "q2d", "d2c", "c2a", "a2u"]
+_PHASE_LABELS = {
+    "u2q": "U2Q  user->blk_q", "q2d": "Q2D  blk_q->disp",
+    "d2c": "D2C  disp->compl", "c2a": "C2A  compl->aio", "a2u": "A2U  aio->user",
+}
+_PHASE_COLORS = {
+    "u2q": "#90caf9", "q2d": "#26a69a", "d2c": "#ef6c00",
+    "c2a": "#ab47bc", "a2u": "#90a4ae",
+}
+_SIZE_LABELS = ["<=4K", "4-32K", "32-128K", ">128K"]
+_SIZE_COLORS = ["#08519c", "#3182bd", "#6baed6", "#bdd7e7"]
+
+
+def _load_ebpf_summary(session_dir, sid):
+    """ebpf_summary_<sid>.json — structured eBPF end-of-run summary, or None."""
+    p = os.path.join(session_dir, f"ebpf_summary_{sid}.json")
+    if not os.path.isfile(p):
+        return None
+    try:
+        with open(p) as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _ebpf_rows(summary, field):
+    """Flatten summary -> [(label, value), ...] over every device/op."""
+    rows = []
+    for dev, dd in summary.get("devices", {}).items():
+        for op, od in dd.get("ops", {}).items():
+            rows.append((f"{dev}  {op}", od.get(field)))
+    return rows
+
+
+def _save_ebpf_latency_chart(path, summary):
+    """Horizontal stacked bar — avg latency per I/O split into the 5 phases.
+
+    Each bar is one device/op; total length = full-stack avg latency, so it is
+    obvious where I/O time goes (D2C = real disk, the rest = software path)."""
+    rows = [(lbl, ph) for lbl, ph in _ebpf_rows(summary, "phase_avg_us")
+            if ph and sum(ph.get(p, 0) or 0 for p in _PHASE_ORDER) > 0]
+    if not rows:
+        return False
+    fig, ax = plt.subplots(figsize=(11, max(2.4, 0.62 * len(rows) + 1.6)))
+    y = list(range(len(rows)))
+    left = [0.0] * len(rows)
+    for phase in _PHASE_ORDER:
+        vals = [(r[1].get(phase) or 0) for r in rows]
+        if sum(vals) <= 0:
+            continue
+        ax.barh(y, vals, left=left, height=0.6,
+                color=_PHASE_COLORS[phase], label=_PHASE_LABELS[phase])
+        left = [l + v for l, v in zip(left, vals)]
+    for i, total in enumerate(left):
+        ax.text(total, i, f"  {total:.1f}us", va="center", fontsize=8, color="#333")
+    ax.set_yticks(y)
+    ax.set_yticklabels([r[0] for r in rows])
+    ax.invert_yaxis()
+    ax.set_xlabel("avg latency per I/O [us]")
+    ax.set_xlim(0, max(left) * 1.12)
+    ax.set_title("eBPF full-stack latency breakdown — avg us per I/O, stacked by phase")
+    ax.grid(True, axis="x", alpha=0.3)
+    _place_legend(fig, ax, max_cols=5)
+    fig.savefig(path)
+    plt.close(fig)
+    return True
+
+
+def _save_ebpf_size_chart(path, summary):
+    """100%-stacked horizontal bar — I/O size mix per device/op."""
+    rows = [(lbl, sh) for lbl, sh in _ebpf_rows(summary, "size_hist")
+            if sh and sum(sh) > 0]
+    if not rows:
+        return False
+    fig, ax = plt.subplots(figsize=(11, max(2.4, 0.62 * len(rows) + 1.6)))
+    y = list(range(len(rows)))
+    left = [0.0] * len(rows)
+    for bi, blabel in enumerate(_SIZE_LABELS):
+        pcts = [(r[1][bi] / (sum(r[1]) or 1) * 100) for r in rows]
+        ax.barh(y, pcts, left=left, height=0.6,
+                color=_SIZE_COLORS[bi], label=blabel)
+        for i, v in enumerate(pcts):
+            if v >= 8:
+                ax.text(left[i] + v / 2, i, f"{v:.0f}%", va="center", ha="center",
+                        fontsize=7.5, color="white")
+        left = [l + v for l, v in zip(left, pcts)]
+    ax.set_yticks(y)
+    ax.set_yticklabels([r[0] for r in rows])
+    ax.invert_yaxis()
+    ax.set_xlim(0, 100)
+    ax.set_xlabel("share of I/O count [%]")
+    ax.set_title("eBPF I/O size distribution — per device/op")
+    _place_legend(fig, ax, max_cols=4)
+    fig.savefig(path)
+    plt.close(fig)
+    return True
+
+
 def build_report(session_dir, sid):
     topo = _load_topology(session_dir, sid)
     sys_path = os.path.join(session_dir, f"system_metrics_{sid}.csv")
@@ -301,6 +401,16 @@ def build_report(session_dir, sid):
         path = os.path.join(figs_dir, "correlation.png")
         _save_correlation_chart(path, corr, "I/O x System correlation")
         fig_refs["correlation"] = os.path.relpath(path, session_dir)
+
+    # 1.5 eBPF full-stack analysis (latency breakdown + I/O size distribution)
+    ebpf = _load_ebpf_summary(session_dir, sid)
+    if ebpf and ebpf.get("devices"):
+        path = os.path.join(figs_dir, "ebpf_latency.png")
+        if _save_ebpf_latency_chart(path, ebpf):
+            fig_refs["ebpf_latency"] = os.path.relpath(path, session_dir)
+        path = os.path.join(figs_dir, "ebpf_size.png")
+        if _save_ebpf_size_chart(path, ebpf):
+            fig_refs["ebpf_size"] = os.path.relpath(path, session_dir)
 
     # 2. Multi-device overview (IOPS, BW)
     if device_csvs and corr:
@@ -460,6 +570,14 @@ def build_report(session_dir, sid):
     if "correlation" in fig_refs:
         lines += ["## I/O x System correlation", "",
                   f"![correlation]({fig_refs['correlation']})", ""]
+
+    # eBPF full-stack analysis
+    if "ebpf_latency" in fig_refs or "ebpf_size" in fig_refs:
+        lines += ["## eBPF full-stack analysis", ""]
+        if "ebpf_latency" in fig_refs:
+            lines += [f"![ebpf-latency]({fig_refs['ebpf_latency']})", ""]
+        if "ebpf_size" in fig_refs:
+            lines += [f"![ebpf-size]({fig_refs['ebpf_size']})", ""]
 
     # Topology
     lines += ["## Topology", ""]

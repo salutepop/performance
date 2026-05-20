@@ -607,6 +607,67 @@ def print_final_summary(raw_json, effective_duration, mode):
         print(f"[-] Parsing Error in Final Summary: {e}")
 
 
+def build_summary(bpf_data, duration, mode):
+    """Structured end-of-run summary for charting (ebpf_summary_<sid>.json).
+
+    Same numbers as the printed FINAL REPORT but machine-readable, so the
+    report/ layer can draw real charts instead of re-parsing stdout text.
+    """
+    sys_st = bpf_data.get("libaio_overhead", {}) or {}
+    u2q_cnt = sys_st.get("u2q_count", 0)
+    u2q_avg_us = round(sys_st.get("u2q_lat_total", 0) / 1000.0 / u2q_cnt, 2) if u2q_cnt else 0.0
+
+    out = {"duration_s": round(duration, 2), "mode": mode,
+           "u2q_avg_us": u2q_avg_us, "devices": {}}
+
+    for dev in bpf_data.get("devices", []):
+        real = get_real_dev_name(dev["dev_name"])
+        if not _is_monitored_dev(real):
+            continue
+        sqcq = dev.get("sqcq", {}) or {}
+        dev_out = {"sqcq": {"same": sqcq.get("same", 0), "diff": sqcq.get("diff", 0)},
+                   "ops": {}}
+        for op, st in dev.get("operations", {}).items():
+            cnt = st.get("total_count", 0)
+            if cnt == 0:
+                continue
+            q2d_avg = st.get("q2d", {}).get("total_lat_ns", 0) / 1000.0 / cnt
+            d2c_avg = st.get("d2c", {}).get("total_lat_ns", 0) / 1000.0 / cnt
+            c2a_avg = a2u_avg = 0.0
+            lib = _LIBAIO_OP_KEY.get(op)
+            if lib:
+                cc = sys_st.get(f"c2a_{lib}_count", 0)
+                if cc:
+                    c2a_avg = sys_st.get(f"c2a_{lib}_total", 0) / 1000.0 / cc
+                ac = sys_st.get(f"a2u_{lib}_count", 0)
+                if ac:
+                    a2u_avg = sys_st.get(f"a2u_{lib}_total", 0) / 1000.0 / ac
+            q2d_p = compute_percentiles(st.get("q2d_hist") or [0] * LAT_HIST_BUCKETS)
+            d2c_p = compute_percentiles(st.get("d2c_hist") or [0] * LAT_HIST_BUCKETS)
+            bytes_ = st.get("total_bytes", 0)
+            dev_out["ops"][op] = {
+                "io_count": cnt,
+                "total_bytes": bytes_,
+                "bandwidth_mb_s": round((bytes_ / 1048576.0) / duration, 2) if duration > 0 else 0.0,
+                "max_qd": st.get("max_qd", 0),
+                "size_hist": list(st.get("size_hist", [0, 0, 0, 0])),
+                "phase_avg_us": {
+                    "u2q": u2q_avg_us if lib else 0.0,
+                    "q2d": round(q2d_avg, 2),
+                    "d2c": round(d2c_avg, 2),
+                    "c2a": round(c2a_avg, 2),
+                    "a2u": round(a2u_avg, 2),
+                },
+                "q2d_pct_us": {str(k): (round(v, 2) if v is not None else None)
+                               for k, v in q2d_p.items()},
+                "d2c_pct_us": {str(k): (round(v, 2) if v is not None else None)
+                               for k, v in d2c_p.items()},
+            }
+        if dev_out["ops"]:
+            out["devices"][real] = dev_out
+    return out
+
+
 def run_workload_thread(cmd, script_file):
     try:
         if cmd:
@@ -734,6 +795,15 @@ def run_benchmark(mode="generic", cmd=None, script_file=None, interval=1, enable
 
     if last_valid_json != "{}":
         print_final_summary(last_valid_json, effective_duration, mode)
+        try:
+            summary = build_summary(json.loads(last_valid_json), effective_duration, mode)
+            os.makedirs(OUTPUT_DIR, exist_ok=True)
+            sp = os.path.join(OUTPUT_DIR, f"ebpf_summary_{SESSION_ID}.json")
+            with open(sp, "w") as f:
+                json.dump(summary, f, indent=2)
+            print(f" -> Structured summary: {sp}")
+        except Exception as e:
+            print(f"[!] ebpf summary write failed: {e}")
 
 
 if __name__ == "__main__":

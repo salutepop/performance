@@ -172,7 +172,9 @@ results/{YYYYMMDD_HHMMSS}_monitor[_{label}]/            # ad-hoc 관측 (pmon mo
   metadata.json             # system info + tc/monitor 정의
   topology_{sid}.json       # SystemMonitor 1회 dump
   system_metrics_{sid}.csv  # SystemMonitor 1초 주기 누적
-  {device}_{sid}.csv        # eBPF I/O 트레이서 (디바이스별)
+  {device}_{sid}.csv        # eBPF I/O 트레이서 timeseries (디바이스별)
+  ebpf_analysis_{sid}.txt   # eBPF 트레이서 stdout raw 캡처 (full-stack 표 등)
+  ebpf_summary_{sid}.json   # eBPF 구조화 요약 (차트 입력 — phase latency, size dist)
   fio_{workload}.json       # workload 단위 fio raw JSON (TC만)
   report_{sid}.md / .pdf    # 리포트 (+ summary_{sid}.json, report_png_{sid}.md, figs_{sid}/)
 ```

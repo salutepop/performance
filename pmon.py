@@ -279,6 +279,17 @@ def cmd_debug(args):
             print(f"  [OK] eBPF analysis: ebpf_analysis_{sid}.txt "
                   f"({os.path.getsize(analysis)} bytes)")
 
+        summary_json = os.path.join(session_dir, f"ebpf_summary_{sid}.json")
+        if not os.path.isfile(summary_json):
+            failures.append("no ebpf_summary JSON (latency/size charts will be skipped)")
+        else:
+            try:
+                with open(summary_json) as f:
+                    ndev = len(json.load(f).get("devices", {}))
+                print(f"  [OK] eBPF summary: ebpf_summary_{sid}.json ({ndev} device(s))")
+            except Exception as e:
+                failures.append(f"ebpf_summary JSON parse error: {e}")
+
     # every report format
     expected_reports = {
         "md": f"report_{sid}.md",

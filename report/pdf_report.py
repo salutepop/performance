@@ -293,55 +293,6 @@ def _add_cover(pdf, md_text, title):
     _render_blocks_to_pdf(pdf, blocks, title=title)
 
 
-def _add_monospace_pages(pdf, blocks, title, per_page=66):
-    """Render fixed-width text blocks as monospace PDF pages.
-
-    `blocks` is a list of strings; each block starts on a fresh page (so a
-    table is never split across the per-op section), and a long block
-    paginates internally. The title is drawn once, on the first page.
-    """
-    first = True
-    for block in blocks:
-        lines = block.splitlines() or [""]
-        chunks = [lines[i:i + per_page] for i in range(0, len(lines), per_page)] or [[""]]
-        for chunk in chunks:
-            fig = plt.figure(figsize=(11, 8.5))  # landscape — tables are ~100 cols wide
-            y = 0.96
-            if first:
-                fig.text(0.04, y, title, fontsize=13, weight="bold")
-                y = 0.91
-                first = False
-            fig.text(0.04, y, "\n".join(chunk), fontsize=7,
-                     family="monospace", va="top")
-            pdf.savefig(fig)
-            plt.close(fig)
-
-
-def _ebpf_report_blocks(ebpf_text):
-    """Slice the captured eBPF stdout into PDF-ready blocks.
-
-    Drops the per-interval timeseries log (redundant with the charts) and
-    splits the FINAL REPORT into [per-op stats] + [full-stack breakdown table]
-    so the table is never broken across a page boundary.
-    """
-    lines = ebpf_text.splitlines()
-    start = next((i for i, ln in enumerate(lines) if "FIO PROFILING" in ln), None)
-    if start is not None and start > 0 and set(lines[start - 1].strip()) <= {"="}:
-        start -= 1  # keep the === banner above the title
-    report = lines[start:] if start is not None else lines
-
-    bd = next((i for i, ln in enumerate(report)
-               if "FULL STACK LATENCY BREAKDOWN" in ln), None)
-    if bd is None:
-        return ["\n".join(report).strip()]
-    # the --- separator just above the title belongs with the table block
-    split_at = bd - 1 if bd > 0 and set(report[bd - 1].strip()) <= {"-"} else bd
-    return [
-        "\n".join(report[:split_at]).rstrip(),
-        "\n".join(report[split_at:]).strip(),
-    ]
-
-
 def _add_image_page(pdf, png_path):
     img = mpimg.imread(png_path)
     # Size the page figure to the image's aspect ratio so imshow doesn't
@@ -363,9 +314,10 @@ def _order_pngs(pngs):
     def key(p):
         n = os.path.basename(p)
         if n.startswith("correlation"): return (0, n)
-        if n.startswith("multi_"): return (1, n)
-        if n.startswith("sys_"): return (2, n)
-        return (3, n)
+        if n.startswith("ebpf_"): return (1, n)
+        if n.startswith("multi_"): return (2, n)
+        if n.startswith("sys_"): return (3, n)
+        return (4, n)
     return sorted(pngs, key=key)
 
 
@@ -406,13 +358,6 @@ def main(argv=None):
         with open(md_path, encoding="utf-8") as f:
             md_text = f.read()
 
-    # eBPF full-stack latency breakdown + per-op size distribution / percentiles.
-    ebpf_path = os.path.join(sd, f"ebpf_analysis_{sid}.txt")
-    ebpf_text = None
-    if os.path.exists(ebpf_path):
-        with open(ebpf_path, encoding="utf-8", errors="replace") as f:
-            ebpf_text = f.read().strip()
-
     cover_title = f"Performance Report — {sid}"
     pages = 0
     with PdfPages(out_path) as pdf:
@@ -429,15 +374,9 @@ def main(argv=None):
             _add_image_page(pdf, png)
             pages += 1
 
-        if ebpf_text:
-            blocks = _ebpf_report_blocks(ebpf_text)
-            _add_monospace_pages(pdf, blocks, "eBPF full-stack I/O analysis")
-            pages += 1
-
     font_note = f"font={font_used}" if font_used else "font=default"
-    ebpf_note = ", +ebpf-analysis" if ebpf_text else ""
     print(f"[pdf_report] wrote {out_path} ({os.path.getsize(out_path)} bytes, "
-          f"pngs={len(pngs)}{ebpf_note}, {font_note})")
+          f"pngs={len(pngs)}, {font_note})")
     return 0
 
 

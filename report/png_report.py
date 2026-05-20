@@ -290,15 +290,15 @@ def _save_correlation_chart(path, corr, title):
 # completion path), both orange family. "d2c" is the fallback single segment
 # when the nvme tracepoint didn't fire (so no time is ever lost from the bar).
 _PHASE_ORDER = ["u2q", "q2d", "nvme", "blkc", "d2c", "c2a", "a2u"]
-# Plain-language legend — numbered so it reads as the I/O pipeline order.
+# Legend: pipeline number + phase abbreviation + a short description.
 _PHASE_LABELS = {
-    "u2q":  "1. io_submit() -> enters block queue",
-    "q2d":  "2. waiting in block queue -> dispatch",
-    "nvme": "3. device I/O - NVMe hardware round-trip",
-    "blkc": "4. block-layer completion handling",
-    "d2c":  "3+4. device + completion (D2C, unsplit)",
-    "c2a":  "5. handoff to AIO layer",
-    "a2u":  "6. AIO -> user wakeup (io_getevents)",
+    "u2q":  "1. U2Q  io_submit() -> block queue",
+    "q2d":  "2. Q2D  block queue -> dispatch",
+    "nvme": "3. NVME  device I/O (NVMe hardware)",
+    "blkc": "4. BLKC  block-layer completion",
+    "d2c":  "3+4. D2C  device + completion (unsplit)",
+    "c2a":  "5. C2A  block -> AIO layer",
+    "a2u":  "6. A2U  AIO -> user wakeup",
 }
 _PHASE_COLORS = {
     "u2q": "#90caf9", "q2d": "#26a69a",

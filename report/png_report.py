@@ -185,14 +185,32 @@ def _build_correlation_data(sys_header, sys_rows, device_csv_paths):
 
 
 def _save_correlation_chart(path, corr, title):
-    """3-axis chart: left=IOPS [Kiops, solid], outer-right=BW [MB/s, dashed, shares device color], right=CPU %."""
+    """3축 correlation chart.
+
+    Line-style mapping (속성별 일관 규칙):
+      - IOPS  : solid line + round marker      (left y, Kiops)
+      - BW    : dotted line + square marker    (left y, MB/s; 디바이스 색은 IOPS와 동일)
+      - CPU iowait %  : dashed (--), red       (right y)
+      - CPU sys %     : dash-dot (-.), orange  (right y)
+
+    좌측에는 IOPS와 BW 축이 함께 (BW는 IOPS 안쪽 offset 위치),
+    우측에는 CPU% 단일. 디바이스 색 + 라인 스타일로 어떤 속성인지 한눈에 구분되도록.
+    """
     labels = corr["labels"]
     fig, ax_iops = plt.subplots(figsize=(11, 4))
     ax_bw = ax_iops.twinx()
     ax_cpu = ax_iops.twinx()
-    # Offset BW spine to the outer right; CPU% stays on the primary right.
-    ax_bw.spines["right"].set_position(("axes", 1.08))
+
+    # BW 축을 left 안쪽으로 끌어와서 IOPS와 같은 쪽에 둠.
+    # tick/label/spine 모두 좌측으로 옮기되, IOPS 라벨과 겹치지 않게 살짝 outer-left로 offset.
+    ax_bw.yaxis.tick_left()
+    ax_bw.yaxis.set_label_position("left")
+    ax_bw.spines["left"].set_position(("axes", -0.08))
+    ax_bw.spines["left"].set_visible(True)
+    ax_bw.spines["right"].set_visible(False)
     ax_bw.set_frame_on(True); ax_bw.patch.set_visible(False)
+    # 좌측 마진 확보 (offset BW spine이 잘리지 않도록)
+    fig.subplots_adjust(left=0.12)
 
     palette = _PALETTE
     handles, lbls = [], []
@@ -200,29 +218,37 @@ def _save_correlation_chart(path, corr, title):
         color = palette[i % len(palette)]
         y_iops = [v if v is not None else np.nan for v in iops]
         h1, = ax_iops.plot(range(len(labels)), y_iops, color=color, linewidth=1.4,
-                           marker=".", markersize=3, label=f"IOPS {dn} [Kiops]")
+                           linestyle="-", marker="o", markersize=3.2,
+                           label=f"IOPS {dn} [Kiops]  (solid · circle)")
         bw = corr["bw"].get(dn) or []
         y_bw = [v if v is not None else np.nan for v in bw]
         h2, = ax_bw.plot(range(len(labels)), y_bw, color=color, linewidth=1.2,
-                         linestyle="--", label=f"BW {dn} [MB/s]")
+                         linestyle=":", marker="s", markersize=3.2,
+                         label=f"BW {dn} [MB/s]  (dotted · square)")
         handles += [h1, h2]; lbls += [h1.get_label(), h2.get_label()]
 
     y_iow = [v if v is not None else np.nan for v in corr["iowait"]]
     y_sys = [v if v is not None else np.nan for v in corr["sys"]]
     h3, = ax_cpu.plot(range(len(labels)), y_iow, color="#ef4444",
-                      linestyle=(0, (6, 3)), linewidth=1.2, label="iowait % (sum)")
+                      linestyle="--", linewidth=1.3,
+                      label="CPU iowait % (sum)  (dashed)")
     h4, = ax_cpu.plot(range(len(labels)), y_sys, color="#f59e0b",
-                      linestyle=(0, (2, 2)), linewidth=1.2, label="sys % (sum)")
+                      linestyle="-.", linewidth=1.3,
+                      label="CPU sys % (sum)  (dash-dot)")
     handles += [h3, h4]; lbls += [h3.get_label(), h4.get_label()]
 
-    ax_iops.set_title(title)
+    ax_iops.set_title(
+        f"{title}\nstyles: IOPS = solid + circle  |  BW = dotted + square (same device color)"
+        f"  |  iowait = dashed  |  sys = dash-dot",
+        fontsize=9,
+    )
     ax_iops.set_xlabel("time")
     ax_iops.set_ylabel("IOPS [Kiops]")
     ax_bw.set_ylabel("BW [MB/s]")
     ax_cpu.set_ylabel("% CPU")
     ax_iops.grid(True, alpha=0.3)
     _xtick_thin(ax_iops, labels)
-    _place_legend(fig, ax_iops, handles=handles, labels=lbls)
+    _place_legend(fig, ax_iops, handles=handles, labels=lbls, max_cols=3)
     fig.savefig(path)
     plt.close(fig)
 
@@ -507,7 +533,7 @@ def build_report(session_dir, sid):
 
 def main(argv=None):
     p = argparse.ArgumentParser(description="Static PNG + Markdown report (offline-friendly)")
-    p.add_argument("--session-dir", default="ebpf/csv_results")
+    p.add_argument("--session-dir", default="results")
     p.add_argument("--session-id", default=None)
     p.add_argument("-o", "--output", default=None)
     args = p.parse_args(argv)

@@ -44,7 +44,6 @@ class SystemMonitor:
         # delta 계산용 prev snapshot
         self._prev_cpu = None  # {cpu_id: list of jiffies}
         self._prev_irq = None  # {(irq_num, cpu_id): count}
-        self._prev_vmstat = None  # {key: count}
         self._prev_ts = None
 
         # topology
@@ -75,7 +74,6 @@ class SystemMonitor:
         # delta baseline 채우기
         self._prev_cpu = self._read_proc_stat()
         self._prev_irq = self._read_proc_interrupts_raw()
-        self._prev_vmstat = self._read_vmstat_raw()
         self._prev_ts = time.monotonic()
 
         # GPU 있으면 dmon streaming subprocess + reader thread
@@ -220,7 +218,6 @@ class SystemMonitor:
                      f"{ctrl}_active_queues", f"{ctrl}_active_cpus"]
         cols += [
             "mem_available_mb", "mem_dirty_mb", "mem_writeback_mb", "swap_used_mb",
-            "pgpgin_per_s", "pgpgout_per_s", "pswpin_per_s", "pswpout_per_s",
             "loadavg_1m",
         ]
         if self._has_cpufreq:
@@ -298,17 +295,6 @@ class SystemMonitor:
             if v:
                 try:
                     out[k.strip()] = int(v[0])  # kB
-                except ValueError:
-                    pass
-        return out
-
-    def _read_vmstat_raw(self):
-        out = {}
-        for line in _proc_lines("/proc/vmstat"):
-            parts = line.split()
-            if len(parts) >= 2:
-                try:
-                    out[parts[0]] = int(parts[1])
                 except ValueError:
                     pass
         return out
@@ -501,7 +487,6 @@ class SystemMonitor:
         cpu_now = self._read_proc_stat()
         irq_now = self._read_proc_interrupts_raw()
         meminfo = self._read_meminfo()
-        vm_now = self._read_vmstat_raw()
         load1 = self._read_loadavg()
 
         # ---- CPU per-node ----
@@ -555,15 +540,6 @@ class SystemMonitor:
                 m["top_cpu_val"] = d
                 m["top_cpu"] = cpu_id
 
-        # ---- VM delta ----
-        def vm_delta(k):
-            return max(0, vm_now.get(k, 0) - self._prev_vmstat.get(k, 0))
-
-        pgpgin = vm_delta("pgpgin")
-        pgpgout = vm_delta("pgpgout")
-        pswpin = vm_delta("pswpin")
-        pswpout = vm_delta("pswpout")
-
         # ---- row 구성 ----
         ts = datetime.datetime.now().strftime("%H:%M:%S")
         row = {"timestamp": ts}
@@ -587,11 +563,6 @@ class SystemMonitor:
         row["mem_dirty_mb"] = round(meminfo.get("Dirty", 0) / 1024, 1)
         row["mem_writeback_mb"] = round(meminfo.get("Writeback", 0) / 1024, 1)
         row["swap_used_mb"] = round((meminfo.get("SwapTotal", 0) - meminfo.get("SwapFree", 0)) / 1024, 1)
-
-        row["pgpgin_per_s"] = round(pgpgin / elapsed, 1)
-        row["pgpgout_per_s"] = round(pgpgout / elapsed, 1)
-        row["pswpin_per_s"] = round(pswpin / elapsed, 1)
-        row["pswpout_per_s"] = round(pswpout / elapsed, 1)
         row["loadavg_1m"] = load1
 
         if self._has_aer:
@@ -655,7 +626,6 @@ class SystemMonitor:
         # rotate prev
         self._prev_cpu = cpu_now
         self._prev_irq = irq_now
-        self._prev_vmstat = vm_now
         self._prev_ts = now_ts
 
 

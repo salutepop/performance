@@ -197,69 +197,86 @@ def _build_correlation_data(sys_header, sys_rows, device_csv_paths):
             "iops": dev_iops, "bw": dev_bw}
 
 
+# Correlation chart visual families: I/O metrics are SOLID lines, CPU metrics
+# are DASHED — so at a glance "is this I/O or CPU?". Within each family, a
+# distinct colour + marker tells the two series apart.
+_IOPS_COLOR = "#1f77b4"   # blue
+_BW_COLOR = "#2ca02c"     # green
+_IOWAIT_COLOR = "#d62728" # red
+_SYS_COLOR = "#ff7f0e"    # orange
+
+
 def _save_correlation_chart(path, corr, title):
-    """3축 correlation chart.
+    """3-axis I/O x System correlation chart.
 
-    Line-style mapping (속성별 일관 규칙):
-      - IOPS  : solid line + round marker      (left y, Kiops)
-      - BW    : dotted line + square marker    (left y, MB/s; 디바이스 색은 IOPS와 동일)
-      - CPU iowait %  : dashed (--), red       (right y)
-      - CPU sys %     : dash-dot (-.), orange  (right y)
+    Visual encoding:
+      - IOPS  : blue,  solid line, circle marker    (left y, Kiops)
+      - BW    : green, solid line, triangle marker  (left y, GB/s)
+      - iowait%: red,    dashed line, x marker      (right y)
+      - sys %  : orange, dashed line, + marker      (right y)
 
-    좌측에는 IOPS와 BW 축이 함께 (BW는 IOPS 안쪽 offset 위치),
-    우측에는 CPU% 단일. 디바이스 색 + 라인 스타일로 어떤 속성인지 한눈에 구분되도록.
+    I/O (solid) vs CPU (dashed) is the primary split; colour+marker separates
+    the two series within each family. Multi-device runs shade IOPS in blues
+    and BW in greens so the family is still recognisable per device.
     """
     labels = corr["labels"]
     fig, ax_iops = plt.subplots(figsize=(11, 4))
     ax_bw = ax_iops.twinx()
     ax_cpu = ax_iops.twinx()
 
-    # BW 축을 left 안쪽으로 끌어와서 IOPS와 같은 쪽에 둠.
-    # tick/label/spine 모두 좌측으로 옮기되, IOPS 라벨과 겹치지 않게 살짝 outer-left로 offset.
+    # BW axis sits on the inner-left, next to the IOPS axis.
     ax_bw.yaxis.tick_left()
     ax_bw.yaxis.set_label_position("left")
     ax_bw.spines["left"].set_position(("axes", -0.08))
     ax_bw.spines["left"].set_visible(True)
     ax_bw.spines["right"].set_visible(False)
     ax_bw.set_frame_on(True); ax_bw.patch.set_visible(False)
-    # 좌측 마진 확보 (offset BW spine이 잘리지 않도록)
     fig.subplots_adjust(left=0.12)
 
-    palette = _PALETTE
+    # Per-device colours: single device -> fixed strong blue/green; multiple ->
+    # shades within the blue/green family so IOPS-vs-BW grouping survives.
+    ndev = max(1, len(corr["iops"]))
+    if ndev == 1:
+        iops_cols, bw_cols = [_IOPS_COLOR], [_BW_COLOR]
+    else:
+        iops_cols = plt.cm.Blues(np.linspace(0.55, 0.95, ndev))
+        bw_cols = plt.cm.Greens(np.linspace(0.55, 0.95, ndev))
+
     handles, lbls = [], []
     for i, (dn, iops) in enumerate(corr["iops"].items()):
-        color = palette[i % len(palette)]
         y_iops = [v if v is not None else np.nan for v in iops]
-        h1, = ax_iops.plot(range(len(labels)), y_iops, color=color, linewidth=1.4,
-                           linestyle="-", marker="o", markersize=3.2,
+        h1, = ax_iops.plot(range(len(labels)), y_iops, color=iops_cols[i],
+                           linewidth=1.5, linestyle="-", marker="o", markersize=3.4,
                            label=f"IOPS {dn}")
         bw = corr["bw"].get(dn) or []
-        y_bw = [v if v is not None else np.nan for v in bw]
-        h2, = ax_bw.plot(range(len(labels)), y_bw, color=color, linewidth=1.2,
-                         linestyle=":", marker="s", markersize=3.2,
+        # bandwidth_mb_s_interval is MB/s -> GB/s (1 GB = 1024 MB).
+        y_bw = [(v / 1024.0) if v is not None else np.nan for v in bw]
+        h2, = ax_bw.plot(range(len(labels)), y_bw, color=bw_cols[i],
+                         linewidth=1.5, linestyle="-", marker="^", markersize=3.4,
                          label=f"BW {dn}")
         handles += [h1, h2]; lbls += [h1.get_label(), h2.get_label()]
 
     y_iow = [v if v is not None else np.nan for v in corr["iowait"]]
     y_sys = [v if v is not None else np.nan for v in corr["sys"]]
-    h3, = ax_cpu.plot(range(len(labels)), y_iow, color="#ef4444",
-                      linestyle="--", linewidth=1.3, label="iowait %")
-    h4, = ax_cpu.plot(range(len(labels)), y_sys, color="#f59e0b",
-                      linestyle="-.", linewidth=1.3, label="sys %")
+    h3, = ax_cpu.plot(range(len(labels)), y_iow, color=_IOWAIT_COLOR,
+                      linestyle="--", linewidth=1.3, marker="x", markersize=3.4,
+                      label="iowait %")
+    h4, = ax_cpu.plot(range(len(labels)), y_sys, color=_SYS_COLOR,
+                      linestyle="--", linewidth=1.3, marker="+", markersize=4.0,
+                      label="sys %")
     handles += [h3, h4]; lbls += [h3.get_label(), h4.get_label()]
 
-    ax_iops.set_title(
-        f"{title}\nstyles: IOPS = solid + circle  |  BW = dotted + square (same device color)"
-        f"  |  iowait = dashed  |  sys = dash-dot",
-        fontsize=9,
-    )
+    ax_iops.set_title(f"{title}   (I/O = solid · CPU = dashed)", fontsize=10)
     ax_iops.set_xlabel("time")
-    ax_iops.set_ylabel("IOPS [Kiops]")
-    ax_bw.set_ylabel("BW [MB/s]")
-    ax_cpu.set_ylabel("% CPU")
+    ax_iops.set_ylabel("IOPS [Kiops]", color=_IOPS_COLOR)
+    ax_bw.set_ylabel("BW [GB/s]", color=_BW_COLOR)
+    ax_cpu.set_ylabel("% CPU", color=_IOWAIT_COLOR)
+    ax_iops.tick_params(axis="y", colors=_IOPS_COLOR)
+    ax_bw.tick_params(axis="y", colors=_BW_COLOR)
+    ax_cpu.tick_params(axis="y", colors=_IOWAIT_COLOR)
     ax_iops.grid(True, alpha=0.3)
     _xtick_thin(ax_iops, labels)
-    _place_legend(fig, ax_iops, handles=handles, labels=lbls, max_cols=3)
+    _place_legend(fig, ax_iops, handles=handles, labels=lbls, max_cols=4)
     fig.savefig(path)
     plt.close(fig)
 

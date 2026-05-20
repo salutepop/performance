@@ -53,8 +53,6 @@ timestamp,operation,iops_interval,bandwidth_mb_s_interval,q2d_avg_us_interval,d2
 | `{ctrl}_top_cpu_node` | str | 그 CPU의 NUMA 노드 |
 | `{ctrl}_aer_cor` / `_aer_fatal` / `_aer_nonfatal` | u64 | PCIe AER counter raw 누적값 (`/sys/bus/pci/devices/<addr>/aer_dev_*`의 TOTAL_ERR_*). 정상은 0 유지 |
 | `mem_available_mb` / `mem_dirty_mb` / `mem_writeback_mb` / `swap_used_mb` | MB | 글로벌 `/proc/meminfo` |
-| `pgpgin_per_s` / `pgpgout_per_s` | int/s | `/proc/vmstat` block I/O 인터벌 delta |
-| `pswpin_per_s` / `pswpout_per_s` | int/s | swap activity (정상 워크로드 0) |
 | `loadavg_1m` | float | `/proc/loadavg` 첫 값 |
 | `gpu{N}_pwr_w` / `_temp_c` / `_sm_pct` / `_mem_pct` / `_mem_used_mb` / `_pcie_rx_mb_s` / `_pcie_tx_mb_s` | mixed | `nvidia-smi dmon -s pumt` 스트림. 없는 metric은 빈 칸 (예: GB10 unified memory의 fb/pcie) |
 
@@ -114,8 +112,8 @@ timestamp,operation,iops_interval,bandwidth_mb_s_interval,q2d_avg_us_interval,d2
     "cpu":      {"node0": {"user_pct_avg": 2.96, "sys_pct_avg": 13.17,
                             "iowait_pct_avg": 0.19, "iowait_pct_peak": 0.40}},
     "memory":   {"mem_available_mb_min": 107037, "mem_dirty_mb_peak": 8.0,
-                  "mem_writeback_mb_peak": 0.0, "pgpgin_per_s_peak": 431610,
-                  "pgpgout_per_s_peak": 418890, "loadavg_1m_peak": 1.65},
+                  "mem_writeback_mb_peak": 0.0, "swap_used_mb_peak": 0.0,
+                  "loadavg_1m_peak": 1.65},
     "nvme_irq": {"nvme0": {"per_s_avg": 23096, "per_s_peak": 28060}},
     "gpu":      {"gpu0": {"sm_pct_peak": 4, "power_w_peak": 7,
                            "temp_c_peak": 43, "mem_used_mb_peak": null}}

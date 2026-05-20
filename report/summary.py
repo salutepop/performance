@@ -134,8 +134,7 @@ def build_summary(session_dir, sid):
             "mem_available_mb_min": _g(mem, "mem_available_mb", "min"),
             "mem_dirty_mb_peak":    _g(mem, "mem_dirty_mb",     "max"),
             "mem_writeback_mb_peak": _g(mem, "mem_writeback_mb", "max"),
-            "pgpgin_per_s_peak":    _g(mem, "pgpgin_per_s",     "max"),
-            "pgpgout_per_s_peak":   _g(mem, "pgpgout_per_s",    "max"),
+            "swap_used_mb_peak":    _g(mem, "swap_used_mb",     "max"),
             "loadavg_1m_peak":      _g(mem, "loadavg_1m",       "max"),
         }
 

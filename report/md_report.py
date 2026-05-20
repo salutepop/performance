@@ -74,9 +74,9 @@ def _system_aggregates(header, rows):
         if col.endswith("_irq_per_s") and col.startswith("nvme"):
             agg.setdefault("nvme_irq", {})[col] = _stats(_floats(rows, header.index(col)))
 
-    # Memory + VM
+    # Memory
     for col in ("mem_available_mb", "mem_dirty_mb", "mem_writeback_mb", "swap_used_mb",
-                "pgpgin_per_s", "pgpgout_per_s", "loadavg_1m"):
+                "loadavg_1m"):
         i = _col_index(header, col)
         if i >= 0:
             agg.setdefault("mem", {})[col] = _stats(_floats(rows, i))
@@ -360,7 +360,7 @@ def build_report(session_dir, sid):
 
     mem = sys_agg.get("mem", {})
     if mem:
-        lines.append("### Memory / VM")
+        lines.append("### Memory")
         lines.append("")
         rows = [
             ["mem_available_mb", _fmt(mem.get("mem_available_mb", {}).get("avg"), "{:.0f}"),
@@ -369,10 +369,8 @@ def build_report(session_dir, sid):
              _fmt(mem.get("mem_dirty_mb", {}).get("max"))],
             ["mem_writeback_mb", _fmt(mem.get("mem_writeback_mb", {}).get("avg")),
              _fmt(mem.get("mem_writeback_mb", {}).get("max"))],
-            ["pgpgin/s", _fmt(mem.get("pgpgin_per_s", {}).get("avg"), "{:.0f}"),
-             _fmt(mem.get("pgpgin_per_s", {}).get("max"), "{:.0f}")],
-            ["pgpgout/s", _fmt(mem.get("pgpgout_per_s", {}).get("avg"), "{:.0f}"),
-             _fmt(mem.get("pgpgout_per_s", {}).get("max"), "{:.0f}")],
+            ["swap_used_mb", _fmt(mem.get("swap_used_mb", {}).get("avg")),
+             _fmt(mem.get("swap_used_mb", {}).get("max"))],
             ["loadavg 1m", _fmt(mem.get("loadavg_1m", {}).get("avg")),
              _fmt(mem.get("loadavg_1m", {}).get("max"))],
         ]

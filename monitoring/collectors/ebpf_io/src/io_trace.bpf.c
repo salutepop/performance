@@ -20,6 +20,7 @@ static __always_inline u32 lat_bucket(u64 ns) {
 }
 
 const volatile bool opt_trace_libaio = false;
+const volatile bool opt_trace_iouring = false;
 
 struct bio_start_ctx {
     u64 ts;
@@ -107,6 +108,14 @@ struct {
     __type(key, u32);
     __type(value, struct libaio_stats);
 } sys_stats_map SEC(".maps");
+
+/* io_uring 페이즈(S2Q/C2C) 글로벌 누적. sys_stats_map의 io_uring 짝. */
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, u32);
+    __type(value, struct iouring_stats);
+} iouring_stats_map SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
@@ -307,6 +316,48 @@ int trace_pgetevents_exit(struct trace_event_raw_sys_exit *ctx) {
     return 0;
 }
 
+/*
+ * io_uring tracepoints (iouring mode). libaio의 io_submit/aio_complete에 대응.
+ *   io_uring_submit_req : SQE 제출 시각 -> S2Q 시작점 (pid_submit_start 재사용)
+ *   io_uring_complete   : CQE 게시 시각 -> C2C 종료점
+ * libaio와 mode가 상호배타적이라 pid_submit_start / iocb_c2a_start 맵을 공유한다.
+ * req(io_kiocb*)는 cmd union이 offset 0이라 block 계층에서 꺼낸 kiocb*와 동일 주소다.
+ */
+SEC("tp_btf/io_uring_submit_req")
+int BPF_PROG(io_uring_submit_req, void *req) {
+    u64 ts = bpf_ktime_get_ns();
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    bpf_map_update_elem(&pid_submit_start, &pid_tgid, &ts, BPF_ANY);
+    return 0;
+}
+
+SEC("tp_btf/io_uring_complete")
+int BPF_PROG(io_uring_complete, void *uring_ctx, void *req) {
+    u64 ts = bpf_ktime_get_ns();
+    u64 key = (u64)req;  // io_kiocb* == kiocb* (cmd union이 offset 0)
+    struct c2a_ctx *cctx = bpf_map_lookup_elem(&iocb_c2a_start, &key);
+    if (!cctx) return 0;
+    if (cctx->ts > 0 && ts > cctx->ts) {
+        u64 c2c_lat = ts - cctx->ts;
+        u32 stat_key = 0;
+        struct iouring_stats *st = bpf_map_lookup_elem(&iouring_stats_map, &stat_key);
+        if (st) {
+            if (cctx->type == IO_READ || cctx->type == IO_READ_AHEAD) {
+                __sync_fetch_and_add(&st->c2c_read_count, 1);
+                __sync_fetch_and_add(&st->c2c_read_total, c2c_lat);
+            } else if (cctx->type == IO_WRITE) {
+                __sync_fetch_and_add(&st->c2c_write_count, 1);
+                __sync_fetch_and_add(&st->c2c_write_total, c2c_lat);
+            } else if (cctx->type == IO_FLUSH) {
+                __sync_fetch_and_add(&st->c2c_flush_count, 1);
+                __sync_fetch_and_add(&st->c2c_flush_total, c2c_lat);
+            }
+        }
+    }
+    bpf_map_delete_elem(&iocb_c2a_start, &key);
+    return 0;
+}
+
 SEC("tp_btf/block_bio_queue")
 int BPF_PROG(block_bio_queue, struct bio *bio) {
     u64 ts = bpf_ktime_get_ns();
@@ -320,6 +371,18 @@ int BPF_PROG(block_bio_queue, struct bio *bio) {
             if (st) {
                 __sync_fetch_and_add(&st->u2q_count, 1);
                 __sync_fetch_and_add(&st->u2q_lat_total, u2q_lat);
+            }
+        }
+    }
+    if (opt_trace_iouring) {
+        u64 *submit_ts = bpf_map_lookup_elem(&pid_submit_start, &pid_tgid);
+        if (submit_ts && ts > *submit_ts) {
+            u64 s2q_lat = ts - *submit_ts;
+            u32 key = 0;
+            struct iouring_stats *st = bpf_map_lookup_elem(&iouring_stats_map, &key);
+            if (st) {
+                __sync_fetch_and_add(&st->s2q_count, 1);
+                __sync_fetch_and_add(&st->s2q_lat_total, s2q_lat);
             }
         }
     }
@@ -521,7 +584,10 @@ int BPF_PROG(block_rq_complete, struct request *rq, int error, unsigned int nr_b
         }
     }
     
-    if (opt_trace_libaio && type != -1) {
+    /* C2A(libaio) / C2C(io_uring) 시작점: bio->bi_private(iomap_dio)에서 kiocb를
+     * 꺼내 완료 시각을 저장. 두 엔진 모두 같은 맵을 쓰고, 완료측 프로그램
+     * (aio_complete / io_uring_complete)이 각자 모드에서만 attach된다. */
+    if ((opt_trace_libaio || opt_trace_iouring) && type != -1) {
         struct bio *bio = BPF_CORE_READ(rq, bio);
         if (bio) {
             void *bi_private = BPF_CORE_READ(bio, bi_private);

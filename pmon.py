@@ -209,16 +209,21 @@ def cmd_debug(args):
     sys_info = _discover_sys_info()
     session_dir = _build_session_dir("debug")
     sid = os.path.basename(session_dir)
-    ebpf_mode = resolve_ebpf_mode("auto", "libaio")
+    ebpf_mode = resolve_ebpf_mode("auto", args.ebpf_mode)
+    # Match the fio ioengine to the tracer mode so the eBPF path is exercised
+    # end-to-end: iouring mode needs io_uring I/O to populate S2Q/C2C.
+    fio_ioengine = "io_uring" if ebpf_mode == "iouring" else "libaio"
 
     print(f"[debug] session -> {session_dir}")
-    print(f"[debug] config: 4 workloads x {duration}s, ebpf={ebpf_mode}, reports=all")
+    print(f"[debug] config: 4 workloads x {duration}s, ebpf={ebpf_mode}, "
+          f"ioengine={fio_ioengine}, reports=all")
 
     fio_done = []
     with Session(session_dir, sys_info, ebpf_mode=ebpf_mode,
                  ebpf_interval=1.0, reports="all"):
         for wl in _DEBUG_WORKLOADS:
-            result = run_fio_job(disk=SMOKE_IMG, workload=wl,
+            result = run_fio_job(disk=SMOKE_IMG,
+                                 workload={**wl, "ioengine": fio_ioengine},
                                  fio_path="fio", runtime_override=duration)
             if result:
                 with open(os.path.join(session_dir, f"fio_{wl['name']}.json"), "w") as f:
@@ -285,8 +290,22 @@ def cmd_debug(args):
         else:
             try:
                 with open(summary_json) as f:
-                    ndev = len(json.load(f).get("devices", {}))
+                    summary = json.load(f)
+                ndev = len(summary.get("devices", {}))
                 print(f"  [OK] eBPF summary: ebpf_summary_{sid}.json ({ndev} device(s))")
+                # io_uring phases (S2Q/C2C) must actually be measured, not 0.
+                if ebpf_mode == "iouring":
+                    got = any(
+                        (op.get("phase_avg_us", {}).get(k) or 0) > 0
+                        for dev in summary.get("devices", {}).values()
+                        for op in dev.get("ops", {}).values()
+                        for k in ("s2q", "c2c")
+                    )
+                    if got:
+                        print("  [OK] eBPF iouring phases populated (S2Q/C2C)")
+                    else:
+                        failures.append(
+                            "eBPF iouring phases all zero (S2Q/C2C not measured)")
             except Exception as e:
                 failures.append(f"ebpf_summary JSON parse error: {e}")
 
@@ -389,6 +408,9 @@ def main(argv=None):
                           help="developer self-test: 4-phase fio + monitoring + all reports")
     pdbg.add_argument("--duration", type=int, default=3,
                       help="seconds per workload phase (default 3)")
+    pdbg.add_argument("--ebpf-mode", choices=["generic", "libaio", "iouring"],
+                      default="libaio",
+                      help="eBPF mode + matching fio ioengine (default libaio)")
     pdbg.set_defaults(func=cmd_debug)
 
     # Deprecated alias for backward compatibility.

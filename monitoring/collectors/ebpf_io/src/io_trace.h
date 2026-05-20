@@ -86,6 +86,25 @@ struct libaio_stats {
     unsigned long long a2u_flush_total;
 };
 
+/*
+ * io_uring 페이즈 누적. libaio_stats와 같은 역할이되 io_uring 경로용.
+ *   S2Q : io_uring_submit_req -> block_bio_queue   (submit -> 블록 큐 진입)
+ *   C2C : block_rq_complete   -> io_uring_complete (블록 완료 -> CQE 게시)
+ * io_uring은 완료 전달이 CQ ring 읽기(syscall 없음)라 libaio의 A2U 대응이 없다.
+ * S2Q는 op 구분 없는 글로벌, C2C는 block 계층에서 분류한 op별.
+ */
+struct iouring_stats {
+    unsigned long long s2q_count;
+    unsigned long long s2q_lat_total;
+
+    unsigned long long c2c_read_count;
+    unsigned long long c2c_read_total;
+    unsigned long long c2c_write_count;
+    unsigned long long c2c_write_total;
+    unsigned long long c2c_flush_count;
+    unsigned long long c2c_flush_total;
+};
+
 #ifndef __BPF__
 struct io_event {
     __u64 data;

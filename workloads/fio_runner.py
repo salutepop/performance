@@ -29,7 +29,7 @@ def run_fio_job(disk, workload, numa_node=None, fio_path="fio", runtime_override
         f"--name={job_name}",
         f"--filename={target_filename}",
         "--direct=1",
-        "--ioengine=libaio",
+        f"--ioengine={workload.get('ioengine', 'libaio')}",
         f"--rw={workload.get('rw', 'read')}",
         f"--bs={workload.get('bs', '4k')}",
         f"--iodepth={workload.get('iodepth', 1)}",

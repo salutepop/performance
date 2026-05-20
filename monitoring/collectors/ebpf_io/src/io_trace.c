@@ -26,6 +26,7 @@ void clear_stats_map(int fd) {
 }
 
 void print_json_report(struct bpf_map *device_stats_map, struct bpf_map *sys_stats_map,
+                       struct bpf_map *iouring_stats_map,
                        struct bpf_map *device_qd_map, struct bpf_map *cpu_matrix_map,
                        struct io_stats *stats_array, int nr_cpus) {
     const char *type_names[IO_MAX_TYPES] = {"read", "read_ahead", "write", "flush", "discard"};
@@ -193,6 +194,22 @@ void print_json_report(struct bpf_map *device_stats_map, struct bpf_map *sys_sta
     printf("    \"a2u_flush_total\": %llu\n", sys_st.a2u_flush_total);
     printf("  },\n");
 
+    struct iouring_stats uring_st = {0};
+    unsigned int uring_key = 0;
+    if (iouring_stats_map)
+        bpf_map_lookup_elem(bpf_map__fd(iouring_stats_map), &uring_key, &uring_st);
+
+    printf("  \"iouring_overhead\": {\n");
+    printf("    \"s2q_count\": %llu,\n", uring_st.s2q_count);
+    printf("    \"s2q_lat_total\": %llu,\n", uring_st.s2q_lat_total);
+    printf("    \"c2c_read_count\": %llu,\n", uring_st.c2c_read_count);
+    printf("    \"c2c_read_total\": %llu,\n", uring_st.c2c_read_total);
+    printf("    \"c2c_write_count\": %llu,\n", uring_st.c2c_write_count);
+    printf("    \"c2c_write_total\": %llu,\n", uring_st.c2c_write_total);
+    printf("    \"c2c_flush_count\": %llu,\n", uring_st.c2c_flush_count);
+    printf("    \"c2c_flush_total\": %llu\n", uring_st.c2c_flush_total);
+    printf("  },\n");
+
     /* SQ x CQ CPU 매트릭스 — sparse: 실제 발생한 (issue,cq) 쌍만. */
     printf("  \"sqcq_matrix\": [");
     if (cpu_matrix_map) {
@@ -222,10 +239,12 @@ int main(int argc, char **argv) {
     struct io_stats *stats_array;
     struct bpf_map *device_stats_map;
     struct bpf_map *sys_stats_map;
+    struct bpf_map *iouring_stats_map;
     struct bpf_map *device_qd_map;
     struct bpf_map *cpu_matrix_map;
 
     bool mode_libaio = false;
+    bool mode_iouring = false;
     double opt_interval = 1.0;   // 초 단위, sub-second (예: 0.5) 허용
 
     for (int i = 1; i < argc; i++) {
@@ -234,6 +253,7 @@ int main(int argc, char **argv) {
         else if (strcmp(argv[i], "-m") == 0 && i + 1 < argc) mode_str = argv[++i];
 
         if (mode_str && strcmp(mode_str, "libaio") == 0) mode_libaio = true;
+        if (mode_str && strcmp(mode_str, "iouring") == 0) mode_iouring = true;
 
         if (strncmp(argv[i], "--interval=", 11) == 0) {
             opt_interval = atof(argv[i] + 11);
@@ -252,6 +272,7 @@ int main(int argc, char **argv) {
     if (!skel) return 1;
 
     skel->rodata->opt_trace_libaio = mode_libaio;
+    skel->rodata->opt_trace_iouring = mode_iouring;
 
     if (!mode_libaio) {
         bpf_program__set_autoattach(skel->progs.trace_submit_enter, false);
@@ -261,6 +282,10 @@ int main(int argc, char **argv) {
         bpf_program__set_autoattach(skel->progs.trace_getevents_exit, false);
         bpf_program__set_autoattach(skel->progs.trace_pgetevents_enter, false);
         bpf_program__set_autoattach(skel->progs.trace_pgetevents_exit, false);
+    }
+    if (!mode_iouring) {
+        bpf_program__set_autoattach(skel->progs.io_uring_submit_req, false);
+        bpf_program__set_autoattach(skel->progs.io_uring_complete, false);
     }
     
     err = io_trace_bpf__load(skel);
@@ -296,11 +321,13 @@ int main(int argc, char **argv) {
     stats_array = calloc(nr_cpus, sizeof(struct io_stats));
     device_stats_map = bpf_object__find_map_by_name(skel->obj, "device_stats");
     sys_stats_map = bpf_object__find_map_by_name(skel->obj, "sys_stats_map");
+    iouring_stats_map = bpf_object__find_map_by_name(skel->obj, "iouring_stats_map");
     device_qd_map = bpf_object__find_map_by_name(skel->obj, "device_qd");
     cpu_matrix_map = bpf_object__find_map_by_name(skel->obj, "cpu_matrix");
 
-    printf("[PID: %d] io_trace is running (Modes: Generic%s) | Interval: %.3fs\n",
-            getpid(), mode_libaio ? " + Libaio" : "", opt_interval);
+    printf("[PID: %d] io_trace is running (Modes: Generic%s%s) | Interval: %.3fs\n",
+            getpid(), mode_libaio ? " + Libaio" : "",
+            mode_iouring ? " + Io_uring" : "", opt_interval);
     fflush(stdout);
 
     /*
@@ -337,8 +364,8 @@ int main(int argc, char **argv) {
         clock_gettime(CLOCK_MONOTONIC, &ts_now);
         double now_s = ts_now.tv_sec + ts_now.tv_nsec / 1e9;
         if (now_s + 1e-9 >= next_report) {
-            print_json_report(device_stats_map, sys_stats_map, device_qd_map,
-                              cpu_matrix_map, stats_array, nr_cpus);
+            print_json_report(device_stats_map, sys_stats_map, iouring_stats_map,
+                              device_qd_map, cpu_matrix_map, stats_array, nr_cpus);
             next_report += opt_interval;
             /* print이 한 인터벌 넘게 걸려 deadline이 과거가 됐으면, 밀린 만큼
              * 리포트를 몰아 찍지 말고 현재 시각 기준으로 다음 격자에 재동기화. */
@@ -347,8 +374,8 @@ int main(int argc, char **argv) {
         }
     }
 
-    print_json_report(device_stats_map, sys_stats_map, device_qd_map,
-                      cpu_matrix_map, stats_array, nr_cpus);
+    print_json_report(device_stats_map, sys_stats_map, iouring_stats_map,
+                      device_qd_map, cpu_matrix_map, stats_array, nr_cpus);
 
     free(stats_array);
 cleanup:

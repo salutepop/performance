@@ -118,8 +118,10 @@ def save_csv_buffers():
         "q2d_avg_us_interval",
         "d2c_avg_us_interval",
         "u2q_avg_us_interval",
+        "s2q_avg_us_interval",
         "c2a_avg_us_interval",
         "a2u_avg_us_interval",
+        "c2c_avg_us_interval",
         "sq_cq_diff_ratio",
         "d2c_p50_us",
         "d2c_p99_us",
@@ -164,8 +166,10 @@ def parse_and_store_metrics(json_str):
         bpf_data = json.loads(json_str)
         timestamp = datetime.now().strftime("%H:%M:%S")
 
-        # libaio_overhead 누적값을 인터벌 delta로 변환 (avg us 계산).
-        sys_st = bpf_data.get("libaio_overhead", {}) or {}
+        # 엔진 overhead(libaio/io_uring) 누적값을 인터벌 delta로 변환 (avg us).
+        # 두 블록의 키는 겹치지 않아(u2q_/c2a_/a2u_ vs s2q_/c2c_) 병합해도 안전.
+        sys_st = dict(bpf_data.get("libaio_overhead", {}) or {})
+        sys_st.update(bpf_data.get("iouring_overhead", {}) or {})
 
         def _delta_avg_us(prefix):
             """prefix='c2a_read' → (delta_total_ns / delta_count) us 반환. 데이터 없으면 0."""
@@ -181,23 +185,30 @@ def parse_and_store_metrics(json_str):
             dt = curr_t - prev_t
             return (dt / dc / 1000.0) if dc > 0 else 0.0
 
-        # u2q는 op 구분 없는 글로벌 값 (모든 행에 같은 값 들어감).
-        u2q_curr_c = sys_st.get("u2q_count", 0)
-        u2q_curr_t = sys_st.get("u2q_lat_total", 0)
-        u2q_prev_c = prev_libaio.get("u2q_count", 0)
-        u2q_prev_t = prev_libaio.get("u2q_lat_total", 0)
-        prev_libaio["u2q_count"] = u2q_curr_c
-        prev_libaio["u2q_lat_total"] = u2q_curr_t
-        u2q_dc = u2q_curr_c - u2q_prev_c
-        u2q_dt = u2q_curr_t - u2q_prev_t
-        u2q_avg_us_interval = (u2q_dt / u2q_dc / 1000.0) if u2q_dc > 0 else 0.0
+        # u2q(libaio) / s2q(io_uring)는 op 구분 없는 글로벌 값 (모든 행에 동일).
+        # count 키는 *_count, total 키는 *_lat_total로 비정규 — 명시적으로 처리.
+        def _delta_global_us(cnt_k, tot_k):
+            curr_c = sys_st.get(cnt_k, 0)
+            curr_t = sys_st.get(tot_k, 0)
+            prev_c = prev_libaio.get(cnt_k, 0)
+            prev_t = prev_libaio.get(tot_k, 0)
+            prev_libaio[cnt_k] = curr_c
+            prev_libaio[tot_k] = curr_t
+            dc = curr_c - prev_c
+            dt = curr_t - prev_t
+            return (dt / dc / 1000.0) if dc > 0 else 0.0
 
-        # op별 c2a/a2u avg us delta 미리 계산해두기
+        u2q_avg_us_interval = _delta_global_us("u2q_count", "u2q_lat_total")
+        s2q_avg_us_interval = _delta_global_us("s2q_count", "s2q_lat_total")
+
+        # op별 c2a/a2u(libaio) + c2c(io_uring) avg us delta 미리 계산해두기.
+        # 한 인터벌에서 한 엔진만 값이 있고 나머지는 0.
         op_libaio_avg = {}
         for bpf_op, lib_key in _LIBAIO_OP_KEY.items():
             op_libaio_avg[bpf_op] = {
                 "c2a": _delta_avg_us(f"c2a_{lib_key}"),
                 "a2u": _delta_avg_us(f"a2u_{lib_key}"),
+                "c2c": _delta_avg_us(f"c2c_{lib_key}"),
             }
 
         for dev in bpf_data.get("devices", []):
@@ -261,7 +272,7 @@ def parse_and_store_metrics(json_str):
                 size_hist = stats.get("size_hist", [0, 0, 0, 0])
                 lba_hist = stats.get("lba_hist", [0] * LBA_BUCKETS)
 
-                op_libaio = op_libaio_avg.get(op, {"c2a": 0.0, "a2u": 0.0})
+                op_libaio = op_libaio_avg.get(op, {"c2a": 0.0, "a2u": 0.0, "c2c": 0.0})
 
                 # 인터벌 히스토그램 delta → 백분위 (32-bucket log2(ns))
                 curr_q2d_hist = stats.get("q2d_hist") or [0] * LAT_HIST_BUCKETS
@@ -285,8 +296,10 @@ def parse_and_store_metrics(json_str):
                     "q2d_avg_us_interval": round(q2d_avg_us, 2) if q2d_avg_us is not None else None,
                     "d2c_avg_us_interval": round(d2c_avg_us, 2) if d2c_avg_us is not None else None,
                     "u2q_avg_us_interval": round(u2q_avg_us_interval, 2),
+                    "s2q_avg_us_interval": round(s2q_avg_us_interval, 2),
                     "c2a_avg_us_interval": round(op_libaio["c2a"], 2),
                     "a2u_avg_us_interval": round(op_libaio["a2u"], 2),
+                    "c2c_avg_us_interval": round(op_libaio["c2c"], 2),
                     "sq_cq_diff_ratio": round(sq_cq_diff_ratio, 4),
                     "d2c_p50_us": round(d2c_pcts[50], 2) if d2c_pcts.get(50) is not None else None,
                     "d2c_p99_us": round(d2c_pcts[99], 2) if d2c_pcts.get(99) is not None else None,
@@ -328,12 +341,12 @@ def parse_and_store_metrics(json_str):
         pass
 
 
-def print_op_stats(op_name, bpf_stats, c2a_data, a2u_data, duration):
-    c2a_cnt, c2a_ms = c2a_data if c2a_data else (0, 0)
-    a2u_cnt, a2u_ms = a2u_data if a2u_data else (0, 0)
-
+def print_op_stats(op_name, bpf_stats, comp_phases, duration):
+    """comp_phases: [(label, (count, total_ms)), ...] — 엔진 완료측 페이즈
+    (libaio: C2A,A2U / io_uring: C2C). Returns (io_count, q2d_ms, d2c_ms,
+    comp_out) with comp_out = [(label, count, ms), ...]."""
     if bpf_stats.get("total_count", 0) == 0:
-        return 0, 0, 0, 0, 0
+        return 0, 0, 0, []
 
     cnt = bpf_stats["total_count"]
     bpf_bytes = bpf_stats.get("total_bytes", 0)
@@ -341,16 +354,25 @@ def print_op_stats(op_name, bpf_stats, c2a_data, a2u_data, duration):
 
     q2d_ms = bpf_stats.get("q2d", {}).get("total_lat_ns", 0) / 1000000.0
     d2c_ms = bpf_stats.get("d2c", {}).get("total_lat_ns", 0) / 1000000.0
-
     q2d_avg_us = (q2d_ms * 1000.0 / cnt) if cnt > 0 else 0
     d2c_avg_us = (d2c_ms * 1000.0 / cnt) if cnt > 0 else 0
-    c2a_avg_us = (c2a_ms * 1000.0 / c2a_cnt) if c2a_cnt > 0 else 0
-    a2u_avg_us = (a2u_ms * 1000.0 / a2u_cnt) if a2u_cnt > 0 else 0
 
-    ebpf_sum_ms = q2d_ms + d2c_ms + c2a_ms + a2u_ms
-    ebpf_avg_us = q2d_avg_us + d2c_avg_us + c2a_avg_us + a2u_avg_us
+    comp_out = []
+    comp_sum_ms = 0.0
+    comp_avg_us = 0.0
+    comp_desc = []
+    for label, data in comp_phases:
+        c_cnt, c_ms = data if data else (0, 0)
+        comp_out.append((label, c_cnt, c_ms))
+        comp_sum_ms += c_ms
+        comp_avg_us += (c_ms * 1000.0 / c_cnt) if c_cnt > 0 else 0
+        comp_desc.append(f"{label}={c_cnt:,}")
 
-    print(f" [{op_name}] IO Count : {cnt:,} (C2A={c2a_cnt:,}, A2U={a2u_cnt:,})")
+    ebpf_sum_ms = q2d_ms + d2c_ms + comp_sum_ms
+    ebpf_avg_us = q2d_avg_us + d2c_avg_us + comp_avg_us
+
+    desc = (" (" + ", ".join(comp_desc) + ")") if comp_desc else ""
+    print(f" [{op_name}] IO Count : {cnt:,}{desc}")
     print(f"  - Total Bytes : {bpf_bytes:,} B")
     print(f"  - Bandwidth   : {bpf_bw_mb:>10.2f} MB/s")
     print(
@@ -401,7 +423,7 @@ def print_op_stats(op_name, bpf_stats, c2a_data, a2u_data, duration):
                 sparkline += spark_chars[idx]
         print(f"  - LBA Heatmap  : [{sparkline}] (Scale: 0 ~ Max)")
     print()
-    return cnt, q2d_ms, d2c_ms, c2a_cnt, c2a_ms
+    return cnt, q2d_ms, d2c_ms, comp_out
 
 
 def print_final_summary(raw_json, effective_duration, mode):
@@ -413,34 +435,36 @@ def print_final_summary(raw_json, effective_duration, mode):
         )
         print("=" * 100)
 
-        sys_stats = bpf_data.get("libaio_overhead", {})
-        c2a_read = (
-            sys_stats.get("c2a_read_count", 0),
-            sys_stats.get("c2a_read_total", 0) / 1000000.0,
-        )
-        c2a_write = (
-            sys_stats.get("c2a_write_count", 0),
-            sys_stats.get("c2a_write_total", 0) / 1000000.0,
-        )
-        c2a_flush = (
-            sys_stats.get("c2a_flush_count", 0),
-            sys_stats.get("c2a_flush_total", 0) / 1000000.0,
-        )
-        a2u_read = (
-            sys_stats.get("a2u_read_count", 0),
-            sys_stats.get("a2u_read_total", 0) / 1000000.0,
-        )
-        a2u_write = (
-            sys_stats.get("a2u_write_count", 0),
-            sys_stats.get("a2u_write_total", 0) / 1000000.0,
-        )
-        a2u_flush = (
-            sys_stats.get("a2u_flush_count", 0),
-            sys_stats.get("a2u_flush_total", 0) / 1000000.0,
-        )
+        # 엔진별 페이즈 구성. block 페이즈(Q2D/D2C)는 공통, 제출/완료측은 엔진별:
+        #   libaio  → U2Q (제출) / C2A,A2U (완료)
+        #   iouring → S2Q (제출) / C2C (완료) — io_uring은 A2U 대응 없음
+        if mode == "iouring":
+            ov = bpf_data.get("iouring_overhead", {}) or {}
+            submit_phase = "S2Q"
+            submit_cnt = ov.get("s2q_count", 0)
+            submit_total_ns = ov.get("s2q_lat_total", 0)
+            comp_phase_names = ["C2C"]
 
-        phase_stats = {"U2Q": {}, "Q2D": {}, "D2C": {}, "C2A": {}, "A2U": {}}
+            def _comp_for(lib_key):
+                return [("C2C", (ov.get(f"c2c_{lib_key}_count", 0),
+                                 ov.get(f"c2c_{lib_key}_total", 0) / 1000000.0))]
+        else:
+            ov = bpf_data.get("libaio_overhead", {}) or {}
+            submit_phase = "U2Q"
+            submit_cnt = ov.get("u2q_count", 0)
+            submit_total_ns = ov.get("u2q_lat_total", 0)
+            comp_phase_names = ["C2A", "A2U"]
+
+            def _comp_for(lib_key):
+                return [("C2A", (ov.get(f"c2a_{lib_key}_count", 0),
+                                 ov.get(f"c2a_{lib_key}_total", 0) / 1000000.0)),
+                        ("A2U", (ov.get(f"a2u_{lib_key}_count", 0),
+                                 ov.get(f"a2u_{lib_key}_total", 0) / 1000000.0))]
+
+        # phase_stats[phase][op] = (count, sum_ms, avg_us)
+        phase_stats = {p: {} for p in [submit_phase, "Q2D", "D2C"] + comp_phase_names}
         tot_q2d_cnt = tot_q2d_ms = tot_d2c_ms = 0
+        comp_totals = {name: [0, 0.0] for name in comp_phase_names}  # [cnt, ms]
 
         # loop/ram/dm-/md 등 가상 디바이스 제외하고 비율 계산
         monitored_devs = [d for d in bpf_data["devices"]
@@ -449,6 +473,10 @@ def print_final_summary(raw_json, effective_duration, mode):
             sum(op["total_count"] for op in dev["operations"].values())
             for dev in monitored_devs
         )
+
+        # 표시명 -> (operations 키, _LIBAIO_OP_KEY lib_key). read_ahead는 완료측 없음.
+        op_rows = [("READ", "read", "read"), ("WRITE", "write", "write"),
+                   ("READ-AHEAD", "read_ahead", None), ("FLUSH", "flush", "flush")]
 
         for dev in monitored_devs:
             ops = dev["operations"]
@@ -465,81 +493,42 @@ def print_final_summary(raw_json, effective_duration, mode):
                           f"→ {'NUMA-local OK' if _diff/_tot < 0.05 else 'CROSS-CPU completion (IRQ affinity 확인)'}")
                 print()
 
-                for op_name, bpf_src, c2a_data, a2u_data in [
-                    ("READ", ops.get("read", {}), c2a_read, a2u_read),
-                    ("WRITE", ops.get("write", {}), c2a_write, a2u_write),
-                    ("READ-AHEAD", ops.get("read_ahead", {}), None, None),
-                    ("FLUSH", ops.get("flush", {}), c2a_flush, a2u_flush),
-                ]:
-                    if bpf_src:
-                        q_cnt, q_ms, d_ms, c_cnt, c_ms = print_op_stats(
-                            op_name, bpf_src, c2a_data, a2u_data, effective_duration
-                        )
-                        tot_q2d_cnt += q_cnt
-                        tot_q2d_ms += q_ms
-                        tot_d2c_ms += d_ms
-                        phase_stats["Q2D"][op_name] = (
-                            q_cnt,
-                            q_ms,
-                            (q_ms * 1000.0 / q_cnt) if q_cnt > 0 else 0,
-                        )
-                        phase_stats["D2C"][op_name] = (
-                            q_cnt,
-                            d_ms,
-                            (d_ms * 1000.0 / q_cnt) if q_cnt > 0 else 0,
-                        )
-                        if c2a_data:
-                            phase_stats["C2A"][op_name] = (
-                                c_cnt,
-                                c_ms,
-                                (c_ms * 1000.0 / c_cnt) if c_cnt > 0 else 0,
-                            )
-                        if a2u_data:
-                            a_cnt, a_ms = a2u_data
-                            phase_stats["A2U"][op_name] = (
-                                a_cnt,
-                                a_ms,
-                                (a_ms * 1000.0 / a_cnt) if a_cnt > 0 else 0,
-                            )
+                for op_disp, op_key, lib_key in op_rows:
+                    bpf_src = ops.get(op_key, {})
+                    if not bpf_src:
+                        continue
+                    comp_phases = (_comp_for(lib_key) if lib_key
+                                   else [(n, (0, 0)) for n in comp_phase_names])
+                    q_cnt, q_ms, d_ms, comp_out = print_op_stats(
+                        op_disp, bpf_src, comp_phases, effective_duration
+                    )
+                    tot_q2d_cnt += q_cnt
+                    tot_q2d_ms += q_ms
+                    tot_d2c_ms += d_ms
+                    phase_stats["Q2D"][op_disp] = (
+                        q_cnt, q_ms, (q_ms * 1000.0 / q_cnt) if q_cnt > 0 else 0)
+                    phase_stats["D2C"][op_disp] = (
+                        q_cnt, d_ms, (d_ms * 1000.0 / q_cnt) if q_cnt > 0 else 0)
+                    for label, c_cnt, c_ms in comp_out:
+                        phase_stats[label][op_disp] = (
+                            c_cnt, c_ms,
+                            (c_ms * 1000.0 / c_cnt) if c_cnt > 0 else 0)
+                        comp_totals[label][0] += c_cnt
+                        comp_totals[label][1] += c_ms
 
-        u2q_cnt = sys_stats.get("u2q_count", 0)
-        u2q_sum_ms = sys_stats.get("u2q_lat_total", 0) / 1000000.0
-        phase_stats["U2Q"]["Total"] = (
-            u2q_cnt,
-            u2q_sum_ms,
-            (
-                (sys_stats.get("u2q_lat_total", 0) / 1000.0 / u2q_cnt)
-                if u2q_cnt > 0
-                else 0
-            ),
-        )
-
-        tot_c2a_cnt = c2a_read[0] + c2a_write[0] + c2a_flush[0]
-        tot_c2a_ms = c2a_read[1] + c2a_write[1] + c2a_flush[1]
-        phase_stats["C2A"]["Total"] = (
-            tot_c2a_cnt,
-            tot_c2a_ms,
-            (tot_c2a_ms * 1000.0 / tot_c2a_cnt) if tot_c2a_cnt > 0 else 0,
-        )
-
-        tot_a2u_cnt = a2u_read[0] + a2u_write[0] + a2u_flush[0]
-        tot_a2u_ms = a2u_read[1] + a2u_write[1] + a2u_flush[1]
-        phase_stats["A2U"]["Total"] = (
-            tot_a2u_cnt,
-            tot_a2u_ms,
-            (tot_a2u_ms * 1000.0 / tot_a2u_cnt) if tot_a2u_cnt > 0 else 0,
-        )
-
+        phase_stats[submit_phase]["Total"] = (
+            submit_cnt, submit_total_ns / 1000000.0,
+            (submit_total_ns / 1000.0 / submit_cnt) if submit_cnt > 0 else 0)
         phase_stats["Q2D"]["Total"] = (
-            tot_q2d_cnt,
-            tot_q2d_ms,
-            (tot_q2d_ms * 1000.0 / tot_q2d_cnt) if tot_q2d_cnt > 0 else 0,
-        )
+            tot_q2d_cnt, tot_q2d_ms,
+            (tot_q2d_ms * 1000.0 / tot_q2d_cnt) if tot_q2d_cnt > 0 else 0)
         phase_stats["D2C"]["Total"] = (
-            tot_q2d_cnt,
-            tot_d2c_ms,
-            (tot_d2c_ms * 1000.0 / tot_q2d_cnt) if tot_q2d_cnt > 0 else 0,
-        )
+            tot_q2d_cnt, tot_d2c_ms,
+            (tot_d2c_ms * 1000.0 / tot_q2d_cnt) if tot_q2d_cnt > 0 else 0)
+        for name in comp_phase_names:
+            c_cnt, c_ms = comp_totals[name]
+            phase_stats[name]["Total"] = (
+                c_cnt, c_ms, (c_ms * 1000.0 / c_cnt) if c_cnt > 0 else 0)
 
         table_width = 100
         print("-" * table_width)
@@ -550,7 +539,7 @@ def print_final_summary(raw_json, effective_duration, mode):
         )
         print("-" * table_width)
 
-        def print_phase(phase_name, phase_key):
+        def print_phase(phase_name, phase_key, is_submit, is_comp):
             stats = phase_stats.get(phase_key, {})
 
             def get_val(op, idx):
@@ -559,58 +548,38 @@ def print_final_summary(raw_json, effective_duration, mode):
                 val = stats[op][idx]
                 return f"{int(val):,}" if idx == 0 else f"{val:.2f}"
 
-            tot, r, w, ra, fl = (
-                get_val("Total", 0),
-                get_val("READ", 0),
-                get_val("WRITE", 0),
-                get_val("READ-AHEAD", 0),
-                get_val("FLUSH", 0),
-            )
-            if phase_key == "U2Q":
-                r = w = ra = fl = "-"
-            if phase_key in ["C2A", "A2U"]:
-                ra = "-"
-            print(
-                f" {phase_name:<18} | Call Count | {tot:>12} | {r:>12} | {w:>12} | {ra:>10} | {fl:>8}"
-            )
-
-            tot, r, w, ra, fl = (
-                get_val("Total", 1),
-                get_val("READ", 1),
-                get_val("WRITE", 1),
-                get_val("READ-AHEAD", 1),
-                get_val("FLUSH", 1),
-            )
-            if phase_key == "U2Q":
-                r = w = ra = fl = "-"
-            if phase_key in ["C2A", "A2U"]:
-                ra = "-"
-            print(
-                f" {'':<18} | Sum (ms)   | {tot:>12} | {r:>12} | {w:>12} | {ra:>10} | {fl:>8}"
-            )
-
-            tot, r, w, ra, fl = (
-                get_val("Total", 2),
-                get_val("READ", 2),
-                get_val("WRITE", 2),
-                get_val("READ-AHEAD", 2),
-                get_val("FLUSH", 2),
-            )
-            if phase_key == "U2Q":
-                r = w = ra = fl = "-"
-            if phase_key in ["C2A", "A2U"]:
-                ra = "-"
-            print(
-                f" {'':<18} | Avg (us)   | {tot:>12} | {r:>12} | {w:>12} | {ra:>10} | {fl:>8}"
-            )
+            for metric_idx, metric_name in (
+                (0, "Call Count"), (1, "Sum (ms)  "), (2, "Avg (us)  ")
+            ):
+                tot = get_val("Total", metric_idx)
+                r = get_val("READ", metric_idx)
+                w = get_val("WRITE", metric_idx)
+                ra = get_val("READ-AHEAD", metric_idx)
+                fl = get_val("FLUSH", metric_idx)
+                # 제출측(U2Q/S2Q)은 op 구분 없는 글로벌 — Total만 의미 있음.
+                if is_submit:
+                    r = w = ra = fl = "-"
+                # 완료측(C2A/A2U/C2C)은 read-ahead 경로가 없어 컬럼 비움.
+                if is_comp:
+                    ra = "-"
+                head = phase_name if metric_idx == 0 else ""
+                print(
+                    f" {head:<18} | {metric_name} | {tot:>12} | {r:>12} | {w:>12} | {ra:>10} | {fl:>8}"
+                )
             print("-" * table_width)
 
-        print_phase("U2Q (User->BLK_Q)", "U2Q")
-        print_phase("Q2D (BLK_Q->Disp)", "Q2D")
-        print_phase("D2C (Disp->Compl)", "D2C")
+        _phase_disp = {
+            "U2Q": "U2Q (User->BLK_Q)", "S2Q": "S2Q (Submit->BLK_Q)",
+            "Q2D": "Q2D (BLK_Q->Disp)", "D2C": "D2C (Disp->Compl)",
+            "C2A": "C2A (Compl->AIO)", "A2U": "A2U (AIO->User)",
+            "C2C": "C2C (Compl->CQE)",
+        }
+        print_phase(_phase_disp[submit_phase], submit_phase, True, False)
+        print_phase(_phase_disp["Q2D"], "Q2D", False, False)
+        print_phase(_phase_disp["D2C"], "D2C", False, False)
         if mode != "generic":
-            print_phase("C2A (Compl->AIO)", "C2A")
-            print_phase("A2U (AIO->User)", "A2U")
+            for name in comp_phase_names:
+                print_phase(_phase_disp[name], name, False, True)
         print("=" * table_width)
     except Exception as e:
         print(f"[-] Parsing Error in Final Summary: {e}")
@@ -622,12 +591,16 @@ def build_summary(bpf_data, duration, mode):
     Same numbers as the printed FINAL REPORT but machine-readable, so the
     report/ layer can draw real charts instead of re-parsing stdout text.
     """
-    sys_st = bpf_data.get("libaio_overhead", {}) or {}
+    # libaio/io_uring overhead 병합 — 키가 겹치지 않아 안전. 한 모드만 값이 있다.
+    sys_st = dict(bpf_data.get("libaio_overhead", {}) or {})
+    sys_st.update(bpf_data.get("iouring_overhead", {}) or {})
     u2q_cnt = sys_st.get("u2q_count", 0)
     u2q_avg_us = round(sys_st.get("u2q_lat_total", 0) / 1000.0 / u2q_cnt, 2) if u2q_cnt else 0.0
+    s2q_cnt = sys_st.get("s2q_count", 0)
+    s2q_avg_us = round(sys_st.get("s2q_lat_total", 0) / 1000.0 / s2q_cnt, 2) if s2q_cnt else 0.0
 
     out = {"duration_s": round(duration, 2), "mode": mode,
-           "u2q_avg_us": u2q_avg_us, "devices": {},
+           "u2q_avg_us": u2q_avg_us, "s2q_avg_us": s2q_avg_us, "devices": {},
            "sqcq_matrix": bpf_data.get("sqcq_matrix", [])}
 
     for dev in bpf_data.get("devices", []):
@@ -644,7 +617,7 @@ def build_summary(bpf_data, duration, mode):
                 continue
             q2d_avg = st.get("q2d", {}).get("total_lat_ns", 0) / 1000.0 / cnt
             d2c_avg = st.get("d2c", {}).get("total_lat_ns", 0) / 1000.0 / cnt
-            c2a_avg = a2u_avg = 0.0
+            c2a_avg = a2u_avg = c2c_avg = 0.0
             lib = _LIBAIO_OP_KEY.get(op)
             if lib:
                 cc = sys_st.get(f"c2a_{lib}_count", 0)
@@ -653,6 +626,9 @@ def build_summary(bpf_data, duration, mode):
                 ac = sys_st.get(f"a2u_{lib}_count", 0)
                 if ac:
                     a2u_avg = sys_st.get(f"a2u_{lib}_total", 0) / 1000.0 / ac
+                ccc = sys_st.get(f"c2c_{lib}_count", 0)
+                if ccc:
+                    c2c_avg = sys_st.get(f"c2c_{lib}_total", 0) / 1000.0 / ccc
             q2d_p = compute_percentiles(st.get("q2d_hist") or [0] * LAT_HIST_BUCKETS)
             d2c_p = compute_percentiles(st.get("d2c_hist") or [0] * LAT_HIST_BUCKETS)
             bytes_ = st.get("total_bytes", 0)
@@ -673,11 +649,14 @@ def build_summary(bpf_data, duration, mode):
                 "bandwidth_mb_s": round((bytes_ / 1048576.0) / duration, 2) if duration > 0 else 0.0,
                 "max_qd": st.get("max_qd", 0),
                 "size_hist": list(st.get("size_hist", [0, 0, 0, 0])),
+                # libaio는 u2q/c2a/a2u, io_uring은 s2q/c2c만 채워진다 (나머지 0).
                 "phase_avg_us": {
                     "u2q": u2q_avg_us if lib else 0.0,
+                    "s2q": s2q_avg_us if lib else 0.0,
                     "q2d": round(q2d_avg, 2),
                     "d2c": round(d2c_avg, 2),
                     "c2a": round(c2a_avg, 2),
+                    "c2c": round(c2c_avg, 2),
                     "a2u": round(a2u_avg, 2),
                 },
                 # D2C 세부 — d2c 구간 내부 비율. traced_frac < 1이면 일부 I/O만 추적됨.

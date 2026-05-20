@@ -187,7 +187,7 @@ Multi-disk 시나리오(`run_all_disks=True`)는 `disk_label="multi_disk"`로 �
 - **새 collector 추가**: `monitoring/collectors/`에 `Collector` ABC를 상속한 클래스. `Session(collectors=[...])`에 넣으면 끝.
 - **fio 호출은 `runner_func`을 통해서만** 한다 (= `bound_runner`). 시나리오가 직접 `subprocess.run`으로 fio를 부르면 quick 모드/fio path override가 깨진다. TC10이 예외적으로 직접 부르지만, 일반 워크로드는 `runner_func`을 쓸 것.
 - **결과 저장 패턴**: workload 하나 돌릴 때마다 `reporter.save_json(session_dir, f"fio_{wl_name}.json", result)`. 누적 비교 테이블은 시나리오 인스턴스 변수(`self.all_results`)에 모았다가 디스크별 루프 끝에서 출력 (`tc03_core_distance.py` 패턴 참고).
-- **워크로드 dict 키**: `name`, `rw`, `bs`, `iodepth`, `numjobs`, `runtime`, `size`, `cpus_allowed`, `rwmixread`. `fio_runner.py`에서 실제 fio 플래그로 변환되는 키만 의미 있다 — `time_based`, `direct`, `group_reporting`은 dict에 넣어도 무시된다(이미 강제 적용).
+- **워크로드 dict 키**: `name`, `rw`, `bs`, `iodepth`, `numjobs`, `runtime`, `size`, `cpus_allowed`, `rwmixread`, `ioengine` (기본 `libaio`; io_uring 분석 시 `io_uring`). `fio_runner.py`에서 실제 fio 플래그로 변환되는 키만 의미 있다 — `time_based`, `direct`, `group_reporting`은 dict에 넣어도 무시된다(이미 강제 적용).
 - **결과 파싱**: fio JSON의 `jobs[0]["read"|"write"]["bw"]`는 KB/s, `clat_ns`/`lat_ns`는 ns. 코드 전반에서 `/1024`로 MB/s, `/1000`으로 us 환산.
 - **출력 언어**: 콘솔 로그/리포트 등 사용자 facing 출력은 영어. 코드 주석/내부 문서는 한국어 유지 가능.
 

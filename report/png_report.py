@@ -301,22 +301,27 @@ def _save_correlation_chart(path, corr, title, phases=None):
 # the nvme_complete_rq tracepoint into NVME (device round-trip) + BLKC (block
 # completion path), both orange family. "d2c" is the fallback single segment
 # when the nvme tracepoint didn't fire (so no time is ever lost from the bar).
-_PHASE_ORDER = ["u2q", "q2d", "nvme", "blkc", "d2c", "c2a", "a2u"]
+# Phases from both engines: u2q/c2a/a2u are libaio-only, s2q/c2c io_uring-only.
+# Each summary populates only its engine's subset; the other phases stay 0 and
+# are skipped by the chart (zero-sum segments are dropped).
+_PHASE_ORDER = ["u2q", "s2q", "q2d", "nvme", "blkc", "d2c", "c2a", "c2c", "a2u"]
 # Legend: pipeline number + phase abbreviation + a short description.
 _PHASE_LABELS = {
     "u2q":  "1. U2Q  io_submit() -> block queue",
+    "s2q":  "1. S2Q  io_uring submit -> block queue",
     "q2d":  "2. Q2D  block queue -> dispatch",
     "nvme": "3. NVME  device I/O (NVMe hardware)",
     "blkc": "4. BLKC  block-layer completion",
     "d2c":  "3+4. D2C  device + completion (unsplit)",
     "c2a":  "5. C2A  block -> AIO layer",
+    "c2c":  "5. C2C  block complete -> io_uring CQE",
     "a2u":  "6. A2U  AIO -> user wakeup",
 }
 _PHASE_COLORS = {
-    "u2q": "#90caf9", "q2d": "#26a69a",
+    "u2q": "#90caf9", "s2q": "#90caf9", "q2d": "#26a69a",
     "nvme": "#ef6c00", "blkc": "#ffb74d",   # D2C family
     "d2c": "#ef6c00",
-    "c2a": "#ab47bc", "a2u": "#90a4ae",
+    "c2a": "#ab47bc", "c2c": "#ab47bc", "a2u": "#90a4ae",
 }
 _SIZE_LABELS = ["<=4K", "4-32K", "32-128K", ">128K"]
 _SIZE_COLORS = ["#08519c", "#3182bd", "#6baed6", "#bdd7e7"]
@@ -357,8 +362,10 @@ def _ebpf_phase_segments(op):
     NVME/BLKC by the traced ratio, scaled so the segments still sum to the
     authoritative D2C total (no time is lost). Falls back to a single 'd2c'."""
     ph = op.get("phase_avg_us", {}) or {}
-    seg = {"u2q": ph.get("u2q", 0) or 0, "q2d": ph.get("q2d", 0) or 0,
-           "c2a": ph.get("c2a", 0) or 0, "a2u": ph.get("a2u", 0) or 0}
+    seg = {"u2q": ph.get("u2q", 0) or 0, "s2q": ph.get("s2q", 0) or 0,
+           "q2d": ph.get("q2d", 0) or 0,
+           "c2a": ph.get("c2a", 0) or 0, "c2c": ph.get("c2c", 0) or 0,
+           "a2u": ph.get("a2u", 0) or 0}
     d2c = ph.get("d2c", 0) or 0
     sp = op.get("d2c_split_us", {}) or {}
     sp_sum = (sp.get("nvme", 0) or 0) + (sp.get("blkc", 0) or 0)

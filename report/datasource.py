@@ -154,14 +154,18 @@ def _build_device_series(header, rows):
     return labels, series
 
 
-def _build_lba_heatmap(header, rows):
-    """device CSV → {timestamps:[], buckets: [[count per ts] × 64]}.
-    각 timestamp에서 모든 operation의 lba_N 합계를 취하고, 이전 timestamp 와의 delta 사용.
+def _build_lba_heatmap(header, rows, op_filter=None):
+    """device CSV → {timestamps:[], buckets: [[delta per bucket] per ts]}.
+
+    op_filter: set of operation names to include (None = all ops).
+    lba_N 컬럼은 op별 누적값 — op별로 인터벌 delta를 구한 뒤 timestamp 단위로
+    합산한다 (delta-then-sum). op이 인터벌마다 등장/소멸해도 안전.
     """
     if not header or not rows:
         return None
     try:
         ts_i = header.index("timestamp")
+        op_i = header.index("operation")
     except ValueError:
         return None
     # CSV 헤더에서 연속된 lba_N 컬럼 동적 카운트 (LBA_BUCKETS 변경에 자동 대응)
@@ -175,30 +179,31 @@ def _build_lba_heatmap(header, rows):
         return None
     nb = len(lba_indices)
 
-    # timestamp 단위로 op별 합계 → row 합 (op 무관, 디스크 전체 접근 분포)
     ts_order = []
     ts_seen = set()
-    per_ts_sum = {}  # ts → [nb buckets cumulative sum across ops]
+    per_ts_delta = {}  # ts → [nb] interval delta summed over the filtered ops
+    prev = {}          # op → [nb] cumulative
     for row in rows:
         ts = row[ts_i] if ts_i < len(row) else ""
+        op = row[op_i] if op_i < len(row) else "?"
         if ts not in ts_seen:
             ts_order.append(ts)
             ts_seen.add(ts)
-            per_ts_sum[ts] = [0] * nb
-        for b, ci in enumerate(lba_indices):
+            per_ts_delta[ts] = [0] * nb
+        if op_filter is not None and op not in op_filter:
+            continue
+        cur = []
+        for ci in lba_indices:
+            v = 0
             if ci < len(row) and row[ci] not in ("", None):
                 try:
-                    per_ts_sum[ts][b] += int(float(row[ci]))
+                    v = int(float(row[ci]))
                 except ValueError:
-                    pass
+                    v = 0
+            cur.append(v)
+        p = prev.get(op, [0] * nb)
+        for b in range(nb):
+            per_ts_delta[ts][b] += max(0, cur[b] - p[b])
+        prev[op] = cur
 
-    # 누적값이라 인터벌 delta = 현재 - 이전 (첫 인터벌은 그대로)
-    deltas = []
-    prev = [0] * nb
-    for ts in ts_order:
-        cur = per_ts_sum[ts]
-        d = [max(0, cur[b] - prev[b]) for b in range(nb)]
-        deltas.append(d)
-        prev = cur
-
-    return {"timestamps": ts_order, "buckets": deltas}
+    return {"timestamps": ts_order, "buckets": [per_ts_delta[t] for t in ts_order]}

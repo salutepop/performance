@@ -27,10 +27,10 @@ $(APP): $(APP).c $(SKEL_H)
 run: $(APP)
 	sudo ./$(APP)
 
-# BPF dev workflow: edit bpf -> build -> run pmon.py debug --full as the E2E smoke
+# BPF dev workflow: edit bpf -> build -> run pmon.py debug as the E2E smoke
 # (passes only if Q2D/D2C latencies are non-zero and the device CSV is populated).
 smoke: $(APP)
-	cd ../../../.. && python3 pmon.py debug --full --duration 3
+	cd ../../../.. && python3 pmon.py debug --duration 3
 
 # 정리
 clean:

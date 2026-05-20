@@ -74,15 +74,13 @@ stdlib 만 쓰니까 둘 다 결과 동일. 다른 사람이 clone 했을 때 �
 `pmon.py debug` 가 개발 검증용 self-test다. 종료 코드 0 = 통과:
 
 ```bash
-./pmon.py debug                  # 2초 monitor-only smoke, sudo 불필요
-./pmon.py debug --full           # eBPF + fio 포함 E2E
-./pmon.py debug --with-fio       # fio만 추가
-./pmon.py debug --with-ebpf      # eBPF tracer만 추가
+./pmon.py debug                  # 4-phase fio + eBPF + 전체 리포트 E2E
+./pmon.py debug --duration 1     # 워크로드 페이즈당 1초로 단축 (기본 3초)
 ```
 
 uv venv에서 돌리려면:
 ```bash
-uv run ./pmon.py debug --full
+uv run ./pmon.py debug
 ```
 
 ## 4. 의존성 추가 (필요해질 때)
@@ -147,7 +145,7 @@ pmon = "pmon:main"
 # 깨끗한 clone 후:
 git clone <repo> performance && cd performance
 uv sync                          # .venv 재현 (deps 같은 버전)
-uv run ./pmon.py debug --full    # 회귀 검증
+uv run ./pmon.py debug           # 회귀 검증
 ```
 
 `uv.lock` 이 추적되어 있으므로 다른 시스템에서도 동일한 Python + 같은 deps 버전 보장.
@@ -274,7 +272,7 @@ uv run ./pmon.py diff --baseline SID1 --candidate SID2
 uv run python -m workloads.scenarios.sample_randread
 
 # smoke
-./pmon.py debug --full
+./pmon.py debug
 
 # 의존성 추가
 uv add <package>

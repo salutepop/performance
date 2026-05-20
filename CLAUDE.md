@@ -35,8 +35,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ./pmon.py summary                         # 평탄화 JSON export
 
 # 개발 검증 (코드 수정 후 자체 검증용)
-./pmon.py debug                           # 2초 monitor-only smoke, sudo 불필요
-./pmon.py debug --full                    # eBPF + fio 포함 E2E, PASS/FAIL 종료코드
+./pmon.py debug                           # 4-phase fio + eBPF + 전체 리포트 E2E, PASS/FAIL 종료코드
+./pmon.py debug --duration 1              # 워크로드 페이즈당 1초로 단축 (기본 3초)
 ```
 
 NVMe raw 디바이스에 직접 쓰는 워크로드가 많아 root/sudo 권한이 거의 항상 필요하다. `tc02_dirty_gc.py` 같은 케이스는 `/proc/sys/vm/drop_caches`에 쓴다.
@@ -145,7 +145,7 @@ class MyTest(Scenario):
 # 빌드 (clang + bpftool + libbpf 필요)
 make -C monitoring/collectors/ebpf_io/src
 make -C monitoring/collectors/ebpf_io/src clean
-make -C monitoring/collectors/ebpf_io/src smoke    # = pmon.py debug --full
+make -C monitoring/collectors/ebpf_io/src smoke    # = pmon.py debug
 
 # 단독 실행
 python3 monitoring/collectors/ebpf_io/collector.py -m libaio -i 1 -c "fio ..."
@@ -193,7 +193,7 @@ Multi-disk 시나리오(`run_all_disks=True`)는 `disk_label="multi_disk"`로 �
 
 ## Known sharp edges
 
-- **eBPF는 sudo NOPASSWD 경로에 의존**한다. `monitoring/collectors/ebpf_io/src/io_trace` 바이너리가 sudoers의 NOPASSWD 룰에 등록돼 있어야 `pmon.py debug --full` / `--ebpf on`이 동작한다 (DEV_RULES.md 참고). 바이너리를 옮기면 sudoers도 갱신해야 한다.
+- **eBPF는 sudo NOPASSWD 경로에 의존**한다. `monitoring/collectors/ebpf_io/src/io_trace` 바이너리가 sudoers의 NOPASSWD 룰에 등록돼 있어야 `pmon.py debug` / `--ebpf on`이 동작한다 (DEV_RULES.md 참고). 바이너리를 옮기면 sudoers도 갱신해야 한다.
 - `tc10_multi_ssd_optimal.py`는 최적화 비교군 측정에서 `sudo fio`를 직접 호출한다. `fio_path` 설정이 무시되므로 환경에 따라 깨질 수 있음.
 - `config/system.json`의 기본값은 `/dev/ram0..ram3` (RAM 디스크). 실제 NVMe 테스트는 `target_disks`를 비워 자동 탐색을 쓰거나 명시적으로 채운다.
 - `doc/test_cases_analysis.md`에 TC05 라벨 버그(QD64로 잘못 표기)가 언급돼 있다 — 코드는 QD1로 동작하지만 출력 라벨이 어긋날 수 있음.

@@ -14,9 +14,9 @@
 | `bandwidth_mb_s_interval` | float MB/s | 인터벌 평균 대역폭 |
 | `q2d_avg_us_interval` | float us | 인터벌 평균 Q2D (블록큐 진입→dispatch) |
 | `d2c_avg_us_interval` | float us | 인터벌 평균 D2C (dispatch→completion, 디스크 실제 처리 시간) |
-| `u2q_avg_us_interval` | float us | libaio 모드 한정: 인터벌 평균 U2Q (syscall→block_bio_queue). 글로벌 값이라 같은 인터벌 모든 op 행에 같은 값 들어감 |
-| `c2a_avg_us_interval` | float us | libaio 모드 한정: 인터벌 평균 C2A (rq_complete→aio_complete). op별 |
-| `a2u_avg_us_interval` | float us | libaio 모드 한정: 인터벌 평균 A2U (aio_complete→user wakeup). op별 |
+| `s2q_avg_us_interval` | float us | libaio·io_uring 모드: 인터벌 평균 S2Q (submit→block_bio_queue). 글로벌 값이라 같은 인터벌 모든 op 행에 같은 값 들어감 |
+| `c2r_avg_us_interval` | float us | libaio·io_uring 모드: 인터벌 평균 C2R (rq_complete→엔진 완료 = aio_complete/io_uring CQE). op별 |
+| `r2u_avg_us_interval` | float us | libaio 모드 한정: 인터벌 평균 R2U (aio_complete→io_getevents 반환). op별. io_uring은 0 |
 | `sq_cq_diff_ratio` | float [0,1] | SQ(issue) CPU vs CQ(completion) CPU 불일치 비율. **device 단위** — 같은 인터벌 모든 op 행에 같은 값 |
 | `d2c_p50_us` | float us | 인터벌 d2c log2(ns) 히스토그램 delta 기준 p50 |
 | `d2c_p99_us` | float us | 인터벌 d2c p99 (tail latency) |
@@ -32,11 +32,11 @@
 
 예시 (첫 두 행):
 ```csv
-timestamp,operation,iops_interval,bandwidth_mb_s_interval,q2d_avg_us_interval,d2c_avg_us_interval,u2q_avg_us_interval,c2a_avg_us_interval,a2u_avg_us_interval,sq_cq_diff_ratio,d2c_p50_us,d2c_p99_us,q2d_p99_us,current_qd,max_qd,...
+timestamp,operation,iops_interval,bandwidth_mb_s_interval,q2d_avg_us_interval,d2c_avg_us_interval,s2q_avg_us_interval,c2r_avg_us_interval,r2u_avg_us_interval,sq_cq_diff_ratio,d2c_p50_us,d2c_p99_us,q2d_p99_us,current_qd,max_qd,...
 00:21:48,read,47599,185.93,4.12,93.58,2.34,0.75,206.13,0.0001,82.0,256.0,8.0,8,28,...
 ```
 
-**Phase 정의**: U2Q · Q2D · D2C · C2A · A2U → I/O 한 건 전체 latency를 5단계로 나눈 monitoring/collectors/ebpf_io/CLAUDE.md "Full-Stack Latency Breakdown" 참고.
+**Phase 정의**: S2Q · Q2D · D2C · C2R · R2U → I/O 한 건 전체 latency를 6단계로 나눈 것 (D2C는 NVMe CQ 경계 기준 D2CQ+CQ2C로 더 쪼개지고, R2U는 libaio 전용). monitoring/collectors/ebpf_io/CLAUDE.md "Full-Stack Latency Breakdown" 참고.
 
 ## 2. `system_metrics_<session_id>.csv` (system metrics CSV)
 

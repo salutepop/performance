@@ -38,7 +38,7 @@ struct trace_ctx {
     u64 q2d_lat;
     u64 pid_tgid;
     u32 issue_cpu;
-    u64 nvme_complete_ts;  // nvme_complete_rq tracepoint 시각 (D2C 세분화)
+    u64 cq_ts;  // nvme_complete_rq(=CQ 경계) tracepoint 시각 (D2C 세분화)
 };
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
@@ -90,7 +90,8 @@ struct {
     __type(value, u64); 
 } iocb_complete_ts SEC(".maps");
 
-struct c2a_ctx {
+/* C2R 시작점(block_rq_complete 시각 + op type). libaio·io_uring 공용. */
+struct comp_ctx {
     u64 ts;
     int type;
     u64 pid_tgid;
@@ -98,24 +99,17 @@ struct c2a_ctx {
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 1048576);
-    __type(key, u64); 
-    __type(value, struct c2a_ctx); 
-} iocb_c2a_start SEC(".maps");
+    __type(key, u64);
+    __type(value, struct comp_ctx);
+} iocb_comp_start SEC(".maps");
 
+/* 엔진 페이즈(S2Q/C2R/R2U) 글로벌 누적. libaio·io_uring 공용 (mode 상호배타). */
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
     __uint(max_entries, 1);
     __type(key, u32);
-    __type(value, struct libaio_stats);
-} sys_stats_map SEC(".maps");
-
-/* io_uring 페이즈(S2Q/C2C) 글로벌 누적. sys_stats_map의 io_uring 짝. */
-struct {
-    __uint(type, BPF_MAP_TYPE_ARRAY);
-    __uint(max_entries, 1);
-    __type(key, u32);
-    __type(value, struct iouring_stats);
-} iouring_stats_map SEC(".maps");
+    __type(value, struct engine_stats);
+} engine_stats_map SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
@@ -184,28 +178,28 @@ int trace_aio_complete(struct pt_regs *ctx) {
     u64 ts = bpf_ktime_get_ns();
     u64 pid_tgid = 0;
 
-    u64 key_iocb = (u64)aio_iocb; 
-    struct c2a_ctx *cctx = bpf_map_lookup_elem(&iocb_c2a_start, &key_iocb);
+    u64 key_iocb = (u64)aio_iocb;
+    struct comp_ctx *cctx = bpf_map_lookup_elem(&iocb_comp_start, &key_iocb);
     if (cctx && cctx->ts > 0) {
-        pid_tgid = cctx->pid_tgid; 
+        pid_tgid = cctx->pid_tgid;
         if (ts > cctx->ts) {
-            u64 c2a_lat = ts - cctx->ts;
+            u64 c2r_lat = ts - cctx->ts;
             u32 stat_key = 0;
-            struct libaio_stats *st = bpf_map_lookup_elem(&sys_stats_map, &stat_key);
+            struct engine_stats *st = bpf_map_lookup_elem(&engine_stats_map, &stat_key);
             if (st) {
                 if (cctx->type == IO_READ || cctx->type == IO_READ_AHEAD) {
-                    __sync_fetch_and_add(&st->c2a_read_count, 1);
-                    __sync_fetch_and_add(&st->c2a_read_total, c2a_lat);
+                    __sync_fetch_and_add(&st->c2r_read_count, 1);
+                    __sync_fetch_and_add(&st->c2r_read_total, c2r_lat);
                 } else if (cctx->type == IO_WRITE) {
-                    __sync_fetch_and_add(&st->c2a_write_count, 1);
-                    __sync_fetch_and_add(&st->c2a_write_total, c2a_lat);
+                    __sync_fetch_and_add(&st->c2r_write_count, 1);
+                    __sync_fetch_and_add(&st->c2r_write_total, c2r_lat);
                 } else if (cctx->type == IO_FLUSH) {
-                    __sync_fetch_and_add(&st->c2a_flush_count, 1);
-                    __sync_fetch_and_add(&st->c2a_flush_total, c2a_lat);
+                    __sync_fetch_and_add(&st->c2r_flush_count, 1);
+                    __sync_fetch_and_add(&st->c2r_flush_total, c2r_lat);
                 }
             }
         }
-        bpf_map_delete_elem(&iocb_c2a_start, &key_iocb);
+        bpf_map_delete_elem(&iocb_comp_start, &key_iocb);
     }
 
     u64 key_user = BPF_CORE_READ(aio_iocb, ki_res.obj);
@@ -235,7 +229,7 @@ int trace_getevents_exit(struct trace_event_raw_sys_exit *ctx) {
     u64 events_ptr = *events_ptr_p;
     bpf_map_delete_elem(&active_getevents_events, &pid_tgid);
     u32 key = 0;
-    struct libaio_stats *st = bpf_map_lookup_elem(&sys_stats_map, &key);
+    struct engine_stats *st = bpf_map_lookup_elem(&engine_stats_map, &key);
     if (!st) return 0;
     struct io_event ev;
     #pragma unroll
@@ -250,14 +244,14 @@ int trace_getevents_exit(struct trace_event_raw_sys_exit *ctx) {
                 u16 opcode = 0;
                 bpf_probe_read_user(&opcode, sizeof(opcode), (void *)(iocb_ptr + 16));
                 if (opcode == 0 || opcode == 7) {
-                    __sync_fetch_and_add(&st->a2u_read_count, 1);
-                    __sync_fetch_and_add(&st->a2u_read_total, wakeup_lat);
+                    __sync_fetch_and_add(&st->r2u_read_count, 1);
+                    __sync_fetch_and_add(&st->r2u_read_total, wakeup_lat);
                 } else if (opcode == 1 || opcode == 8) {
-                    __sync_fetch_and_add(&st->a2u_write_count, 1);
-                    __sync_fetch_and_add(&st->a2u_write_total, wakeup_lat);
+                    __sync_fetch_and_add(&st->r2u_write_count, 1);
+                    __sync_fetch_and_add(&st->r2u_write_total, wakeup_lat);
                 } else if (opcode == 2 || opcode == 3) {
-                    __sync_fetch_and_add(&st->a2u_flush_count, 1);
-                    __sync_fetch_and_add(&st->a2u_flush_total, wakeup_lat);
+                    __sync_fetch_and_add(&st->r2u_flush_count, 1);
+                    __sync_fetch_and_add(&st->r2u_flush_total, wakeup_lat);
                 }
             }
             bpf_map_delete_elem(&iocb_complete_ts, &akey);
@@ -285,7 +279,7 @@ int trace_pgetevents_exit(struct trace_event_raw_sys_exit *ctx) {
     u64 events_ptr = *events_ptr_p;
     bpf_map_delete_elem(&active_getevents_events, &pid_tgid);
     u32 key = 0;
-    struct libaio_stats *st = bpf_map_lookup_elem(&sys_stats_map, &key);
+    struct engine_stats *st = bpf_map_lookup_elem(&engine_stats_map, &key);
     if (!st) return 0;
     struct io_event ev;
     #pragma unroll
@@ -300,14 +294,14 @@ int trace_pgetevents_exit(struct trace_event_raw_sys_exit *ctx) {
                 u16 opcode = 0;
                 bpf_probe_read_user(&opcode, sizeof(opcode), (void *)(iocb_ptr + 16));
                 if (opcode == 0 || opcode == 7) {
-                    __sync_fetch_and_add(&st->a2u_read_count, 1);
-                    __sync_fetch_and_add(&st->a2u_read_total, wakeup_lat);
+                    __sync_fetch_and_add(&st->r2u_read_count, 1);
+                    __sync_fetch_and_add(&st->r2u_read_total, wakeup_lat);
                 } else if (opcode == 1 || opcode == 8) {
-                    __sync_fetch_and_add(&st->a2u_write_count, 1);
-                    __sync_fetch_and_add(&st->a2u_write_total, wakeup_lat);
+                    __sync_fetch_and_add(&st->r2u_write_count, 1);
+                    __sync_fetch_and_add(&st->r2u_write_total, wakeup_lat);
                 } else if (opcode == 2 || opcode == 3) {
-                    __sync_fetch_and_add(&st->a2u_flush_count, 1);
-                    __sync_fetch_and_add(&st->a2u_flush_total, wakeup_lat);
+                    __sync_fetch_and_add(&st->r2u_flush_count, 1);
+                    __sync_fetch_and_add(&st->r2u_flush_total, wakeup_lat);
                 }
             }
             bpf_map_delete_elem(&iocb_complete_ts, &akey);
@@ -318,10 +312,11 @@ int trace_pgetevents_exit(struct trace_event_raw_sys_exit *ctx) {
 
 /*
  * io_uring tracepoints (iouring mode). libaio의 io_submit/aio_complete에 대응.
- *   io_uring_submit_req : SQE 제출 시각 -> S2Q 시작점 (pid_submit_start 재사용)
- *   io_uring_complete   : CQE 게시 시각 -> C2C 종료점
- * libaio와 mode가 상호배타적이라 pid_submit_start / iocb_c2a_start 맵을 공유한다.
- * req(io_kiocb*)는 cmd union이 offset 0이라 block 계층에서 꺼낸 kiocb*와 동일 주소다.
+ *   io_uring_submit_req : SQE 제출 시각 -> S2Q 시작점 (pid_submit_start 공유)
+ *   io_uring_complete   : CQE 게시 시각 -> C2R 종료점
+ * mode가 상호배타적이라 pid_submit_start / iocb_comp_start / engine_stats_map을
+ * libaio와 공유한다. req(io_kiocb*)는 cmd union이 offset 0이라 block 계층에서
+ * 꺼낸 kiocb*와 동일 주소다.
  */
 SEC("tp_btf/io_uring_submit_req")
 int BPF_PROG(io_uring_submit_req, void *req) {
@@ -335,26 +330,26 @@ SEC("tp_btf/io_uring_complete")
 int BPF_PROG(io_uring_complete, void *uring_ctx, void *req) {
     u64 ts = bpf_ktime_get_ns();
     u64 key = (u64)req;  // io_kiocb* == kiocb* (cmd union이 offset 0)
-    struct c2a_ctx *cctx = bpf_map_lookup_elem(&iocb_c2a_start, &key);
+    struct comp_ctx *cctx = bpf_map_lookup_elem(&iocb_comp_start, &key);
     if (!cctx) return 0;
     if (cctx->ts > 0 && ts > cctx->ts) {
-        u64 c2c_lat = ts - cctx->ts;
+        u64 c2r_lat = ts - cctx->ts;
         u32 stat_key = 0;
-        struct iouring_stats *st = bpf_map_lookup_elem(&iouring_stats_map, &stat_key);
+        struct engine_stats *st = bpf_map_lookup_elem(&engine_stats_map, &stat_key);
         if (st) {
             if (cctx->type == IO_READ || cctx->type == IO_READ_AHEAD) {
-                __sync_fetch_and_add(&st->c2c_read_count, 1);
-                __sync_fetch_and_add(&st->c2c_read_total, c2c_lat);
+                __sync_fetch_and_add(&st->c2r_read_count, 1);
+                __sync_fetch_and_add(&st->c2r_read_total, c2r_lat);
             } else if (cctx->type == IO_WRITE) {
-                __sync_fetch_and_add(&st->c2c_write_count, 1);
-                __sync_fetch_and_add(&st->c2c_write_total, c2c_lat);
+                __sync_fetch_and_add(&st->c2r_write_count, 1);
+                __sync_fetch_and_add(&st->c2r_write_total, c2r_lat);
             } else if (cctx->type == IO_FLUSH) {
-                __sync_fetch_and_add(&st->c2c_flush_count, 1);
-                __sync_fetch_and_add(&st->c2c_flush_total, c2c_lat);
+                __sync_fetch_and_add(&st->c2r_flush_count, 1);
+                __sync_fetch_and_add(&st->c2r_flush_total, c2r_lat);
             }
         }
     }
-    bpf_map_delete_elem(&iocb_c2a_start, &key);
+    bpf_map_delete_elem(&iocb_comp_start, &key);
     return 0;
 }
 
@@ -362,24 +357,14 @@ SEC("tp_btf/block_bio_queue")
 int BPF_PROG(block_bio_queue, struct bio *bio) {
     u64 ts = bpf_ktime_get_ns();
     u64 pid_tgid = bpf_get_current_pid_tgid();
-    if (opt_trace_libaio) {
-        u64 *submit_ts = bpf_map_lookup_elem(&pid_submit_start, &pid_tgid);
-        if (submit_ts) {
-            u64 u2q_lat = ts - *submit_ts;
-            u32 key = 0;
-            struct libaio_stats *st = bpf_map_lookup_elem(&sys_stats_map, &key);
-            if (st) {
-                __sync_fetch_and_add(&st->u2q_count, 1);
-                __sync_fetch_and_add(&st->u2q_lat_total, u2q_lat);
-            }
-        }
-    }
-    if (opt_trace_iouring) {
+    /* S2Q: 직전 submit(io_submit syscall / io_uring_submit_req) -> 이 시점.
+     * 두 엔진이 pid_submit_start 맵을 공유하고 결과도 같은 s2q 카운터에 누적. */
+    if (opt_trace_libaio || opt_trace_iouring) {
         u64 *submit_ts = bpf_map_lookup_elem(&pid_submit_start, &pid_tgid);
         if (submit_ts && ts > *submit_ts) {
             u64 s2q_lat = ts - *submit_ts;
             u32 key = 0;
-            struct iouring_stats *st = bpf_map_lookup_elem(&iouring_stats_map, &key);
+            struct engine_stats *st = bpf_map_lookup_elem(&engine_stats_map, &key);
             if (st) {
                 __sync_fetch_and_add(&st->s2q_count, 1);
                 __sync_fetch_and_add(&st->s2q_lat_total, s2q_lat);
@@ -452,8 +437,8 @@ int BPF_PROG(block_rq_issue, struct request *rq) {
 }
 
 /*
- * D2C 세분화: nvme_complete_rq tracepoint로 D2C 구간을 둘로 쪼갠다.
- *   block_rq_issue --[nvme: device 왕복]--> nvme_complete_rq --[blkc]--> block_rq_complete
+ * D2C 세분화: nvme_complete_rq tracepoint(=CQ 경계)로 D2C 구간을 둘로 쪼갠다.
+ *   block_rq_issue --[D2CQ: device 왕복]--> nvme_complete_rq --[CQ2C]--> block_rq_complete
  * request 포인터를 인자로 받으므로 req_start 맵 키로 그대로 상관.
  * (nvme_setup_cmd는 nvme_queue_rq()에서 block_rq_issue보다 먼저 실행 — D2C 밖이라 안 씀.)
  * nvme tracepoint가 없는 커널에서는 io_trace.c가 best-effort attach로 건너뛴다.
@@ -462,7 +447,7 @@ SEC("tp_btf/nvme_complete_rq")
 int BPF_PROG(nvme_complete_rq, struct request *req) {
     u64 req_ptr = (u64)req;
     struct trace_ctx *tctx = bpf_map_lookup_elem(&req_start, &req_ptr);
-    if (tctx) tctx->nvme_complete_ts = bpf_ktime_get_ns();
+    if (tctx) tctx->cq_ts = bpf_ktime_get_ns();
     return 0;
 }
 
@@ -510,8 +495,8 @@ int BPF_PROG(block_rq_complete, struct request *rq, int error, unsigned int nr_b
                             init_s->stats[i].q2d_hist[b] = 0;
                             init_s->stats[i].d2c_hist[b] = 0;
                         }
-                        init_s->stats[i].nvme_total = 0;
-                        init_s->stats[i].blkc_total = 0;
+                        init_s->stats[i].d2cq_total = 0;
+                        init_s->stats[i].cq2c_total = 0;
                         init_s->stats[i].d2c_traced_count = 0;
                     }
                     bpf_map_update_elem(&device_stats, &dev, init_s, BPF_ANY);
@@ -535,12 +520,12 @@ int BPF_PROG(block_rq_complete, struct request *rq, int error, unsigned int nr_b
                 if (target->d2c.min == (unsigned long long)-1 || d2c_lat < target->d2c.min) target->d2c.min = d2c_lat;
                 target->d2c_hist[lat_bucket(d2c_lat)]++;
 
-                /* D2C 세분화: nvme_complete_rq를 받은 I/O만. 단조 증가 검증 후
-                 * nvme(device 왕복) + blkc(block 완료) = D2C (놓치는 시간 없음). */
-                u64 nct = tctx->nvme_complete_ts;
+                /* D2C 세분화: nvme_complete_rq(=CQ)를 받은 I/O만. 단조 증가 검증 후
+                 * D2CQ(device 왕복) + CQ2C(block 완료) = D2C (놓치는 시간 없음). */
+                u64 nct = tctx->cq_ts;
                 if (nct > 0 && nct >= tctx->issue_ts && end_ts >= nct) {
-                    target->nvme_total += nct - tctx->issue_ts;
-                    target->blkc_total += end_ts - nct;
+                    target->d2cq_total += nct - tctx->issue_ts;
+                    target->cq2c_total += end_ts - nct;
                     target->d2c_traced_count++;
                 }
 
@@ -584,9 +569,9 @@ int BPF_PROG(block_rq_complete, struct request *rq, int error, unsigned int nr_b
         }
     }
     
-    /* C2A(libaio) / C2C(io_uring) 시작점: bio->bi_private(iomap_dio)에서 kiocb를
-     * 꺼내 완료 시각을 저장. 두 엔진 모두 같은 맵을 쓰고, 완료측 프로그램
-     * (aio_complete / io_uring_complete)이 각자 모드에서만 attach된다. */
+    /* C2R 시작점: bio->bi_private(iomap_dio)에서 kiocb를 꺼내 완료 시각을 저장.
+     * libaio·io_uring 모두 같은 맵을 쓰고, 완료측 프로그램(aio_complete /
+     * io_uring_complete)이 각자 모드에서만 attach된다. */
     if ((opt_trace_libaio || opt_trace_iouring) && type != -1) {
         struct bio *bio = BPF_CORE_READ(rq, bio);
         if (bio) {
@@ -595,8 +580,8 @@ int BPF_PROG(block_rq_complete, struct request *rq, int error, unsigned int nr_b
                 struct kiocb *iocb_ptr = BPF_CORE_READ((struct iomap_dio *)bi_private, iocb);
                 if (iocb_ptr) {
                     u64 key = (u64)iocb_ptr;
-                    struct c2a_ctx cctx = { .ts = end_ts, .type = type, .pid_tgid = tctx->pid_tgid };
-                    bpf_map_update_elem(&iocb_c2a_start, &key, &cctx, BPF_ANY);
+                    struct comp_ctx cctx = { .ts = end_ts, .type = type, .pid_tgid = tctx->pid_tgid };
+                    bpf_map_update_elem(&iocb_comp_start, &key, &cctx, BPF_ANY);
                 }
             }
         }

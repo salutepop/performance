@@ -297,31 +297,29 @@ def _save_correlation_chart(path, corr, title, phases=None):
     plt.close(fig)
 
 
-# eBPF full-stack phases, in pipeline order. The D2C disk region is split by
-# the nvme_complete_rq tracepoint into NVME (device round-trip) + BLKC (block
-# completion path), both orange family. "d2c" is the fallback single segment
-# when the nvme tracepoint didn't fire (so no time is ever lost from the bar).
-# Phases from both engines: u2q/c2a/a2u are libaio-only, s2q/c2c io_uring-only.
-# Each summary populates only its engine's subset; the other phases stay 0 and
-# are skipped by the chart (zero-sum segments are dropped).
-_PHASE_ORDER = ["u2q", "s2q", "q2d", "nvme", "blkc", "d2c", "c2a", "c2c", "a2u"]
+# eBPF full-stack phases, in pipeline order. Unified for libaio + io_uring:
+# S2Q/Q2D/D2C/C2R are common; R2U is libaio-only (io_uring reaps the CQ ring
+# in userspace with no syscall, so it stays 0 and is dropped from the bar).
+# The D2C disk region is split by the nvme_complete_rq tracepoint (CQ boundary)
+# into D2CQ (device round-trip) + CQ2C (block completion), both orange family.
+# "d2c" is the fallback single segment when nvme_complete_rq didn't fire (so no
+# time is ever lost from the bar). Zero-sum segments are skipped by the chart.
+_PHASE_ORDER = ["s2q", "q2d", "d2cq", "cq2c", "d2c", "c2r", "r2u"]
 # Legend: pipeline number + phase abbreviation + a short description.
 _PHASE_LABELS = {
-    "u2q":  "1. U2Q  io_submit() -> block queue",
-    "s2q":  "1. S2Q  io_uring submit -> block queue",
+    "s2q":  "1. S2Q  submit -> block queue",
     "q2d":  "2. Q2D  block queue -> dispatch",
-    "nvme": "3. NVME  device I/O (NVMe hardware)",
-    "blkc": "4. BLKC  block-layer completion",
+    "d2cq": "3. D2CQ  dispatch -> device done (NVMe HW)",
+    "cq2c": "4. CQ2C  device done -> block complete",
     "d2c":  "3+4. D2C  device + completion (unsplit)",
-    "c2a":  "5. C2A  block -> AIO layer",
-    "c2c":  "5. C2C  block complete -> io_uring CQE",
-    "a2u":  "6. A2U  AIO -> user wakeup",
+    "c2r":  "5. C2R  block complete -> engine ready (CQE/aio)",
+    "r2u":  "6. R2U  engine ready -> user reap (libaio)",
 }
 _PHASE_COLORS = {
-    "u2q": "#90caf9", "s2q": "#90caf9", "q2d": "#26a69a",
-    "nvme": "#ef6c00", "blkc": "#ffb74d",   # D2C family
+    "s2q": "#90caf9", "q2d": "#26a69a",
+    "d2cq": "#ef6c00", "cq2c": "#ffb74d",   # D2C family
     "d2c": "#ef6c00",
-    "c2a": "#ab47bc", "c2c": "#ab47bc", "a2u": "#90a4ae",
+    "c2r": "#ab47bc", "r2u": "#90a4ae",
 }
 _SIZE_LABELS = ["<=4K", "4-32K", "32-128K", ">128K"]
 _SIZE_COLORS = ["#08519c", "#3182bd", "#6baed6", "#bdd7e7"]
@@ -359,19 +357,17 @@ def _ebpf_rows_full(summary):
 
 def _ebpf_phase_segments(op):
     """One device/op dict -> {phase: us}. The D2C region is split into
-    NVME/BLKC by the traced ratio, scaled so the segments still sum to the
+    D2CQ/CQ2C by the traced ratio, scaled so the segments still sum to the
     authoritative D2C total (no time is lost). Falls back to a single 'd2c'."""
     ph = op.get("phase_avg_us", {}) or {}
-    seg = {"u2q": ph.get("u2q", 0) or 0, "s2q": ph.get("s2q", 0) or 0,
-           "q2d": ph.get("q2d", 0) or 0,
-           "c2a": ph.get("c2a", 0) or 0, "c2c": ph.get("c2c", 0) or 0,
-           "a2u": ph.get("a2u", 0) or 0}
+    seg = {"s2q": ph.get("s2q", 0) or 0, "q2d": ph.get("q2d", 0) or 0,
+           "c2r": ph.get("c2r", 0) or 0, "r2u": ph.get("r2u", 0) or 0}
     d2c = ph.get("d2c", 0) or 0
     sp = op.get("d2c_split_us", {}) or {}
-    sp_sum = (sp.get("nvme", 0) or 0) + (sp.get("blkc", 0) or 0)
+    sp_sum = (sp.get("d2cq", 0) or 0) + (sp.get("cq2c", 0) or 0)
     if sp_sum > 0 and d2c > 0:
-        seg["nvme"] = d2c * (sp.get("nvme", 0) or 0) / sp_sum
-        seg["blkc"] = d2c * (sp.get("blkc", 0) or 0) / sp_sum
+        seg["d2cq"] = d2c * (sp.get("d2cq", 0) or 0) / sp_sum
+        seg["cq2c"] = d2c * (sp.get("cq2c", 0) or 0) / sp_sum
     else:
         seg["d2c"] = d2c
     return seg
@@ -381,8 +377,8 @@ def _save_ebpf_latency_chart(path, summary):
     """Horizontal stacked bar — avg latency per I/O split into pipeline phases.
 
     Each bar is one device/op; total length = full-stack avg latency. The D2C
-    disk region is sub-split into NVME (block_rq_issue -> nvme_complete_rq,
-    device round-trip) and BLKC (nvme_complete_rq -> block_rq_complete, block
+    disk region is sub-split into D2CQ (block_rq_issue -> nvme_complete_rq,
+    device round-trip) and CQ2C (nvme_complete_rq -> block_rq_complete, block
     completion path), so device vs block-layer time is visible."""
     rows = []
     for lbl, op in [(l, o) for l, o in _ebpf_rows_full(summary)]:
@@ -409,7 +405,7 @@ def _save_ebpf_latency_chart(path, summary):
     ax.set_xlabel("avg latency per I/O [us]")
     ax.set_xlim(0, (max(left) or 1) * 1.12)
     ax.set_title("eBPF full-stack latency breakdown — avg us per I/O "
-                 "(D2C split into NVME device + BLKC completion)")
+                 "(D2C split into D2CQ device + CQ2C completion)")
     ax.grid(True, axis="x", alpha=0.3)
     _place_legend(fig, ax, max_cols=4)
     fig.savefig(path)

@@ -8,11 +8,7 @@
 
 ### Foundation — eBPF / I/O 정확도 향상
 
-- [ ] **P1** io_uring mode support  **BLOCKED:** 단일 이터레이션 범위 초과 — 신규 BPF 프로그램 2개(io_uring_submit_req/io_uring_complete) + 신규 latency 누적 struct + 신규 글로벌 map + JSON 스키마 확장 + Python parse/리포트 통합 + fio io_uring 검증까지 필요. 아래 sub-task로 분할.
-  - 6.11 커널 기준 tracepoint 이름: `io_uring/io_uring_submit_req`(SQE 제출), `io_uring/io_uring_complete`(CQE 푸시), 옵션 `io_uring/io_uring_cqring_wait`.
-- [ ] **P2** iouring-1: BPF struct + 2개 tracepoint hook + map  **BLOCKED:** io_uring 워크로드(fio --ioengine=io_uring) 검증 인프라 필요. 셋이 묶음 단위라 연속 작업하는 게 효율적.
-- [ ] **P2** iouring-2: io_trace.c userspace -m iouring 분기 + iouring_overhead JSON  **BLOCKED:** iouring-1 의존
-- [ ] **P2** iouring-3: io_profiler.py 통합 + fio --ioengine=io_uring 검증  **BLOCKED:** iouring-1/2 의존
+- [x] **P1** io_uring mode support — `io_uring_submit_req`/`io_uring_complete` tp_btf 프로그램으로 S2Q/C2R 측정. libaio와 페이즈 약어 통일(S2Q/Q2D/D2CQ/CQ2C/C2R/R2U), `engine_stats` 단일 struct/map 공유. `pmon debug --ebpf-mode iouring`로 E2E 검증.
 
 ### System extensions
 

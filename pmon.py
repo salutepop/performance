@@ -211,7 +211,7 @@ def cmd_debug(args):
     sid = os.path.basename(session_dir)
     ebpf_mode = resolve_ebpf_mode("auto", args.ebpf_mode)
     # Match the fio ioengine to the tracer mode so the eBPF path is exercised
-    # end-to-end: iouring mode needs io_uring I/O to populate S2Q/C2C.
+    # end-to-end: iouring mode needs io_uring I/O to populate S2Q/C2R.
     fio_ioengine = "io_uring" if ebpf_mode == "iouring" else "libaio"
 
     print(f"[debug] session -> {session_dir}")
@@ -293,19 +293,19 @@ def cmd_debug(args):
                     summary = json.load(f)
                 ndev = len(summary.get("devices", {}))
                 print(f"  [OK] eBPF summary: ebpf_summary_{sid}.json ({ndev} device(s))")
-                # io_uring phases (S2Q/C2C) must actually be measured, not 0.
+                # io_uring phases (S2Q/C2R) must actually be measured, not 0.
                 if ebpf_mode == "iouring":
                     got = any(
                         (op.get("phase_avg_us", {}).get(k) or 0) > 0
                         for dev in summary.get("devices", {}).values()
                         for op in dev.get("ops", {}).values()
-                        for k in ("s2q", "c2c")
+                        for k in ("s2q", "c2r")
                     )
                     if got:
-                        print("  [OK] eBPF iouring phases populated (S2Q/C2C)")
+                        print("  [OK] eBPF iouring phases populated (S2Q/C2R)")
                     else:
                         failures.append(
-                            "eBPF iouring phases all zero (S2Q/C2C not measured)")
+                            "eBPF iouring phases all zero (S2Q/C2R not measured)")
             except Exception as e:
                 failures.append(f"ebpf_summary JSON parse error: {e}")
 

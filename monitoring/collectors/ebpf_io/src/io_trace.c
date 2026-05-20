@@ -25,8 +25,7 @@ void clear_stats_map(int fd) {
     }
 }
 
-void print_json_report(struct bpf_map *device_stats_map, struct bpf_map *sys_stats_map,
-                       struct bpf_map *iouring_stats_map,
+void print_json_report(struct bpf_map *device_stats_map, struct bpf_map *engine_stats_map,
                        struct bpf_map *device_qd_map, struct bpf_map *cpu_matrix_map,
                        struct io_stats *stats_array, int nr_cpus) {
     const char *type_names[IO_MAX_TYPES] = {"read", "read_ahead", "write", "flush", "discard"};
@@ -56,8 +55,8 @@ void print_json_report(struct bpf_map *device_stats_map, struct bpf_map *sys_sta
                     dev_total.stats[t].q2d_hist[b] = 0;
                     dev_total.stats[t].d2c_hist[b] = 0;
                 }
-                dev_total.stats[t].nvme_total = 0;
-                dev_total.stats[t].blkc_total = 0;
+                dev_total.stats[t].d2cq_total = 0;
+                dev_total.stats[t].cq2c_total = 0;
                 dev_total.stats[t].d2c_traced_count = 0;
             }
 
@@ -82,8 +81,8 @@ void print_json_report(struct bpf_map *device_stats_map, struct bpf_map *sys_sta
                         tot_st->d2c.total += cpu_st->d2c.total;
                         if (cpu_st->d2c.max > tot_st->d2c.max) tot_st->d2c.max = cpu_st->d2c.max;
                         if (cpu_st->d2c.min < tot_st->d2c.min) tot_st->d2c.min = cpu_st->d2c.min;
-                        tot_st->nvme_total += cpu_st->nvme_total;
-                        tot_st->blkc_total += cpu_st->blkc_total;
+                        tot_st->d2cq_total += cpu_st->d2cq_total;
+                        tot_st->cq2c_total += cpu_st->cq2c_total;
                         tot_st->d2c_traced_count += cpu_st->d2c_traced_count;
                         total_any_io += cpu_st->io_count;
                     }
@@ -149,9 +148,9 @@ void print_json_report(struct bpf_map *device_stats_map, struct bpf_map *sys_sta
                         }
                         printf("],\n");
 
-                        printf("          \"d2c_split\": {\"nvme_total_ns\": %llu, "
-                               "\"blkc_total_ns\": %llu, \"traced_count\": %llu}\n",
-                               dev_total.stats[t].nvme_total, dev_total.stats[t].blkc_total,
+                        printf("          \"d2c_split\": {\"d2cq_total_ns\": %llu, "
+                               "\"cq2c_total_ns\": %llu, \"traced_count\": %llu}\n",
+                               dev_total.stats[t].d2cq_total, dev_total.stats[t].cq2c_total,
                                dev_total.stats[t].d2c_traced_count);
                         printf("        }");
                         first_op = 0;
@@ -173,41 +172,28 @@ void print_json_report(struct bpf_map *device_stats_map, struct bpf_map *sys_sta
     }
     printf("\n  ],\n");
 
-    struct libaio_stats sys_st = {0};
-    unsigned int sys_key = 0;
-    if (sys_stats_map) bpf_map_lookup_elem(bpf_map__fd(sys_stats_map), &sys_key, &sys_st);
+    /* 엔진 페이즈(S2Q/C2R/R2U) — libaio·io_uring 공용 블록. 비활성 페이즈는 0
+     * (io_uring은 r2u_* = 0, generic은 전부 0). */
+    struct engine_stats eng_st = {0};
+    unsigned int eng_key = 0;
+    if (engine_stats_map)
+        bpf_map_lookup_elem(bpf_map__fd(engine_stats_map), &eng_key, &eng_st);
 
-    printf("  \"libaio_overhead\": {\n");
-    printf("    \"u2q_count\": %llu,\n", sys_st.u2q_count);
-    printf("    \"u2q_lat_total\": %llu,\n", sys_st.u2q_lat_total);
-    printf("    \"c2a_read_count\": %llu,\n", sys_st.c2a_read_count);
-    printf("    \"c2a_read_total\": %llu,\n", sys_st.c2a_read_total);
-    printf("    \"c2a_write_count\": %llu,\n", sys_st.c2a_write_count);
-    printf("    \"c2a_write_total\": %llu,\n", sys_st.c2a_write_total);
-    printf("    \"c2a_flush_count\": %llu,\n", sys_st.c2a_flush_count);
-    printf("    \"c2a_flush_total\": %llu,\n", sys_st.c2a_flush_total);
-    printf("    \"a2u_read_count\": %llu,\n", sys_st.a2u_read_count);
-    printf("    \"a2u_read_total\": %llu,\n", sys_st.a2u_read_total);
-    printf("    \"a2u_write_count\": %llu,\n", sys_st.a2u_write_count);
-    printf("    \"a2u_write_total\": %llu,\n", sys_st.a2u_write_total);
-    printf("    \"a2u_flush_count\": %llu,\n", sys_st.a2u_flush_count);
-    printf("    \"a2u_flush_total\": %llu\n", sys_st.a2u_flush_total);
-    printf("  },\n");
-
-    struct iouring_stats uring_st = {0};
-    unsigned int uring_key = 0;
-    if (iouring_stats_map)
-        bpf_map_lookup_elem(bpf_map__fd(iouring_stats_map), &uring_key, &uring_st);
-
-    printf("  \"iouring_overhead\": {\n");
-    printf("    \"s2q_count\": %llu,\n", uring_st.s2q_count);
-    printf("    \"s2q_lat_total\": %llu,\n", uring_st.s2q_lat_total);
-    printf("    \"c2c_read_count\": %llu,\n", uring_st.c2c_read_count);
-    printf("    \"c2c_read_total\": %llu,\n", uring_st.c2c_read_total);
-    printf("    \"c2c_write_count\": %llu,\n", uring_st.c2c_write_count);
-    printf("    \"c2c_write_total\": %llu,\n", uring_st.c2c_write_total);
-    printf("    \"c2c_flush_count\": %llu,\n", uring_st.c2c_flush_count);
-    printf("    \"c2c_flush_total\": %llu\n", uring_st.c2c_flush_total);
+    printf("  \"engine_overhead\": {\n");
+    printf("    \"s2q_count\": %llu,\n", eng_st.s2q_count);
+    printf("    \"s2q_lat_total\": %llu,\n", eng_st.s2q_lat_total);
+    printf("    \"c2r_read_count\": %llu,\n", eng_st.c2r_read_count);
+    printf("    \"c2r_read_total\": %llu,\n", eng_st.c2r_read_total);
+    printf("    \"c2r_write_count\": %llu,\n", eng_st.c2r_write_count);
+    printf("    \"c2r_write_total\": %llu,\n", eng_st.c2r_write_total);
+    printf("    \"c2r_flush_count\": %llu,\n", eng_st.c2r_flush_count);
+    printf("    \"c2r_flush_total\": %llu,\n", eng_st.c2r_flush_total);
+    printf("    \"r2u_read_count\": %llu,\n", eng_st.r2u_read_count);
+    printf("    \"r2u_read_total\": %llu,\n", eng_st.r2u_read_total);
+    printf("    \"r2u_write_count\": %llu,\n", eng_st.r2u_write_count);
+    printf("    \"r2u_write_total\": %llu,\n", eng_st.r2u_write_total);
+    printf("    \"r2u_flush_count\": %llu,\n", eng_st.r2u_flush_count);
+    printf("    \"r2u_flush_total\": %llu\n", eng_st.r2u_flush_total);
     printf("  },\n");
 
     /* SQ x CQ CPU 매트릭스 — sparse: 실제 발생한 (issue,cq) 쌍만. */
@@ -238,8 +224,7 @@ int main(int argc, char **argv) {
     int err, nr_cpus;
     struct io_stats *stats_array;
     struct bpf_map *device_stats_map;
-    struct bpf_map *sys_stats_map;
-    struct bpf_map *iouring_stats_map;
+    struct bpf_map *engine_stats_map;
     struct bpf_map *device_qd_map;
     struct bpf_map *cpu_matrix_map;
 
@@ -320,8 +305,7 @@ int main(int argc, char **argv) {
     nr_cpus = libbpf_num_possible_cpus();
     stats_array = calloc(nr_cpus, sizeof(struct io_stats));
     device_stats_map = bpf_object__find_map_by_name(skel->obj, "device_stats");
-    sys_stats_map = bpf_object__find_map_by_name(skel->obj, "sys_stats_map");
-    iouring_stats_map = bpf_object__find_map_by_name(skel->obj, "iouring_stats_map");
+    engine_stats_map = bpf_object__find_map_by_name(skel->obj, "engine_stats_map");
     device_qd_map = bpf_object__find_map_by_name(skel->obj, "device_qd");
     cpu_matrix_map = bpf_object__find_map_by_name(skel->obj, "cpu_matrix");
 
@@ -364,7 +348,7 @@ int main(int argc, char **argv) {
         clock_gettime(CLOCK_MONOTONIC, &ts_now);
         double now_s = ts_now.tv_sec + ts_now.tv_nsec / 1e9;
         if (now_s + 1e-9 >= next_report) {
-            print_json_report(device_stats_map, sys_stats_map, iouring_stats_map,
+            print_json_report(device_stats_map, engine_stats_map,
                               device_qd_map, cpu_matrix_map, stats_array, nr_cpus);
             next_report += opt_interval;
             /* print이 한 인터벌 넘게 걸려 deadline이 과거가 됐으면, 밀린 만큼
@@ -374,7 +358,7 @@ int main(int argc, char **argv) {
         }
     }
 
-    print_json_report(device_stats_map, sys_stats_map, iouring_stats_map,
+    print_json_report(device_stats_map, engine_stats_map,
                       device_qd_map, cpu_matrix_map, stats_array, nr_cpus);
 
     free(stats_array);

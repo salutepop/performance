@@ -4,8 +4,8 @@ collector.py is the standalone Python orchestrator that drives the native
 io_trace binary built from src/. EbpfIoCollector adapts it to the Collector
 lifecycle so a Session can run it alongside other collectors.
 
-See CLAUDE.md for the full architecture (Q2D/D2C/U2Q/C2A/A2U phases, BPF maps,
-the JSON contract between layers).
+See CLAUDE.md for the full architecture (S2Q/Q2D/D2CQ/CQ2C/C2R/R2U phases,
+BPF maps, the JSON contract between layers).
 
 Build:
     make -C monitoring/collectors/ebpf_io/src

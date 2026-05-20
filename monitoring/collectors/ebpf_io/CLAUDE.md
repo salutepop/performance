@@ -4,48 +4,35 @@
 > C/BPF 소스 + Makefile은 `src/`. `Session`은 `EbpfIoCollector`(`__init__.py`)를
 > 통해 이걸 구동한다.
 
-eBPF 기반 full-stack I/O 지연 분석 도구. fio(또는 임의 워크로드)가 도는 동안 커널 블록 계층 + libaio 경로의 각 구간 지연을 maps에 누적하고, 사용자 공간에서 JSON으로 뽑아 페이즈별 breakdown 테이블을 생성한다.
+eBPF 기반 full-stack I/O 지연 분석 도구. fio(또는 임의 워크로드)가 도는 동안 커널 블록 계층 + 엔진(libaio/io_uring) 경로의 각 구간 지연을 maps에 누적하고, 사용자 공간에서 JSON으로 뽑아 페이즈별 breakdown 테이블을 생성한다.
 
 ## 핵심 아이디어: Full-Stack Latency Breakdown
 
-I/O 한 건의 전체 시간을 5개 페이즈로 쪼개서 측정한다. 이 페이즈 정의가 이 코드의 존재 이유이므로, 어디든 손대기 전에 머릿속에 박혀 있어야 한다.
+I/O 한 건의 전체 시간을 경계 지점으로 잘라 페이즈별로 측정한다. 이 페이즈 정의가 이 코드의 존재 이유이므로, 어디든 손대기 전에 머릿속에 박혀 있어야 한다. 페이즈 약어는 libaio·io_uring 공통이다 (X2Y = 경계 X→경계 Y 사이 구간).
 
 ```
- User                                                              User
-  │                                                                 ▲
-  │ io_submit()                                              io_getevents()
-  │                                                                 │
-  ▼     U2Q          Q2D          D2C          C2A          A2U     │
-  ●──────────►●──────────►●──────────►●──────────►●──────────►●─────┘
-  syscall   block_q    rq_issue   rq_complete  aio_complete  user wakeup
-   enter    (bio in)   (to disk)   (from disk)  (aio layer)
+ User                                                                       User
+  │                                                                          ▲
+  │ submit                                                              reap │
+  ▼    S2Q        Q2D        D2CQ        CQ2C        C2R         R2U         │
+  ●─────────►●─────────►●──────────►●──────────►●──────────►●────────────────┘
+ submit    block_q   rq_issue   nvme_compl   rq_complete   engine
+           (bio in)  (dispatch)  (= CQ)      (blk done)    complete (CQE/aio)
 
-  U2Q : sys_enter_io_submit → block_bio_queue        (사용자→블록 큐 진입)
-  Q2D : block_bio_queue     → block_rq_issue         (블록 큐에서 디바이스로 dispatch)
-  D2C : block_rq_issue      → block_rq_complete      (디스크 hw 처리)
-  C2A : block_rq_complete   → aio_complete           (블록 완료→AIO 레이어)
-  A2U : aio_complete        → sys_exit_io_getevents  (AIO→사용자 wakeup)
+  S2Q  : submit            → block_bio_queue       (제출 경로)
+  Q2D  : block_bio_queue   → block_rq_issue        (블록 큐 대기)
+  D2CQ : block_rq_issue    → nvme_complete_rq      (device 왕복, NVMe HW)
+  CQ2C : nvme_complete_rq  → block_rq_complete     (block 완료 처리, softirq)
+  C2R  : block_rq_complete → aio_complete / CQE    (엔진 완료 핸드오프)
+  R2U  : aio_complete      → io_getevents 반환     (user 수확, libaio 전용)
 ```
 
+- 경계 **CQ** = `nvme_complete_rq` (NVMe Completion Queue 엔트리 처리 시점). **D2C = D2CQ + CQ2C** — nvme_complete_rq tracepoint가 있을 때만 분리되고, 없으면 D2C 단일 구간으로 fallback.
 - **Generic mode**: Q2D, D2C만 측정 (블록 계층 tracepoints만 attach). 어떤 ioengine이든 잡힌다.
-- **Libaio mode**: 위 + U2Q, C2A, A2U까지 측정. `io_submit`/`io_getevents` syscall tracepoint와 `aio_complete` kprobe를 추가로 attach.
-- **Iouring mode**: 위 블록 페이즈 + S2Q, C2C 측정. `io_uring_submit_req`/`io_uring_complete` tracepoint를 추가로 attach. io_uring은 완료 전달이 CQ ring 읽기(syscall 없음)라 libaio의 A2U에 대응하는 페이즈가 없다 — 4페이즈(S2Q/Q2D/D2C/C2C)로 끝난다.
+- **Libaio mode**: 위 + S2Q, C2R, R2U. `io_submit`/`io_getevents` syscall tracepoint와 `aio_complete` kprobe를 추가로 attach. submit 경계 = `sys_enter_io_submit`.
+- **Iouring mode**: 위 + S2Q, C2R (R2U 없음). `io_uring_submit_req`/`io_uring_complete` tracepoint를 추가로 attach. submit 경계 = `io_uring_submit_req`. io_uring은 완료를 CQ ring으로 전달(syscall 없음)해 R2U에 해당하는 측정 지점이 없다 — S2Q/Q2D/D2C/C2R 4페이즈로 끝난다.
 
-io_uring 페이즈 모델 (libaio의 U2Q/C2A/A2U 대응):
-
-```
-  ▼     S2Q          Q2D          D2C          C2C
-  ●──────────►●──────────►●──────────►●──────────►●
-io_uring   block_q    rq_issue   rq_complete  io_uring
-submit_req (bio in)   (to disk)  (from disk)  complete (CQE)
-
-  S2Q : io_uring_submit_req → block_bio_queue    (SQE 제출→블록 큐 진입)
-  C2C : block_rq_complete   → io_uring_complete  (블록 완료→CQE 게시)
-```
-
-S2Q는 `pid_submit_start` 맵을 libaio와 공유한다 (모드 상호배타). C2C는 block 계층에서
-꺼낸 kiocb 포인터로 상관 — `io_kiocb`의 `cmd` union이 offset 0이라 `io_uring_complete`의
-`req` 포인터가 곧 kiocb 포인터다. 따라서 `iocb_c2a_start` 맵도 libaio와 공유한다.
+S2Q는 `pid_submit_start` 맵을, C2R은 `iocb_comp_start` 맵을 libaio·io_uring이 공유한다 (모드 상호배타). io_uring의 C2R 상관: block 계층에서 꺼낸 kiocb 포인터와 `io_uring_complete`의 `req` 포인터가 동일 주소다 — `io_kiocb`의 `cmd` union이 offset 0이라 `req == &io_rw->kiocb`.
 
 ## 3-layer architecture
 
@@ -86,11 +73,11 @@ Maps (전부 `io_trace.bpf.c`의 `SEC(".maps")`에서 선언):
 | `bio_start` | HASH | `bio*` | `bio_start_ctx` | bio enqueue 시각 (Q2D 시작점) |
 | `req_start` | HASH | `request*` | `trace_ctx` | rq issue 시각 + 직전 Q2D 지연 |
 | `device_stats` | **PERCPU_HASH** | `dev_id` (maj<<20\|min) | `io_stats` | 디바이스 단위 누적 통계 |
-| `pid_submit_start` | HASH | `pid_tgid` | `u64 ts` | io_submit 진입 시각 |
+| `pid_submit_start` | HASH | `pid_tgid` | `u64 ts` | submit 시각 (S2Q 시작점, libaio·io_uring 공유) |
 | `active_getevents_events` | HASH | `pid_tgid` | `events ptr` | io_getevents의 events 인자 |
-| `iocb_complete_ts` | HASH | `{pid_tgid,iocb}` | `u64 ts` | aio_complete 시각 (A2U 시작점) |
-| `iocb_c2a_start` | HASH | `iocb*` | `c2a_ctx` | rq_complete 시각 (C2A 시작점) |
-| `sys_stats_map` | ARRAY[1] | 0 | `libaio_stats` | libaio 페이즈 글로벌 누적 |
+| `iocb_complete_ts` | HASH | `{pid_tgid,iocb}` | `u64 ts` | aio_complete 시각 (R2U 시작점) |
+| `iocb_comp_start` | HASH | `iocb*` | `comp_ctx` | rq_complete 시각 (C2R 시작점, libaio·io_uring 공유) |
+| `engine_stats_map` | ARRAY[1] | 0 | `engine_stats` | 엔진 페이즈(S2Q/C2R/R2U) 글로벌 누적 |
 | `scratch_stats` | PERCPU_ARRAY[1] | 0 | `io_stats` | 0-초기화용 임시 버퍼 |
 | `dev_capacity_map` | HASH | `dev_id` | `u64 sectors` | LBA bucket 계산용 (디바이스 용량) |
 
@@ -131,25 +118,22 @@ JSON 스키마 (이게 layer 사이 contract):
           "q2d": {"total_lat_ns": u64, "min_lat_ns": u64, "max_lat_ns": u64},
           "d2c": {"total_lat_ns": u64, "min_lat_ns": u64, "max_lat_ns": u64},
           "q2d_hist": [u64 × 32],  // log2(ns) latency buckets
-          "d2c_hist": [u64 × 32]
+          "d2c_hist": [u64 × 32],
+          "d2c_split": {"d2cq_total_ns": u64, "cq2c_total_ns": u64, "traced_count": u64}
         }
       },
       "sqcq": {"same": u64, "diff": u64}    // device-level: SQ(issue) CPU == CQ(complete) CPU 여부 누적
     }
   ],
-  "libaio_overhead": {
-    "u2q_count": ..., "u2q_lat_total": ...,
-    "c2a_{read,write,flush}_count|total": ...,
-    "a2u_{read,write,flush}_count|total": ...
-  },
-  "iouring_overhead": {
+  "engine_overhead": {
     "s2q_count": ..., "s2q_lat_total": ...,
-    "c2c_{read,write,flush}_count|total": ...
+    "c2r_{read,write,flush}_count|total": ...,
+    "r2u_{read,write,flush}_count|total": ...
   }
 }
 ```
 
-`libaio_overhead`와 `iouring_overhead`는 항상 둘 다 출력된다 (활성 모드가 아닌 쪽은 0). 두 블록의 키는 겹치지 않아 collector.py가 병합해 쓴다.
+`engine_overhead`는 libaio·io_uring 공용 단일 블록 — 모드 상호배타라 하나의 `engine_stats` 구조체/맵을 둘이 공유한다. 비활성 페이즈는 0 (io_uring은 `r2u_*` = 0, generic은 전부 0).
 
 ### Cross-cutting: System metrics
 
@@ -167,7 +151,7 @@ JSON 스키마 (이게 layer 사이 contract):
 
 CSV 출력 위치: `{output_dir}/{real_dev_name}_{SESSION_ID}.csv`. `Session`이 구동할 땐 `--output-dir`로 세션 디렉터리가 주입되고, standalone 실행 시엔 `results/ebpf_standalone/`. 디바이스 이름은 `dev(maj:min)` → `/sys/dev/block/maj:min` realpath로 `nvme0n1` 같은 실명으로 변환.
 
-CSV 컬럼: timestamp, operation, iops_interval, bandwidth_mb_s_interval, q2d_avg_us_interval, d2c_avg_us_interval, **u2q_avg_us_interval, s2q_avg_us_interval, c2a_avg_us_interval, a2u_avg_us_interval, c2c_avg_us_interval** (u2q/c2a/a2u는 libaio 모드, s2q/c2c는 iouring 모드에서만 0 이상 값), **sq_cq_diff_ratio** (디바이스 단위, 같은 인터벌의 모든 op row에 동일), **d2c_p50_us, d2c_p99_us, q2d_p99_us** (인터벌 히스토그램 delta에서 계산한 percentile — `prev_hists` 글로벌 dict로 추적), current_qd, max_qd, total_io_count, total_bytes, q2d/d2c {total,min,max}_ns, size_hist_{4k,32k,128k,large}, lba_0 … lba_63. u2q/s2q는 글로벌(같은 인터벌 내 모든 행 동일). c2a/a2u/c2c는 op별이며 read_ahead/discard는 완료측 경로 없어 0.
+CSV 컬럼: timestamp, operation, iops_interval, bandwidth_mb_s_interval, q2d_avg_us_interval, d2c_avg_us_interval, **s2q_avg_us_interval, c2r_avg_us_interval, r2u_avg_us_interval** (S2Q/C2R은 양 엔진, R2U는 libaio에서만 0 이상 값), **sq_cq_diff_ratio** (디바이스 단위, 같은 인터벌의 모든 op row에 동일), **d2c_p50_us, d2c_p99_us, q2d_p99_us** (인터벌 히스토그램 delta에서 계산한 percentile — `prev_hists` 글로벌 dict로 추적), current_qd, max_qd, total_io_count, total_bytes, q2d/d2c {total,min,max}_ns, size_hist_{4k,32k,128k,large}, lba_0 … lba_63. s2q는 글로벌(같은 인터벌 내 모든 행 동일). c2r/r2u는 op별이며 read_ahead/discard는 완료측 경로 없어 0.
 
 ## Build / Run
 
@@ -188,7 +172,7 @@ python3 monitoring/collectors/ebpf_io/collector.py -m libaio  -i 0 -f src/fio.sh
 ```
 
 옵션:
-- `-m {generic|libaio|iouring}` — 모드별 추가 페이즈는 위 "Full-Stack" 절 참고. iouring은 fio `--ioengine=io_uring` 워크로드라야 S2Q/C2C가 잡힌다.
+- `-m {generic|libaio|iouring}` — 모드별 추가 페이즈는 위 "Full-Stack" 절 참고. iouring은 fio `--ioengine=io_uring` 워크로드라야 S2Q/C2R이 잡힌다.
 - `-i N` — N초마다 CSV 한 줄. `-i 0`이면 timeseries 비활성, 최종 summary만.
 - `-c` vs `-f` — mutually exclusive. 둘 다 없으면 무한 대기(수동 조작용).
 
@@ -208,8 +192,8 @@ python3 monitoring/collectors/ebpf_io/collector.py -m libaio  -i 0 -f src/fio.sh
 
 ## 알려진 sharp edges / 작업 후보
 
-- **iouring C2C는 iomap 경로 의존** — C2C 상관관계는 libaio C2A와 같은 `bio->bi_private`(iomap_dio) → kiocb 추출에 기댄다. iomap 기반 파일 direct I/O(ext4 등)에선 동작하지만, raw block device direct I/O(`blkdev_dio` 경로)에선 kiocb를 못 꺼낸다 — 그 경우 S2Q/Q2D/D2C는 잡혀도 C2C가 0이 된다. smoke(`.smoke/smoke.img`, ext4 파일)는 iomap 경로라 OK.
-- **iouring A2U 대응 없음** — io_uring은 CQE를 CQ ring에 게시하고 사용자는 syscall 없이 ring을 읽는다. libaio의 A2U(완료→사용자 wakeup)에 해당하는 측정 지점이 없어 의도적으로 4페이즈에서 멈춘다.
+- **C2R는 iomap 경로 의존** — C2R 상관관계는 `block_rq_complete`에서 `bio->bi_private`(iomap_dio) → kiocb 추출에 기댄다 (libaio·io_uring 공통). iomap 기반 파일 direct I/O(ext4 등)에선 동작하지만, raw block device direct I/O(`blkdev_dio` 경로)에선 kiocb를 못 꺼낸다 — 그 경우 S2Q/Q2D/D2C는 잡혀도 C2R이 0이 된다. smoke(`.smoke/smoke.img`, ext4 파일)는 iomap 경로라 OK.
+- **iouring R2U 대응 없음** — io_uring은 CQE를 CQ ring에 게시하고 사용자는 syscall 없이 ring을 읽는다. libaio의 R2U(엔진 완료→사용자 수확)에 해당하는 측정 지점이 없어 의도적으로 4페이즈(S2Q/Q2D/D2C/C2R)에서 멈춘다.
 - **SQPOLL** — SQPOLL 모드면 `io_uring_submit_req`가 poller kthread에서 실행되지만 `block_bio_queue`도 같은 kthread라 S2Q의 pid_tgid 키 상관은 유지된다.
 - **PERCPU_HASH max_entries=256** — 디바이스 수 상한. 일반 시스템에선 충분하지만 멀티-경로/멀티-디스크 환경에서 한계 가능.
 - **루프 unroll `#pragma unroll for (i=0; i<256; i++)`** — `io_getevents` 결과 256개까지만 처리. nr > 256인 거대한 batch는 일부 누락.

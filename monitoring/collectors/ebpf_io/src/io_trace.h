@@ -38,12 +38,12 @@ struct rw_stats {
     unsigned long long d2c_hist[LAT_HIST_BUCKETS];
     /*
      * D2C 세분화: block_rq_issue -> nvme_complete_rq -> block_rq_complete.
-     * nvme_setup_cmd는 nvme_queue_rq()에서 block_rq_issue보다 먼저 실행돼 D2C 밖이라
-     * 쓰지 않는다. nvme(device 왕복) + blkc(block 완료) = D2C (놓치는 시간 없음).
+     * 중간 경계 CQ = nvme_complete_rq (NVMe Completion Queue 엔트리 처리 시점).
+     * D2CQ(device 왕복) + CQ2C(block 완료) = D2C (놓치는 시간 없음).
      * nvme_complete_rq tracepoint를 받은 I/O만 d2c_traced_count에 센다.
      */
-    unsigned long long nvme_total;  // block_rq_issue   -> nvme_complete_rq (device 왕복)
-    unsigned long long blkc_total;  // nvme_complete_rq -> block_rq_complete (block 완료)
+    unsigned long long d2cq_total;  // block_rq_issue   -> nvme_complete_rq (device 왕복)
+    unsigned long long cq2c_total;  // nvme_complete_rq -> block_rq_complete (block 완료)
     unsigned long long d2c_traced_count;
 };
 
@@ -67,42 +67,32 @@ struct dev_qd {
     unsigned long long qd_hist[QD_HIST_BUCKETS];
 };
 
-struct libaio_stats {
-    unsigned long long u2q_count;
-    unsigned long long u2q_lat_total;
-
-    unsigned long long c2a_read_count;
-    unsigned long long c2a_read_total;
-    unsigned long long c2a_write_count;
-    unsigned long long c2a_write_total;
-    unsigned long long c2a_flush_count;
-    unsigned long long c2a_flush_total;
-
-    unsigned long long a2u_read_count;
-    unsigned long long a2u_read_total;
-    unsigned long long a2u_write_count;
-    unsigned long long a2u_write_total;
-    unsigned long long a2u_flush_count;
-    unsigned long long a2u_flush_total;
-};
-
 /*
- * io_uring 페이즈 누적. libaio_stats와 같은 역할이되 io_uring 경로용.
- *   S2Q : io_uring_submit_req -> block_bio_queue   (submit -> 블록 큐 진입)
- *   C2C : block_rq_complete   -> io_uring_complete (블록 완료 -> CQE 게시)
- * io_uring은 완료 전달이 CQ ring 읽기(syscall 없음)라 libaio의 A2U 대응이 없다.
- * S2Q는 op 구분 없는 글로벌, C2C는 block 계층에서 분류한 op별.
+ * 엔진 페이즈(S2Q/C2R/R2U) 글로벌 누적. block 페이즈(Q2D/D2C) 밖의 구간으로,
+ * libaio·io_uring 공통 — mode가 상호배타라 한 구조체/맵을 둘이 공유한다.
+ *   S2Q : submit            -> block_bio_queue            (제출 경로)
+ *   C2R : block_rq_complete -> aio_complete / io_uring CQE (엔진 완료 핸드오프)
+ *   R2U : aio_complete      -> io_getevents 반환           (user 수확)
+ * io_uring은 완료를 CQ ring으로 전달(syscall 없음)해 R2U 대응이 없다 → r2u_* = 0.
+ * S2Q는 op 구분 없는 글로벌, C2R/R2U는 block 계층에서 분류한 op별.
  */
-struct iouring_stats {
+struct engine_stats {
     unsigned long long s2q_count;
     unsigned long long s2q_lat_total;
 
-    unsigned long long c2c_read_count;
-    unsigned long long c2c_read_total;
-    unsigned long long c2c_write_count;
-    unsigned long long c2c_write_total;
-    unsigned long long c2c_flush_count;
-    unsigned long long c2c_flush_total;
+    unsigned long long c2r_read_count;
+    unsigned long long c2r_read_total;
+    unsigned long long c2r_write_count;
+    unsigned long long c2r_write_total;
+    unsigned long long c2r_flush_count;
+    unsigned long long c2r_flush_total;
+
+    unsigned long long r2u_read_count;
+    unsigned long long r2u_read_total;
+    unsigned long long r2u_write_count;
+    unsigned long long r2u_write_total;
+    unsigned long long r2u_flush_count;
+    unsigned long long r2u_flush_total;
 };
 
 #ifndef __BPF__

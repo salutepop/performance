@@ -303,12 +303,23 @@ int main(int argc, char **argv) {
             getpid(), mode_libaio ? " + Libaio" : "", opt_interval);
     fflush(stdout);
 
-    /* opt_interval==0이면 print 비활성 (final report만). 그 외엔 매 tick 0.05초 sleep 후
-     * 누적 시간이 opt_interval 넘으면 print. */
+    /*
+     * 리포트 cadence는 절대 시각(CLOCK_MONOTONIC) deadline으로 잡는다.
+     * 과거엔 tick마다 elapsed += tick_s 를 누적해 opt_interval을 넘으면 print했는데,
+     * nanosleep 오버슬립 + print_json_report 소요 시간이 매 인터벌 누적돼 리포트
+     * cadence가 wall-clock보다 느리게 드리프트했다 — 15초 실행에서 리포트가 한 개
+     * 누락돼 device CSV가 wall-clock 1초를 통째로 건너뛰었고, 리포트 차트가
+     * 그 누락된 초를 master timeline(SystemMonitor, 드리프트 없음)에 reindex하며
+     * D2C/Q2D 라인이 워크로드 도중에 끊겨 보였다. deadline += opt_interval 은
+     * 처리 시간/jitter를 누적하지 않아 SystemMonitor._poll_loop와 같은 1Hz 격자에
+     * 정렬된다. tick(<=0.1s)은 SIGINT/SIGUSR1 응답성 유지용으로만 남긴다.
+     */
     const double tick_s = (opt_interval > 0 && opt_interval < 0.1) ? opt_interval : 0.1;
     struct timespec ts_sleep = { .tv_sec = (time_t)tick_s,
                                  .tv_nsec = (long)((tick_s - (long)tick_s) * 1e9) };
-    double elapsed = 0.0;
+    struct timespec ts_now;
+    clock_gettime(CLOCK_MONOTONIC, &ts_now);
+    double next_report = ts_now.tv_sec + ts_now.tv_nsec / 1e9 + opt_interval;
     while (!stop) {
         nanosleep(&ts_sleep, NULL);
         if (reset_flag) {
@@ -316,15 +327,23 @@ int main(int argc, char **argv) {
             if (device_qd_map) clear_stats_map(bpf_map__fd(device_qd_map));
             if (cpu_matrix_map) clear_stats_map(bpf_map__fd(cpu_matrix_map));
             reset_flag = 0;
-            elapsed = 0.0;
+            clock_gettime(CLOCK_MONOTONIC, &ts_now);
+            next_report = ts_now.tv_sec + ts_now.tv_nsec / 1e9 + opt_interval;
             continue;
         }
-        elapsed += tick_s;
+        if (opt_interval <= 0)
+            continue;
 
-        if (opt_interval > 0 && elapsed + 1e-9 >= opt_interval) {
+        clock_gettime(CLOCK_MONOTONIC, &ts_now);
+        double now_s = ts_now.tv_sec + ts_now.tv_nsec / 1e9;
+        if (now_s + 1e-9 >= next_report) {
             print_json_report(device_stats_map, sys_stats_map, device_qd_map,
                               cpu_matrix_map, stats_array, nr_cpus);
-            elapsed = 0.0;
+            next_report += opt_interval;
+            /* print이 한 인터벌 넘게 걸려 deadline이 과거가 됐으면, 밀린 만큼
+             * 리포트를 몰아 찍지 말고 현재 시각 기준으로 다음 격자에 재동기화. */
+            if (next_report <= now_s)
+                next_report = now_s + opt_interval;
         }
     }
 

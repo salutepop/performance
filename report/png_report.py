@@ -340,6 +340,66 @@ def _save_ebpf_latency_chart(path, summary):
     return True
 
 
+_SIZE_TS_COLS = ["size_hist_4k", "size_hist_32k", "size_hist_128k", "size_hist_large"]
+
+
+def _build_size_timeline(header, rows):
+    """device CSV -> (labels, [[4k],[32k],[128k],[large]]) per-interval counts.
+
+    The size_hist_* columns are cumulative BPF counters; delta consecutive
+    samples per op, then sum the deltas across ops for each timestamp."""
+    try:
+        ts_i = header.index("timestamp")
+        op_i = header.index("operation")
+        idx = [header.index(c) for c in _SIZE_TS_COLS]
+    except ValueError:
+        return [], []
+
+    def _i(v):
+        try:
+            return int(float(v))
+        except (ValueError, TypeError):
+            return 0
+
+    labels, seen, per_ts, prev = [], set(), {}, {}
+    for row in rows:
+        ts = row[ts_i] if ts_i < len(row) else ""
+        op = row[op_i] if op_i < len(row) else "?"
+        cur = [_i(row[i]) if i < len(row) else 0 for i in idx]
+        p = prev.get(op, [0, 0, 0, 0])
+        delta = [max(0, cur[b] - p[b]) for b in range(4)]
+        prev[op] = cur
+        if ts not in seen:
+            seen.add(ts)
+            labels.append(ts)
+            per_ts[ts] = [0, 0, 0, 0]
+        for b in range(4):
+            per_ts[ts][b] += delta[b]
+    series = [[per_ts[t][b] for t in labels] for b in range(4)]
+    return labels, series
+
+
+def _save_size_area(path, labels, series, title):
+    """100%-stacked area — I/O size mix shifting over time."""
+    if not labels or not any(any(s) for s in series):
+        return False
+    n = len(labels)
+    totals = [sum(series[b][i] for b in range(4)) or 1 for i in range(n)]
+    pct = [[series[b][i] / totals[i] * 100 for i in range(n)] for b in range(4)]
+    fig, ax = plt.subplots(figsize=(11, 3.8))
+    ax.stackplot(range(n), *pct, labels=_SIZE_LABELS, colors=_SIZE_COLORS)
+    ax.set_xlim(0, n - 1 if n > 1 else 1)
+    ax.set_ylim(0, 100)
+    ax.set_ylabel("share of I/O count [%]")
+    ax.set_xlabel("time")
+    ax.set_title(title)
+    _xtick_thin(ax, labels)
+    _place_legend(fig, ax, max_cols=4)
+    fig.savefig(path)
+    plt.close(fig)
+    return True
+
+
 def _save_ebpf_size_chart(path, summary):
     """100%-stacked horizontal bar — I/O size mix per device/op."""
     rows = [(lbl, sh) for lbl, sh in _ebpf_rows(summary, "size_hist")
@@ -482,6 +542,14 @@ def build_report(session_dir, sid):
                            colors={"d2c avg": "#0a84ff", "d2c p50": "#30d158", "d2c p99": "#ef4444"},
                            styles={"d2c avg": "-", "d2c p50": "--", "d2c p99": "-"})
                 fig_refs[f"{safe}_lat"] = os.path.relpath(path, session_dir)
+
+        # I/O size mix over time (100%-stacked area)
+        s_labels, s_series = _build_size_timeline(h, r)
+        if s_labels:
+            path = os.path.join(figs_dir, f"{safe}_sizemix.png")
+            if _save_size_area(path, s_labels, s_series,
+                               f"{dname} — I/O size mix over time"):
+                fig_refs[f"{safe}_sizemix"] = os.path.relpath(path, session_dir)
 
         # LBA heatmap
         lba = _build_lba_heatmap(h, r)
@@ -649,6 +717,7 @@ def build_report(session_dir, sid):
             for fk, alt in [(f"{safe}_iops", "IOPS"),
                             (f"{safe}_bw", "Bandwidth"),
                             (f"{safe}_lat", "Latency"),
+                            (f"{safe}_sizemix", "I/O size mix"),
                             (f"{safe}_lba", "LBA heatmap")]:
                 if fk in fig_refs:
                     lines.append(f"![{alt}]({fig_refs[fk]})")

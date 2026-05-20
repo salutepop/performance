@@ -29,6 +29,7 @@ csv_buffers = {}
 prev_libaio = {}  # {key: count or total_ns}, per-interval delta 계산용 (u2q_count/lat, c2a_*, a2u_*)
 prev_sqcq = {}    # {dev_name: (same, diff)}, SQ↔CQ 일치 카운터의 인터벌 delta 계산용
 prev_hists = {}   # {(dev,op,'q2d'|'d2c'): [32 buckets]} — 인터벌 히스토그램 delta 계산
+_ebpf_warmed_up = False  # 첫 인터벌(0~1s)은 버리고 delta baseline만 갱신
 
 
 # BPF op 이름 → libaio_overhead 필드 prefix 매핑. read_ahead/discard는 libaio 경로가 없어 None.
@@ -158,7 +159,7 @@ def save_csv_buffers():
 
 
 def parse_and_store_metrics(json_str):
-    global prev_metrics, csv_buffers, prev_libaio, prev_hists
+    global prev_metrics, csv_buffers, prev_libaio, prev_hists, _ebpf_warmed_up
     try:
         bpf_data = json.loads(json_str)
         timestamp = datetime.now().strftime("%H:%M:%S")
@@ -306,7 +307,10 @@ def parse_and_store_metrics(json_str):
                 for i, lba_val in enumerate(lba_hist):
                     row[f"lba_{i}"] = lba_val
 
-                csv_buffers[real_name].append(row)
+                # 첫 인터벌(0~1s)은 row를 버린다 — prev_*는 아래에서 갱신되므로
+                # 두 번째 인터벌부터 깨끗한 1s delta가 기록된다.
+                if _ebpf_warmed_up:
+                    csv_buffers[real_name].append(row)
 
                 prev_metrics[key] = {
                     "count": curr_count,
@@ -314,6 +318,8 @@ def parse_and_store_metrics(json_str):
                     "q2d_tot": curr_q2d_tot,
                     "d2c_tot": curr_d2c_tot,
                 }
+
+        _ebpf_warmed_up = True
 
     except json.JSONDecodeError:
         pass

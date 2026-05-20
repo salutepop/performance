@@ -45,6 +45,7 @@ class SystemMonitor:
         self._prev_cpu = None  # {cpu_id: list of jiffies}
         self._prev_irq = None  # {(irq_num, cpu_id): count}
         self._prev_ts = None
+        self._warmed_up = False  # 첫 tick(0~1s)은 버리고 baseline만 갱신
 
         # topology
         self._cpu_to_node = {}
@@ -620,8 +621,15 @@ class SystemMonitor:
                 row[f"gpu{idx}_pcie_rx_mb_s"] = g.get("rxpci")
                 row[f"gpu{idx}_pcie_tx_mb_s"] = g.get("txpci")
 
-        self._csv_writer.writerow(row)
-        self._csv_file.flush()
+        # Drop the first interval: the 0~1s warmup window (delta baseline only
+        # just settling) is noisy and not meaningful. The first tick refreshes
+        # the prev snapshots and returns, so the first *recorded* row is a
+        # clean 1s~2s interval.
+        if self._warmed_up:
+            self._csv_writer.writerow(row)
+            self._csv_file.flush()
+        else:
+            self._warmed_up = True
 
         # rotate prev
         self._prev_cpu = cpu_now

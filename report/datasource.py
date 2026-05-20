@@ -140,7 +140,7 @@ def _build_system_series(header, rows):
 
 
 def _build_device_series(header, rows, timeline=None):
-    """device CSV → (labels[], series{op:{iops,bw,d2c,p50,p99}}). 모든 op timestamp 통합·정렬.
+    """device CSV → (labels[], series{op:{iops,bw,d2c,p50,p99,q2d,q2d_p99}}). 모든 op timestamp 통합·정렬.
 
     timeline: 주입된 마스터 타임라인. 주면 그 위로 reindex (결손 인터벌은 None),
     없으면 device CSV 자체 timestamp 순서를 쓴다."""
@@ -156,6 +156,8 @@ def _build_device_series(header, rows, timeline=None):
         return [], {}
     p50_i = header.index("d2c_p50_us") if "d2c_p50_us" in header else -1
     p99_i = header.index("d2c_p99_us") if "d2c_p99_us" in header else -1
+    q2d_i = header.index("q2d_avg_us_interval") if "q2d_avg_us_interval" in header else -1
+    q2d_p99_i = header.index("q2d_p99_us") if "q2d_p99_us" in header else -1
 
     def _f(v):
         try:
@@ -178,6 +180,8 @@ def _build_device_series(header, rows, timeline=None):
             "d2c":  _f(row[d2c_i])  if d2c_i < len(row) else None,
             "p50":  _f(row[p50_i])  if 0 <= p50_i < len(row) else None,
             "p99":  _f(row[p99_i])  if 0 <= p99_i < len(row) else None,
+            "q2d":     _f(row[q2d_i])     if 0 <= q2d_i < len(row) else None,
+            "q2d_p99": _f(row[q2d_p99_i]) if 0 <= q2d_p99_i < len(row) else None,
         }
     out = timeline if timeline is not None else labels
     series = {}
@@ -188,6 +192,8 @@ def _build_device_series(header, rows, timeline=None):
             "d2c":  [by_ts.get(t, {}).get("d2c")  for t in out],
             "p50":  [by_ts.get(t, {}).get("p50")  for t in out],
             "p99":  [by_ts.get(t, {}).get("p99")  for t in out],
+            "q2d":     [by_ts.get(t, {}).get("q2d")     for t in out],
+            "q2d_p99": [by_ts.get(t, {}).get("q2d_p99") for t in out],
         }
     return out, series
 

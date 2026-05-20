@@ -83,9 +83,59 @@ def _place_legend(fig, ax, handles=None, labels=None, max_cols=5):
     fig.subplots_adjust(bottom=0.30 + 0.05 * max(0, nrows - 1))
 
 
-def _save_line(path, labels, datasets, title, ylabel, colors=None, styles=None):
+def _load_phases(session_dir):
+    """fio_*.json → [{name, t0, t1}] 워크로드 phase 윈도우 ("HH:MM:SS").
+
+    job_start(epoch ms)~파일 최상위 timestamp(epoch s, fio 종료 시각)를 한
+    phase로 본다. fio를 안 돌린 monitor-only 세션이면 빈 리스트."""
+    phases = []
+    for fp in sorted(glob.glob(os.path.join(session_dir, "fio_*.json"))):
+        try:
+            with open(fp) as f:
+                j = json.load(f)
+            jobs = j.get("jobs") or []
+            js = jobs[0].get("job_start") if jobs else None
+            end = j.get("timestamp")
+            if js is None or end is None:
+                continue
+            name = (jobs[0].get("jobname")
+                    or os.path.basename(fp)[len("fio_"):-len(".json")])
+            phases.append({
+                "name": name,
+                "t0": datetime.fromtimestamp(js / 1000.0).strftime("%H:%M:%S"),
+                "t1": datetime.fromtimestamp(end).strftime("%H:%M:%S"),
+            })
+        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+            continue
+    phases.sort(key=lambda p: p["t0"])
+    return phases
+
+
+def _overlay_phases(ax, labels, phases, label=False):
+    """시계열 axes에 워크로드 phase 밴드를 깐다 (x = range(len(labels))).
+
+    인접 phase를 구분하려 한 칸 걸러 옅은 음영을 넣고, label=True면 phase
+    이름을 axes 안쪽 위에 적는다."""
+    if not phases or not labels:
+        return
+    for k, ph in enumerate(phases):
+        idx = [i for i, t in enumerate(labels) if ph["t0"] <= t <= ph["t1"]]
+        if not idx:
+            continue
+        i0, i1 = idx[0], idx[-1]
+        if k % 2 == 0:
+            ax.axvspan(i0 - 0.5, i1 + 0.5, color="#7f7f7f", alpha=0.10, zorder=0)
+        if label:
+            ax.text((i0 + i1) / 2.0, 0.97, ph["name"],
+                    transform=ax.get_xaxis_transform(), ha="center", va="top",
+                    fontsize=7, color="#444", clip_on=True,
+                    bbox=dict(facecolor="white", edgecolor="none", alpha=0.6, pad=1))
+
+
+def _save_line(path, labels, datasets, title, ylabel, colors=None, styles=None,
+               phases=None):
     """datasets: dict {label: [values]}, None -> NaN for matplotlib gap handling.
-    colors/styles: dict {label: ...}, optional."""
+    colors/styles: dict {label: ...}, optional. phases: workload bands."""
     fig, ax = plt.subplots(figsize=(8, 3.5))
     for i, (name, vals) in enumerate(datasets.items()):
         y = [v if v is not None else np.nan for v in vals]
@@ -97,6 +147,7 @@ def _save_line(path, labels, datasets, title, ylabel, colors=None, styles=None):
     ax.set_ylabel(ylabel)
     ax.set_xlabel("time")
     ax.grid(True, alpha=0.3)
+    _overlay_phases(ax, labels, phases, label=True)
     _xtick_thin(ax, labels)
     _place_legend(fig, ax)
     fig.savefig(path)
@@ -170,7 +221,7 @@ _IOWAIT_COLOR = "#d62728" # red
 _SYS_COLOR = "#ff7f0e"    # orange
 
 
-def _save_correlation_chart(path, corr, title):
+def _save_correlation_chart(path, corr, title, phases=None):
     """3-axis I/O x System correlation chart.
 
     Visual encoding:
@@ -239,6 +290,7 @@ def _save_correlation_chart(path, corr, title):
     ax_bw.tick_params(axis="y", colors=_BW_COLOR)
     ax_cpu.tick_params(axis="y", colors=_IOWAIT_COLOR)
     ax_iops.grid(True, alpha=0.3)
+    _overlay_phases(ax_iops, labels, phases, label=True)
     _xtick_thin(ax_iops, labels)
     _place_legend(fig, ax_iops, handles=handles, labels=lbls, max_cols=4)
     fig.savefig(path)
@@ -488,7 +540,7 @@ def _build_size_timeline(header, rows, timeline=None):
 
 
 def _save_io_timeline(path, dname, labels, read_series, write_series,
-                      lba_read, lba_write):
+                      lba_read, lba_write, phases=None):
     """One figure per device — I/O size mix and LBA access region over a shared
     time axis. Four rows (read size mix, read LBA heatmap, write size mix,
     write LBA heatmap), all sharing the x axis, so the size composition and the
@@ -559,6 +611,10 @@ def _save_io_timeline(path, dname, labels, read_series, write_series,
     _area(ax_sw, write_series, "write")
     im_w = _heat(ax_hw, arr_w, "write")
 
+    # phase 밴드는 stacked-area 행에만 (heatmap은 imshow가 axes를 다 채움)
+    _overlay_phases(ax_sr, labels, phases, label=True)
+    _overlay_phases(ax_sw, labels, phases)
+
     ax_sr.set_xlim(*xlim)
     for ax in (ax_sr, ax_hr, ax_sw):
         ax.tick_params(labelbottom=False)
@@ -577,6 +633,74 @@ def _save_io_timeline(path, dname, labels, read_series, write_series,
     fig.suptitle(f"{dname} — I/O size mix (IOPS) & LBA region over time "
                  f"(read top, write bottom)", y=0.995)
     fig.subplots_adjust(top=0.90, bottom=0.10, left=0.10, right=0.93)
+    fig.savefig(path)
+    plt.close(fig)
+    return True
+
+
+def _save_device_timeline(path, dname, labels, series, phases=None):
+    """One figure per device — IOPS / Bandwidth / D2C / Q2D over a shared time
+    axis. The two latency rows use a log y scale (latency is heavy-tailed, so a
+    single outlier interval would flatten a linear axis) and plot each active
+    op's interval avg (solid) plus p99 (dashed)."""
+    n = len(labels)
+    if n == 0 or not series:
+        return False
+    x = range(n)
+
+    def _nan(vals):
+        return [v if v is not None else np.nan for v in (vals or [])]
+
+    fig, (ax_iops, ax_bw, ax_d2c, ax_q2d) = plt.subplots(
+        4, 1, figsize=(11, 12), sharex=True)
+
+    # IOPS / Bandwidth — per-op lines (0 is meaningful here, so linear y)
+    for op, s in series.items():
+        c = _OP_COLORS.get(op)
+        ax_iops.plot(x, _nan(s.get("iops")), label=op, color=c,
+                     linewidth=1.3, marker=".", markersize=3)
+        ax_bw.plot(x, _nan(s.get("bw")), label=op, color=c,
+                   linewidth=1.3, marker=".", markersize=3)
+    ax_iops.set_ylabel("IOPS\n[ops/s]", fontsize=8)
+    ax_bw.set_ylabel("Bandwidth\n[MB/s]", fontsize=8)
+
+    # latency rows: only ops that actually have D2C samples, avg + p99
+    active = [op for op, s in series.items()
+              if any(v is not None for v in (s.get("d2c") or []))]
+    for ax, avg_key, p99_key in ((ax_d2c, "d2c", "p99"),
+                                 (ax_q2d, "q2d", "q2d_p99")):
+        drew = False
+        for op in active:
+            s = series[op]
+            c = _OP_COLORS.get(op)
+            avg = _nan(s.get(avg_key))
+            p99 = _nan(s.get(p99_key))
+            if any(not np.isnan(v) for v in avg):
+                ax.plot(x, avg, color=c, linewidth=1.3, marker=".",
+                        markersize=3, label=f"{op} avg")
+                drew = True
+            if any(not np.isnan(v) for v in p99):
+                ax.plot(x, p99, color=c, linewidth=1.0, linestyle="--",
+                        label=f"{op} p99")
+        if drew:
+            ax.set_yscale("log")
+        else:
+            ax.text(0.5, 0.5, "no latency samples", ha="center", va="center",
+                    transform=ax.transAxes, color="#999")
+    ax_d2c.set_ylabel("D2C latency\n[us · log]", fontsize=8)
+    ax_q2d.set_ylabel("Q2D latency\n[us · log]", fontsize=8)
+
+    for ax in (ax_iops, ax_bw, ax_d2c, ax_q2d):
+        ax.grid(True, alpha=0.3)
+        ax.set_xlim(-0.5, (n - 0.5) if n > 1 else 0.5)
+        ax.legend(loc="upper right", fontsize=7, ncol=2, framealpha=0.85)
+        _overlay_phases(ax, labels, phases, label=(ax is ax_iops))
+
+    ax_q2d.set_xlabel("time")
+    _xtick_thin(ax_q2d, labels)
+    fig.suptitle(f"{dname} — I/O timeline  (IOPS · Bandwidth · D2C · Q2D, "
+                 f"latency: solid avg / dashed p99)", y=0.997)
+    fig.subplots_adjust(top=0.95, bottom=0.07, left=0.09, right=0.97, hspace=0.16)
     fig.savefig(path)
     plt.close(fig)
     return True
@@ -638,6 +762,9 @@ def build_report(session_dir, sid):
         except ValueError:
             timeline = None
 
+    # 워크로드 phase 윈도우 — 모든 시계열 차트에 밴드로 오버레이.
+    phases = _load_phases(session_dir)
+
     figs_dir = os.path.join(session_dir, f"figs_{sid}")
     os.makedirs(figs_dir, exist_ok=True)
 
@@ -657,7 +784,7 @@ def build_report(session_dir, sid):
     corr = _build_correlation_data(sys_h, sys_r, device_csvs)
     if corr and corr["labels"]:
         path = os.path.join(figs_dir, "correlation.png")
-        _save_correlation_chart(path, corr, "I/O x System correlation")
+        _save_correlation_chart(path, corr, "I/O x System correlation", phases)
         fig_refs["correlation"] = os.path.relpath(path, session_dir)
 
     # 1.5 eBPF full-stack analysis (latency breakdown / size / QD / SQ-CQ matrix)
@@ -698,10 +825,11 @@ def build_report(session_dir, sid):
             if datasets:
                 path = os.path.join(figs_dir, f"{fname}.png")
                 title = f"Devices overview - {'IOPS' if metric == 'iops' else 'Bandwidth'} (op sum)"
-                _save_line(path, corr["labels"], datasets, title, ylabel)
+                _save_line(path, corr["labels"], datasets, title, ylabel,
+                           phases=phases)
                 fig_refs[fname] = os.path.relpath(path, session_dir)
 
-    # 3. Per-device: IOPS / BW / Latency 3 차트
+    # 3. Per-device: I/O timeline (IOPS·BW·D2C·Q2D) + size-mix/LBA, 각 2장
     for dpath in device_csvs:
         h, r = _load_csv(dpath)
         if not h:
@@ -712,35 +840,10 @@ def build_report(session_dir, sid):
             continue
         safe = _safe_filename(dname)
 
-        # IOPS: per-op line (matplotlib DejaVu Sans 한글 미지원 → 차트 title은 영문)
-        path = os.path.join(figs_dir, f"{safe}_iops.png")
-        _save_line(path, labels, {op: s["iops"] for op, s in series.items()},
-                   f"{dname} - IOPS (per op)", "ops/s", colors=_OP_COLORS)
-        fig_refs[f"{safe}_iops"] = os.path.relpath(path, session_dir)
-
-        # BW: per-op line
-        path = os.path.join(figs_dir, f"{safe}_bw.png")
-        _save_line(path, labels, {op: s["bw"] for op, s in series.items()},
-                   f"{dname} - Bandwidth (per op)", "MB/s", colors=_OP_COLORS)
-        fig_refs[f"{safe}_bw"] = os.path.relpath(path, session_dir)
-
-        # Latency: top op (avg + p50 + p99)
-        has_p = any(any(v is not None for v in (s.get("p50") or []) + (s.get("p99") or []))
-                    for s in series.values())
-        if has_p:
-            top_op = max(series.keys(),
-                         key=lambda k: sum((v or 0) for v in series[k].get("iops") or []),
-                         default=None)
-            if top_op:
-                s = series[top_op]
-                path = os.path.join(figs_dir, f"{safe}_lat.png")
-                _save_line(path, labels,
-                           {"d2c avg": s["d2c"], "d2c p50": s["p50"], "d2c p99": s["p99"]},
-                           f"{dname} — D2C latency (avg / p50 / p99, op={top_op})",
-                           "us",
-                           colors={"d2c avg": "#0a84ff", "d2c p50": "#30d158", "d2c p99": "#ef4444"},
-                           styles={"d2c avg": "-", "d2c p50": "--", "d2c p99": "-"})
-                fig_refs[f"{safe}_lat"] = os.path.relpath(path, session_dir)
+        # IOPS / Bandwidth / D2C / Q2D over one shared, phase-banded time axis
+        path = os.path.join(figs_dir, f"{safe}_devtl.png")
+        if _save_device_timeline(path, dname, labels, series, phases):
+            fig_refs[f"{safe}_devtl"] = os.path.relpath(path, session_dir)
 
         # I/O size mix (IOPS) + LBA access region over a shared time axis
         s_labels, s_read, s_write = _build_size_timeline(h, r, timeline)
@@ -748,7 +851,7 @@ def build_report(session_dir, sid):
         lba_w = _build_lba_heatmap(h, r, _WRITE_OPS, timeline)
         path = os.path.join(figs_dir, f"{safe}_iotime.png")
         if _save_io_timeline(path, dname, s_labels, s_read, s_write,
-                             lba_r, lba_w):
+                             lba_r, lba_w, phases):
             fig_refs[f"{safe}_iotime"] = os.path.relpath(path, session_dir)
 
     # 4. System metrics (CPU per-NUMA, NVMe IRQ, Memory, GPU)
@@ -765,7 +868,8 @@ def build_report(session_dir, sid):
             if not data:
                 continue
             path = os.path.join(figs_dir, f"sys_{key}.png")
-            _save_line(path, sys_payload["labels"], data, title, ylabel)
+            _save_line(path, sys_payload["labels"], data, title, ylabel,
+                       phases=phases)
             fig_refs[f"sys_{key}"] = os.path.relpath(path, session_dir)
 
     # ---- Markdown 본문 ----
@@ -826,21 +930,9 @@ def build_report(session_dir, sid):
     lines.append(_md_table(summary_rows, ["metric", "value"], ["l", "r"]))
     lines.append("")
 
-    # Correlation chart
-    if "correlation" in fig_refs:
-        lines += ["## I/O x System correlation", "",
-                  f"![correlation]({fig_refs['correlation']})", ""]
+    # ----- funnel: context → overview → drill-down → host -----
 
-    # eBPF full-stack analysis
-    _ebpf_figs = [("ebpf_latency", "latency breakdown"), ("ebpf_size", "size dist"),
-                  ("ebpf_qd", "queue depth"), ("ebpf_sqcq_matrix", "SQ-CQ matrix")]
-    if any(fk in fig_refs for fk, _ in _ebpf_figs):
-        lines += ["## eBPF full-stack analysis", ""]
-        for fk, alt in _ebpf_figs:
-            if fk in fig_refs:
-                lines += [f"![{alt}]({fig_refs[fk]})", ""]
-
-    # Topology
+    # Topology — 무엇을 보는지 먼저 (context)
     lines += ["## Topology", ""]
     if topo:
         nodes = topo.get("nodes", [])
@@ -872,7 +964,10 @@ def build_report(session_dir, sid):
                 ["l"] * 7))
     lines.append("")
 
-    # Multi-device overview
+    # Overview — 세션 한눈에 보기
+    if "correlation" in fig_refs:
+        lines += ["## I/O x System correlation", "",
+                  f"![correlation]({fig_refs['correlation']})", ""]
     if "multi_iops" in fig_refs or "multi_bw" in fig_refs:
         lines += ["## Devices overview", ""]
         if "multi_iops" in fig_refs:
@@ -882,7 +977,16 @@ def build_report(session_dir, sid):
             lines.append(f"![devices-bw]({fig_refs['multi_bw']})")
             lines.append("")
 
-    # Per-device
+    # Drill-down — eBPF full-stack analysis (session-wide)
+    _ebpf_figs = [("ebpf_latency", "latency breakdown"), ("ebpf_size", "size dist"),
+                  ("ebpf_qd", "queue depth"), ("ebpf_sqcq_matrix", "SQ-CQ matrix")]
+    if any(fk in fig_refs for fk, _ in _ebpf_figs):
+        lines += ["## eBPF full-stack analysis", ""]
+        for fk, alt in _ebpf_figs:
+            if fk in fig_refs:
+                lines += [f"![{alt}]({fig_refs[fk]})", ""]
+
+    # Drill-down — per-device
     if dev_aggs:
         lines += ["## Per-device I/O", ""]
         for dname in sorted(dev_aggs.keys()):
@@ -907,9 +1011,7 @@ def build_report(session_dir, sid):
                     ["op", "total IO", "peak BW(MB/s)", "avg D2C(us)", "peak QD"],
                     ["l"] + ["r"] * 4))
                 lines.append("")
-            for fk, alt in [(f"{safe}_iops", "IOPS"),
-                            (f"{safe}_bw", "Bandwidth"),
-                            (f"{safe}_lat", "Latency"),
+            for fk, alt in [(f"{safe}_devtl", "I/O timeline (IOPS·BW·D2C·Q2D)"),
                             (f"{safe}_iotime", "I/O size mix & LBA region")]:
                 if fk in fig_refs:
                     lines.append(f"![{alt}]({fig_refs[fk]})")

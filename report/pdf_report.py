@@ -8,7 +8,7 @@ CLI:
 - 표지/요약: report_<sid>.md 본문을 구조적으로 렌더 (heading / bullet / table)
   · `|...|` 연속 라인은 matplotlib `ax.table()`로 진짜 표로 그림
   · 헤딩(`#`/`##`/`###`)은 가중치, bullet(`- `)은 들여쓰기
-- 이후 페이지: figs_<sid>/*.png 한 페이지씩 (correlation → multi_* → sys_* → device 순)
+- 이후 페이지: figs_<sid>/*.png 한 페이지씩 (correlation → multi_* → ebpf_* → device → sys_* 순)
 
 figs_<sid>/가 비어 있으면 자동으로 png_report.main() 호출해서 PNG들을 먼저 만든다.
 한글 폰트는 Noto Sans CJK KR / NanumGothic / Malgun Gothic 등 시스템 가용한 것을 자동 선택.
@@ -311,13 +311,15 @@ def _add_image_page(pdf, png_path):
 
 
 def _order_pngs(pngs):
+    # funnel 순서: overview(correlation, multi) → eBPF drill-down → per-device
+    # → host(sys). per-device PNG는 고정 prefix가 없어 default 버킷(3).
     def key(p):
         n = os.path.basename(p)
         if n.startswith("correlation"): return (0, n)
-        if n.startswith("ebpf_"): return (1, n)
-        if n.startswith("multi_"): return (2, n)
-        if n.startswith("sys_"): return (3, n)
-        return (4, n)
+        if n.startswith("multi_"): return (1, n)
+        if n.startswith("ebpf_"): return (2, n)
+        if n.startswith("sys_"): return (4, n)
+        return (3, n)
     return sorted(pngs, key=key)
 
 

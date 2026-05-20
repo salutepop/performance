@@ -240,11 +240,14 @@ def parse_and_store_metrics(json_str):
 
                 iops = delta_count
                 bw_mb = delta_bytes / (1024.0 * 1024.0)
+                # I/O가 0건인 인터벌의 latency는 "0us"가 아니라 정의 불가다.
+                # percentile(compute_percentiles)이 빈 히스토그램에 None을 주는
+                # 것과 맞춰, avg도 None으로 둬 CSV 빈칸 → 차트에서 결손 처리.
                 q2d_avg_us = (
-                    (delta_q2d / delta_count / 1000.0) if delta_count > 0 else 0.0
+                    (delta_q2d / delta_count / 1000.0) if delta_count > 0 else None
                 )
                 d2c_avg_us = (
-                    (delta_d2c / delta_count / 1000.0) if delta_count > 0 else 0.0
+                    (delta_d2c / delta_count / 1000.0) if delta_count > 0 else None
                 )
 
                 current_qd = stats.get("current_qd", 0)
@@ -279,8 +282,8 @@ def parse_and_store_metrics(json_str):
                     "operation": op,
                     "iops_interval": iops,
                     "bandwidth_mb_s_interval": round(bw_mb, 4),
-                    "q2d_avg_us_interval": round(q2d_avg_us, 2),
-                    "d2c_avg_us_interval": round(d2c_avg_us, 2),
+                    "q2d_avg_us_interval": round(q2d_avg_us, 2) if q2d_avg_us is not None else None,
+                    "d2c_avg_us_interval": round(d2c_avg_us, 2) if d2c_avg_us is not None else None,
                     "u2q_avg_us_interval": round(u2q_avg_us_interval, 2),
                     "c2a_avg_us_interval": round(op_libaio["c2a"], 2),
                     "a2u_avg_us_interval": round(op_libaio["a2u"], 2),

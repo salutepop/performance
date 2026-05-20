@@ -19,6 +19,7 @@ enum io_req_type {
 #define MAX_SIZE_BUCKETS 4
 #define LBA_BUCKETS 128   // 0..LBA_BUCKETS-1 (각 bucket = capacity_sectors / LBA_BUCKETS)
 #define LAT_HIST_BUCKETS 32   // log2(ns) buckets: 0=[1,2)ns ... 30=~1s. clamp to 31.
+#define QD_HIST_BUCKETS 64    // device queue-depth histogram: bucket = min(total in-flight, 63)
 
 struct lat_stats {
     unsigned long long total;
@@ -35,6 +36,15 @@ struct rw_stats {
     unsigned int lba_hist[LBA_BUCKETS]; // LBA 접근 빈도 버킷
     unsigned long long q2d_hist[LAT_HIST_BUCKETS]; // log2(ns) latency 히스토그램 (percentile 계산용)
     unsigned long long d2c_hist[LAT_HIST_BUCKETS];
+    /*
+     * D2C 세분화: block_rq_issue -> nvme_complete_rq -> block_rq_complete.
+     * nvme_setup_cmd는 nvme_queue_rq()에서 block_rq_issue보다 먼저 실행돼 D2C 밖이라
+     * 쓰지 않는다. nvme(device 왕복) + blkc(block 완료) = D2C (놓치는 시간 없음).
+     * nvme_complete_rq tracepoint를 받은 I/O만 d2c_traced_count에 센다.
+     */
+    unsigned long long nvme_total;  // block_rq_issue   -> nvme_complete_rq (device 왕복)
+    unsigned long long blkc_total;  // nvme_complete_rq -> block_rq_complete (block 완료)
+    unsigned long long d2c_traced_count;
 };
 
 struct io_stats {
@@ -53,6 +63,8 @@ struct dev_qd {
     /* SQ(issue) CPU와 CQ(complete) CPU 일치/불일치 카운트. cross-CPU atomic. */
     unsigned long long sq_cq_same;
     unsigned long long sq_cq_diff;
+    /* device 전체 in-flight QD 분포. block_rq_issue 시점에 sum(current_qd)을 버킷. */
+    unsigned long long qd_hist[QD_HIST_BUCKETS];
 };
 
 struct libaio_stats {

@@ -270,15 +270,24 @@ def _save_correlation_chart(path, corr, title):
     plt.close(fig)
 
 
-# eBPF full-stack phases, in pipeline order. D2C (actual disk time) is the
-# warm highlight; the software-overhead phases use cooler tones.
-_PHASE_ORDER = ["u2q", "q2d", "d2c", "c2a", "a2u"]
+# eBPF full-stack phases, in pipeline order. The D2C disk region is split by
+# the nvme_complete_rq tracepoint into NVME (device round-trip) + BLKC (block
+# completion path), both orange family. "d2c" is the fallback single segment
+# when the nvme tracepoint didn't fire (so no time is ever lost from the bar).
+_PHASE_ORDER = ["u2q", "q2d", "nvme", "blkc", "d2c", "c2a", "a2u"]
 _PHASE_LABELS = {
-    "u2q": "U2Q  user->blk_q", "q2d": "Q2D  blk_q->disp",
-    "d2c": "D2C  disp->compl", "c2a": "C2A  compl->aio", "a2u": "A2U  aio->user",
+    "u2q":  "U2Q   user->blk_q",
+    "q2d":  "Q2D   blk_q->disp",
+    "nvme": "NVME  disp->dev compl",
+    "blkc": "BLKC  dev compl->blk compl",
+    "d2c":  "D2C   disp->compl (unsplit)",
+    "c2a":  "C2A   blk->aio",
+    "a2u":  "A2U   aio->user",
 }
 _PHASE_COLORS = {
-    "u2q": "#90caf9", "q2d": "#26a69a", "d2c": "#ef6c00",
+    "u2q": "#90caf9", "q2d": "#26a69a",
+    "nvme": "#ef6c00", "blkc": "#ffb74d",   # D2C family
+    "d2c": "#ef6c00",
     "c2a": "#ab47bc", "a2u": "#90a4ae",
 }
 _SIZE_LABELS = ["<=4K", "4-32K", "32-128K", ">128K"]
@@ -306,16 +315,48 @@ def _ebpf_rows(summary, field):
     return rows
 
 
-def _save_ebpf_latency_chart(path, summary):
-    """Horizontal stacked bar — avg latency per I/O split into the 5 phases.
+def _ebpf_rows_full(summary):
+    """Flatten summary -> [(label, op_dict), ...] over every device/op."""
+    rows = []
+    for dev, dd in summary.get("devices", {}).items():
+        for op, od in dd.get("ops", {}).items():
+            rows.append((f"{dev}  {op}", od))
+    return rows
 
-    Each bar is one device/op; total length = full-stack avg latency, so it is
-    obvious where I/O time goes (D2C = real disk, the rest = software path)."""
-    rows = [(lbl, ph) for lbl, ph in _ebpf_rows(summary, "phase_avg_us")
-            if ph and sum(ph.get(p, 0) or 0 for p in _PHASE_ORDER) > 0]
+
+def _ebpf_phase_segments(op):
+    """One device/op dict -> {phase: us}. The D2C region is split into
+    NVME/BLKC by the traced ratio, scaled so the segments still sum to the
+    authoritative D2C total (no time is lost). Falls back to a single 'd2c'."""
+    ph = op.get("phase_avg_us", {}) or {}
+    seg = {"u2q": ph.get("u2q", 0) or 0, "q2d": ph.get("q2d", 0) or 0,
+           "c2a": ph.get("c2a", 0) or 0, "a2u": ph.get("a2u", 0) or 0}
+    d2c = ph.get("d2c", 0) or 0
+    sp = op.get("d2c_split_us", {}) or {}
+    sp_sum = (sp.get("nvme", 0) or 0) + (sp.get("blkc", 0) or 0)
+    if sp_sum > 0 and d2c > 0:
+        seg["nvme"] = d2c * (sp.get("nvme", 0) or 0) / sp_sum
+        seg["blkc"] = d2c * (sp.get("blkc", 0) or 0) / sp_sum
+    else:
+        seg["d2c"] = d2c
+    return seg
+
+
+def _save_ebpf_latency_chart(path, summary):
+    """Horizontal stacked bar — avg latency per I/O split into pipeline phases.
+
+    Each bar is one device/op; total length = full-stack avg latency. The D2C
+    disk region is sub-split into NVME (block_rq_issue -> nvme_complete_rq,
+    device round-trip) and BLKC (nvme_complete_rq -> block_rq_complete, block
+    completion path), so device vs block-layer time is visible."""
+    rows = []
+    for lbl, op in [(l, o) for l, o in _ebpf_rows_full(summary)]:
+        seg = _ebpf_phase_segments(op)
+        if sum(seg.values()) > 0:
+            rows.append((lbl, seg))
     if not rows:
         return False
-    fig, ax = plt.subplots(figsize=(11, max(2.4, 0.62 * len(rows) + 1.6)))
+    fig, ax = plt.subplots(figsize=(11, max(2.4, 0.62 * len(rows) + 1.8)))
     y = list(range(len(rows)))
     left = [0.0] * len(rows)
     for phase in _PHASE_ORDER:
@@ -331,10 +372,81 @@ def _save_ebpf_latency_chart(path, summary):
     ax.set_yticklabels([r[0] for r in rows])
     ax.invert_yaxis()
     ax.set_xlabel("avg latency per I/O [us]")
-    ax.set_xlim(0, max(left) * 1.12)
-    ax.set_title("eBPF full-stack latency breakdown — avg us per I/O, stacked by phase")
+    ax.set_xlim(0, (max(left) or 1) * 1.12)
+    ax.set_title("eBPF full-stack latency breakdown — avg us per I/O "
+                 "(D2C split into NVME device + BLKC completion)")
     ax.grid(True, axis="x", alpha=0.3)
-    _place_legend(fig, ax, max_cols=5)
+    _place_legend(fig, ax, max_cols=4)
+    fig.savefig(path)
+    plt.close(fig)
+    return True
+
+
+def _save_ebpf_qd_chart(path, summary):
+    """Bar chart — device queue-depth distribution (qd_hist, 64 buckets)."""
+    series = []
+    for dev, dd in summary.get("devices", {}).items():
+        h = dd.get("qd_hist") or []
+        if h and sum(h) > 0:
+            series.append((dev, h))
+    if not series:
+        return False
+    nb = max(len(h) for _, h in series)
+    # trim trailing all-zero buckets for a tighter x-range
+    last = 0
+    for _, h in series:
+        for b in range(len(h)):
+            if h[b] > 0:
+                last = max(last, b)
+    nb = min(nb, last + 2)
+    fig, ax = plt.subplots(figsize=(11, 3.8))
+    width = 0.8 / len(series)
+    for i, (dev, h) in enumerate(series):
+        xs = [b + i * width for b in range(nb)]
+        ax.bar(xs, h[:nb], width=width, color=_PALETTE[i % len(_PALETTE)], label=dev)
+    ax.set_xlabel("device queue depth (in-flight I/O at issue; last bucket = >=63)")
+    ax.set_ylabel("I/O count")
+    ax.set_title("eBPF device queue-depth distribution")
+    ax.grid(True, axis="y", alpha=0.3)
+    _place_legend(fig, ax, max_cols=4)
+    fig.savefig(path)
+    plt.close(fig)
+    return True
+
+
+def _save_ebpf_sqcq_matrix(path, summary):
+    """Heatmap — issue-CPU x complete-CPU counts. Diagonal = NUMA-local
+    completion (good); off-diagonal = cross-CPU completion (IRQ affinity)."""
+    matrix = summary.get("sqcq_matrix") or []
+    if not matrix:
+        return False
+    max_cpu = 0
+    for entry in matrix:
+        if len(entry) >= 3:
+            max_cpu = max(max_cpu, entry[0], entry[1])
+    n = max_cpu + 1
+    arr = np.zeros((n, n), dtype=float)
+    for entry in matrix:
+        if len(entry) >= 3:
+            arr[entry[0], entry[1]] += entry[2]
+    if arr.sum() <= 0:
+        return False
+    # square-ish figure; scales gracefully from a few CPUs to 384.
+    side = min(11.0, max(4.0, n * 0.12))
+    fig, ax = plt.subplots(figsize=(side + 1.5, side))
+    im = ax.imshow(np.log10(arr + 1), origin="upper", cmap="magma",
+                   aspect="equal", interpolation="nearest")
+    ax.set_xlabel("complete CPU (CQ / IRQ)")
+    ax.set_ylabel("issue CPU (SQ)")
+    diag = float(np.trace(arr))
+    total = float(arr.sum())
+    ax.set_title(f"eBPF SQ x CQ CPU matrix — {n} CPUs, "
+                 f"diagonal {diag/total*100:.1f}% (NUMA-local)")
+    step = max(1, n // 16)
+    ticks = list(range(0, n, step))
+    ax.set_xticks(ticks)
+    ax.set_yticks(ticks)
+    fig.colorbar(im, ax=ax, label="log10(count + 1)", shrink=0.8, pad=0.02)
     fig.savefig(path)
     plt.close(fig)
     return True
@@ -462,15 +574,16 @@ def build_report(session_dir, sid):
         _save_correlation_chart(path, corr, "I/O x System correlation")
         fig_refs["correlation"] = os.path.relpath(path, session_dir)
 
-    # 1.5 eBPF full-stack analysis (latency breakdown + I/O size distribution)
+    # 1.5 eBPF full-stack analysis (latency breakdown / size / QD / SQ-CQ matrix)
     ebpf = _load_ebpf_summary(session_dir, sid)
     if ebpf and ebpf.get("devices"):
-        path = os.path.join(figs_dir, "ebpf_latency.png")
-        if _save_ebpf_latency_chart(path, ebpf):
-            fig_refs["ebpf_latency"] = os.path.relpath(path, session_dir)
-        path = os.path.join(figs_dir, "ebpf_size.png")
-        if _save_ebpf_size_chart(path, ebpf):
-            fig_refs["ebpf_size"] = os.path.relpath(path, session_dir)
+        for fname, fn in [("ebpf_latency", _save_ebpf_latency_chart),
+                          ("ebpf_size", _save_ebpf_size_chart),
+                          ("ebpf_qd", _save_ebpf_qd_chart),
+                          ("ebpf_sqcq_matrix", _save_ebpf_sqcq_matrix)]:
+            path = os.path.join(figs_dir, f"{fname}.png")
+            if fn(path, ebpf):
+                fig_refs[fname] = os.path.relpath(path, session_dir)
 
     # 2. Multi-device overview (IOPS, BW)
     if device_csvs and corr:
@@ -640,12 +753,13 @@ def build_report(session_dir, sid):
                   f"![correlation]({fig_refs['correlation']})", ""]
 
     # eBPF full-stack analysis
-    if "ebpf_latency" in fig_refs or "ebpf_size" in fig_refs:
+    _ebpf_figs = [("ebpf_latency", "latency breakdown"), ("ebpf_size", "size dist"),
+                  ("ebpf_qd", "queue depth"), ("ebpf_sqcq_matrix", "SQ-CQ matrix")]
+    if any(fk in fig_refs for fk, _ in _ebpf_figs):
         lines += ["## eBPF full-stack analysis", ""]
-        if "ebpf_latency" in fig_refs:
-            lines += [f"![ebpf-latency]({fig_refs['ebpf_latency']})", ""]
-        if "ebpf_size" in fig_refs:
-            lines += [f"![ebpf-size]({fig_refs['ebpf_size']})", ""]
+        for fk, alt in _ebpf_figs:
+            if fk in fig_refs:
+                lines += [f"![{alt}]({fig_refs[fk]})", ""]
 
     # Topology
     lines += ["## Topology", ""]

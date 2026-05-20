@@ -26,7 +26,7 @@ void clear_stats_map(int fd) {
 }
 
 void print_json_report(struct bpf_map *device_stats_map, struct bpf_map *sys_stats_map,
-                       struct bpf_map *device_qd_map,
+                       struct bpf_map *device_qd_map, struct bpf_map *cpu_matrix_map,
                        struct io_stats *stats_array, int nr_cpus) {
     const char *type_names[IO_MAX_TYPES] = {"read", "read_ahead", "write", "flush", "discard"};
 
@@ -55,6 +55,9 @@ void print_json_report(struct bpf_map *device_stats_map, struct bpf_map *sys_sta
                     dev_total.stats[t].q2d_hist[b] = 0;
                     dev_total.stats[t].d2c_hist[b] = 0;
                 }
+                dev_total.stats[t].nvme_total = 0;
+                dev_total.stats[t].blkc_total = 0;
+                dev_total.stats[t].d2c_traced_count = 0;
             }
 
             unsigned long long total_any_io = 0;
@@ -78,6 +81,9 @@ void print_json_report(struct bpf_map *device_stats_map, struct bpf_map *sys_sta
                         tot_st->d2c.total += cpu_st->d2c.total;
                         if (cpu_st->d2c.max > tot_st->d2c.max) tot_st->d2c.max = cpu_st->d2c.max;
                         if (cpu_st->d2c.min < tot_st->d2c.min) tot_st->d2c.min = cpu_st->d2c.min;
+                        tot_st->nvme_total += cpu_st->nvme_total;
+                        tot_st->blkc_total += cpu_st->blkc_total;
+                        tot_st->d2c_traced_count += cpu_st->d2c_traced_count;
                         total_any_io += cpu_st->io_count;
                     }
                 }
@@ -140,14 +146,24 @@ void print_json_report(struct bpf_map *device_stats_map, struct bpf_map *sys_sta
                         for (int b = 0; b < LAT_HIST_BUCKETS; b++) {
                             printf("%llu%s", dev_total.stats[t].d2c_hist[b], (b == LAT_HIST_BUCKETS - 1) ? "" : ",");
                         }
-                        printf("]\n");
+                        printf("],\n");
+
+                        printf("          \"d2c_split\": {\"nvme_total_ns\": %llu, "
+                               "\"blkc_total_ns\": %llu, \"traced_count\": %llu}\n",
+                               dev_total.stats[t].nvme_total, dev_total.stats[t].blkc_total,
+                               dev_total.stats[t].d2c_traced_count);
                         printf("        }");
                         first_op = 0;
                     }
                 }
                 printf("\n      },\n");
-                printf("      \"sqcq\": {\"same\": %llu, \"diff\": %llu}\n",
+                printf("      \"sqcq\": {\"same\": %llu, \"diff\": %llu},\n",
                        qd_data.sq_cq_same, qd_data.sq_cq_diff);
+                printf("      \"qd_hist\": [");
+                for (int b = 0; b < QD_HIST_BUCKETS; b++) {
+                    printf("%llu%s", qd_data.qd_hist[b], (b == QD_HIST_BUCKETS - 1) ? "" : ",");
+                }
+                printf("]\n");
                 printf("    }");
                 first_dev = 0;
             }
@@ -175,10 +191,29 @@ void print_json_report(struct bpf_map *device_stats_map, struct bpf_map *sys_sta
     printf("    \"a2u_write_total\": %llu,\n", sys_st.a2u_write_total);
     printf("    \"a2u_flush_count\": %llu,\n", sys_st.a2u_flush_count);
     printf("    \"a2u_flush_total\": %llu\n", sys_st.a2u_flush_total);
-    printf("  }\n");
+    printf("  },\n");
+
+    /* SQ x CQ CPU 매트릭스 — sparse: 실제 발생한 (issue,cq) 쌍만. */
+    printf("  \"sqcq_matrix\": [");
+    if (cpu_matrix_map) {
+        int m_fd = bpf_map__fd(cpu_matrix_map);
+        unsigned int mk = 0, mnext;
+        int first_m = 1;
+        while (bpf_map_get_next_key(m_fd, &mk, &mnext) == 0) {
+            unsigned long long cnt = 0;
+            if (bpf_map_lookup_elem(m_fd, &mnext, &cnt) == 0 && cnt > 0) {
+                unsigned int issue_cpu = mnext >> 16;
+                unsigned int cq_cpu = mnext & 0xFFFF;
+                printf("%s[%u,%u,%llu]", first_m ? "" : ",", issue_cpu, cq_cpu, cnt);
+                first_m = 0;
+            }
+            mk = mnext;
+        }
+    }
+    printf("]\n");
     printf("}\n---JSON_END---\n");
-    
-    fflush(stdout); 
+
+    fflush(stdout);
 }
 
 int main(int argc, char **argv) {
@@ -188,6 +223,7 @@ int main(int argc, char **argv) {
     struct bpf_map *device_stats_map;
     struct bpf_map *sys_stats_map;
     struct bpf_map *device_qd_map;
+    struct bpf_map *cpu_matrix_map;
 
     bool mode_libaio = false;
     double opt_interval = 1.0;   // 초 단위, sub-second (예: 0.5) 허용
@@ -261,6 +297,7 @@ int main(int argc, char **argv) {
     device_stats_map = bpf_object__find_map_by_name(skel->obj, "device_stats");
     sys_stats_map = bpf_object__find_map_by_name(skel->obj, "sys_stats_map");
     device_qd_map = bpf_object__find_map_by_name(skel->obj, "device_qd");
+    cpu_matrix_map = bpf_object__find_map_by_name(skel->obj, "cpu_matrix");
 
     printf("[PID: %d] io_trace is running (Modes: Generic%s) | Interval: %.3fs\n",
             getpid(), mode_libaio ? " + Libaio" : "", opt_interval);
@@ -277,6 +314,7 @@ int main(int argc, char **argv) {
         if (reset_flag) {
             clear_stats_map(bpf_map__fd(device_stats_map));
             if (device_qd_map) clear_stats_map(bpf_map__fd(device_qd_map));
+            if (cpu_matrix_map) clear_stats_map(bpf_map__fd(cpu_matrix_map));
             reset_flag = 0;
             elapsed = 0.0;
             continue;
@@ -284,12 +322,14 @@ int main(int argc, char **argv) {
         elapsed += tick_s;
 
         if (opt_interval > 0 && elapsed + 1e-9 >= opt_interval) {
-            print_json_report(device_stats_map, sys_stats_map, device_qd_map, stats_array, nr_cpus);
+            print_json_report(device_stats_map, sys_stats_map, device_qd_map,
+                              cpu_matrix_map, stats_array, nr_cpus);
             elapsed = 0.0;
         }
     }
 
-    print_json_report(device_stats_map, sys_stats_map, device_qd_map, stats_array, nr_cpus);
+    print_json_report(device_stats_map, sys_stats_map, device_qd_map,
+                      cpu_matrix_map, stats_array, nr_cpus);
 
     free(stats_array);
 cleanup:

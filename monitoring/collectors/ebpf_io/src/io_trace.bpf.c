@@ -37,13 +37,25 @@ struct trace_ctx {
     u64 q2d_lat;
     u64 pid_tgid;
     u32 issue_cpu;
+    u64 nvme_complete_ts;  // nvme_complete_rq tracepoint 시각 (D2C 세분화)
 };
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 1048576);
-    __type(key, u64); 
+    __type(key, u64);
     __type(value, struct trace_ctx);
 } req_start SEC(".maps");
+
+/*
+ * SQ(issue) CPU x CQ(complete) CPU 카운트 매트릭스. key = (issue<<16)|cq.
+ * sparse HASH — 실제로 발생한 (issue,cq) 쌍만 저장. 384코어면 최대 384*384개.
+ */
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 262144);
+    __type(key, u32);
+    __type(value, u64);
+} cpu_matrix SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_PERCPU_HASH);
@@ -121,11 +133,23 @@ struct {
     __type(value, struct dev_qd);
 } device_qd SEC(".maps");
 
+/* dev_qd가 qd_hist[64] 때문에 ~570B — BPF 스택(512B)에 못 올린다.
+ * zero-init용 PERCPU scratch 맵에서 memset 후 복사. */
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, u32);
+    __type(value, struct dev_qd);
+} scratch_qd SEC(".maps");
+
 static __always_inline struct dev_qd *get_or_init_dev_qd(u32 dev) {
     struct dev_qd *q = bpf_map_lookup_elem(&device_qd, &dev);
     if (q) return q;
-    struct dev_qd init = {};
-    bpf_map_update_elem(&device_qd, &dev, &init, BPF_NOEXIST);
+    u32 z = 0;
+    struct dev_qd *init = bpf_map_lookup_elem(&scratch_qd, &z);
+    if (!init) return NULL;
+    __builtin_memset(init, 0, sizeof(*init));
+    bpf_map_update_elem(&device_qd, &dev, init, BPF_NOEXIST);
     return bpf_map_lookup_elem(&device_qd, &dev);
 }
 
@@ -350,9 +374,32 @@ int BPF_PROG(block_rq_issue, struct request *rq) {
                 if (new_qd > 0 && (unsigned int)new_qd > q->max_qd[type]) {
                     q->max_qd[type] = (unsigned int)new_qd;
                 }
+                // device 전체 in-flight QD 분포 히스토그램.
+                int total_qd = 0;
+                #pragma unroll
+                for (int t = 0; t < IO_MAX_TYPES; t++) total_qd += q->current_qd[t];
+                if (total_qd < 0) total_qd = 0;
+                u32 qb = (total_qd < QD_HIST_BUCKETS) ? (u32)total_qd
+                                                      : (QD_HIST_BUCKETS - 1);
+                __sync_fetch_and_add(&q->qd_hist[qb], 1);
             }
         }
     }
+    return 0;
+}
+
+/*
+ * D2C 세분화: nvme_complete_rq tracepoint로 D2C 구간을 둘로 쪼갠다.
+ *   block_rq_issue --[nvme: device 왕복]--> nvme_complete_rq --[blkc]--> block_rq_complete
+ * request 포인터를 인자로 받으므로 req_start 맵 키로 그대로 상관.
+ * (nvme_setup_cmd는 nvme_queue_rq()에서 block_rq_issue보다 먼저 실행 — D2C 밖이라 안 씀.)
+ * nvme tracepoint가 없는 커널에서는 io_trace.c가 best-effort attach로 건너뛴다.
+ */
+SEC("tp_btf/nvme_complete_rq")
+int BPF_PROG(nvme_complete_rq, struct request *req) {
+    u64 req_ptr = (u64)req;
+    struct trace_ctx *tctx = bpf_map_lookup_elem(&req_start, &req_ptr);
+    if (tctx) tctx->nvme_complete_ts = bpf_ktime_get_ns();
     return 0;
 }
 
@@ -400,6 +447,9 @@ int BPF_PROG(block_rq_complete, struct request *rq, int error, unsigned int nr_b
                             init_s->stats[i].q2d_hist[b] = 0;
                             init_s->stats[i].d2c_hist[b] = 0;
                         }
+                        init_s->stats[i].nvme_total = 0;
+                        init_s->stats[i].blkc_total = 0;
+                        init_s->stats[i].d2c_traced_count = 0;
                     }
                     bpf_map_update_elem(&device_stats, &dev, init_s, BPF_ANY);
                     s = bpf_map_lookup_elem(&device_stats, &dev);
@@ -421,6 +471,15 @@ int BPF_PROG(block_rq_complete, struct request *rq, int error, unsigned int nr_b
                 if (d2c_lat > target->d2c.max) target->d2c.max = d2c_lat;
                 if (target->d2c.min == (unsigned long long)-1 || d2c_lat < target->d2c.min) target->d2c.min = d2c_lat;
                 target->d2c_hist[lat_bucket(d2c_lat)]++;
+
+                /* D2C 세분화: nvme_complete_rq를 받은 I/O만. 단조 증가 검증 후
+                 * nvme(device 왕복) + blkc(block 완료) = D2C (놓치는 시간 없음). */
+                u64 nct = tctx->nvme_complete_ts;
+                if (nct > 0 && nct >= tctx->issue_ts && end_ts >= nct) {
+                    target->nvme_total += nct - tctx->issue_ts;
+                    target->blkc_total += end_ts - nct;
+                    target->d2c_traced_count++;
+                }
 
                 if (q2d_lat > 0) {
                     target->q2d.total += q2d_lat;
@@ -448,6 +507,15 @@ int BPF_PROG(block_rq_complete, struct request *rq, int error, unsigned int nr_b
                     __sync_fetch_and_add(&qd->sq_cq_same, 1);
                 } else {
                     __sync_fetch_and_add(&qd->sq_cq_diff, 1);
+                }
+                // issue-CPU x complete-CPU 매트릭스 (sparse HASH).
+                u32 mkey = ((tctx->issue_cpu & 0xFFFF) << 16) | (cq_cpu & 0xFFFF);
+                u64 *mc = bpf_map_lookup_elem(&cpu_matrix, &mkey);
+                if (mc) {
+                    __sync_fetch_and_add(mc, 1);
+                } else {
+                    u64 one = 1;
+                    bpf_map_update_elem(&cpu_matrix, &mkey, &one, BPF_NOEXIST);
                 }
             }
         }

@@ -618,7 +618,8 @@ def build_summary(bpf_data, duration, mode):
     u2q_avg_us = round(sys_st.get("u2q_lat_total", 0) / 1000.0 / u2q_cnt, 2) if u2q_cnt else 0.0
 
     out = {"duration_s": round(duration, 2), "mode": mode,
-           "u2q_avg_us": u2q_avg_us, "devices": {}}
+           "u2q_avg_us": u2q_avg_us, "devices": {},
+           "sqcq_matrix": bpf_data.get("sqcq_matrix", [])}
 
     for dev in bpf_data.get("devices", []):
         real = get_real_dev_name(dev["dev_name"])
@@ -626,6 +627,7 @@ def build_summary(bpf_data, duration, mode):
             continue
         sqcq = dev.get("sqcq", {}) or {}
         dev_out = {"sqcq": {"same": sqcq.get("same", 0), "diff": sqcq.get("diff", 0)},
+                   "qd_hist": list(dev.get("qd_hist", [])),
                    "ops": {}}
         for op, st in dev.get("operations", {}).items():
             cnt = st.get("total_count", 0)
@@ -645,6 +647,17 @@ def build_summary(bpf_data, duration, mode):
             q2d_p = compute_percentiles(st.get("q2d_hist") or [0] * LAT_HIST_BUCKETS)
             d2c_p = compute_percentiles(st.get("d2c_hist") or [0] * LAT_HIST_BUCKETS)
             bytes_ = st.get("total_bytes", 0)
+
+            # D2C 세분화: nvme_complete_rq를 받은 I/O(traced_count)에 대한 평균.
+            # nvme(device 왕복) + blkc(block 완료) 비율로 D2C를 쪼갠다.
+            ds = st.get("d2c_split", {}) or {}
+            tc = ds.get("traced_count", 0)
+            if tc > 0:
+                nvme_avg = round(ds.get("nvme_total_ns", 0) / 1000.0 / tc, 2)
+                blkc_avg = round(ds.get("blkc_total_ns", 0) / 1000.0 / tc, 2)
+            else:
+                nvme_avg = blkc_avg = 0.0
+
             dev_out["ops"][op] = {
                 "io_count": cnt,
                 "total_bytes": bytes_,
@@ -658,6 +671,9 @@ def build_summary(bpf_data, duration, mode):
                     "c2a": round(c2a_avg, 2),
                     "a2u": round(a2u_avg, 2),
                 },
+                # D2C 세부 — d2c 구간 내부 비율. traced_frac < 1이면 일부 I/O만 추적됨.
+                "d2c_split_us": {"nvme": nvme_avg, "blkc": blkc_avg},
+                "d2c_traced_frac": round(tc / cnt, 3) if cnt else 0.0,
                 "q2d_pct_us": {str(k): (round(v, 2) if v is not None else None)
                                for k, v in q2d_p.items()},
                 "d2c_pct_us": {str(k): (round(v, 2) if v is not None else None)

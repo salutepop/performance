@@ -295,12 +295,18 @@ def _add_cover(pdf, md_text, title):
 
 def _add_image_page(pdf, png_path):
     img = mpimg.imread(png_path)
-    # 가로 figure가 차트에 더 잘 맞음 (A4 landscape)
-    fig, ax = plt.subplots(figsize=(11, 8.5))
-    ax.imshow(img)
+    # Size the page figure to the image's aspect ratio so imshow doesn't
+    # letterbox/scale it, then rasterize at high dpi so the embedded chart
+    # stays sharp (default pdf savefig dpi=100 was the blur source).
+    h_px, w_px = img.shape[0], img.shape[1]
+    page_w = 11.0
+    page_h = max(2.0, page_w * h_px / w_px)
+    fig, ax = plt.subplots(figsize=(page_w, page_h))
+    ax.imshow(img, interpolation="none")
     ax.axis("off")
-    fig.text(0.5, 0.02, os.path.basename(png_path), ha="center", fontsize=7, color="#666")
-    pdf.savefig(fig, bbox_inches="tight")
+    fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
+    fig.text(0.5, 0.01, os.path.basename(png_path), ha="center", fontsize=7, color="#666")
+    pdf.savefig(fig, bbox_inches="tight", dpi=200)
     plt.close(fig)
 
 

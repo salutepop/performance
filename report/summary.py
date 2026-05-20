@@ -90,8 +90,8 @@ def build_summary(session_dir, sid):
         h, r = _load_csv(dpath)
         if not h:
             continue
-        base = os.path.basename(dpath)
-        dname = re.sub(r"_\d{8}_\d{6}\.csv$", "", base)
+        # device CSV is `{device}_{sid}.csv`; the device token has no '_'.
+        dname = os.path.basename(dpath).split("_", 1)[0]
         da = _device_aggregates(h, r)
         sqcq = da.get("_sqcq_diff_ratio", {})
         ops = {}

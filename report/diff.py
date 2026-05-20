@@ -21,21 +21,19 @@ from .md_report import _device_aggregates, _system_aggregates, _md_table
 
 
 def _resolve_session(arg, session_dir):
-    """arg가 절대 경로 폴더면 그대로, SID 패턴이면 session_dir/topology_{SID}.json 찾기."""
+    """arg가 절대 경로 폴더면 그대로, SID면 session_dir/topology_{SID}.json 찾기."""
     if os.path.isdir(arg):
         # arg/ 안에 topology_*.json 있어야 함. 가장 최근 것 사용.
         topos = sorted(glob.glob(os.path.join(arg, "topology_*.json")), reverse=True)
         if not topos:
             return None, None
-        m = re.search(r"topology_(\d{8}_\d{6})\.json$", topos[0])
-        sid = m.group(1) if m else None
+        base = os.path.basename(topos[0])
+        sid = base[len("topology_"):-len(".json")] \
+            if base.startswith("topology_") and base.endswith(".json") else None
         return arg, sid
-    # SID로 간주
-    m = re.match(r"^(\d{8}_\d{6})$", arg)
-    if m and session_dir:
-        p = os.path.join(session_dir, f"topology_{arg}.json")
-        if os.path.exists(p):
-            return session_dir, arg
+    # arg를 SID로 간주 — topology 파일이 실제로 있으면 채택.
+    if session_dir and os.path.exists(os.path.join(session_dir, f"topology_{arg}.json")):
+        return session_dir, arg
     return None, None
 
 
@@ -49,9 +47,8 @@ def _aggregate_session(sdir, sid):
     for p in dev_csvs:
         h, r = _load_csv(p)
         if h:
-            # device 이름만 키로 사용 (확장자/session_id 제거)
-            base = os.path.basename(p)
-            dname = re.sub(r"_\d{8}_\d{6}\.csv$", "", base)
+            # device CSV is `{device}_{sid}.csv`; the device token has no '_'.
+            dname = os.path.basename(p).split("_", 1)[0]
             dev_aggs[dname] = _device_aggregates(h, r)
     sys_path = os.path.join(sdir, f"system_metrics_{sid}.csv")
     sys_h, sys_r = _load_csv(sys_path)

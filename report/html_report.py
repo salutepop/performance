@@ -21,12 +21,18 @@ from datetime import datetime
 
 
 def _discover_session(session_dir):
-    """가장 최근 topology_*.json 의 session_id 반환. 없으면 None."""
+    """가장 최근 topology_<sid>.json 의 session_id 반환. 없으면 None.
+
+    sid는 더 이상 고정 타임스탬프가 아니므로 (라벨이 붙을 수 있음)
+    `topology_` 와 `.json` 사이를 그대로 slice 한다.
+    """
     paths = sorted(glob.glob(os.path.join(session_dir, "topology_*.json")), reverse=True)
     if not paths:
         return None
-    m = re.search(r"topology_(\d{8}_\d{6})\.json$", paths[0])
-    return m.group(1) if m else None
+    base = os.path.basename(paths[0])
+    if base.startswith("topology_") and base.endswith(".json"):
+        return base[len("topology_"):-len(".json")]
+    return None
 
 
 def _load_topology(session_dir, sid):
@@ -35,6 +41,16 @@ def _load_topology(session_dir, sid):
         return None
     with open(p) as f:
         return json.load(f)
+
+
+def _dev_name(csv_path):
+    """Device CSV is `{device}_{sid}.csv` -> return the bare `{device}`.
+
+    A block device name never contains '_' (nvme0n1, sda, ...) and the sid
+    follows the first '_', so split on it. Robust to labelled session ids,
+    unlike the old `_\\d{8}_\\d{6}.csv$` regex.
+    """
+    return os.path.basename(csv_path).split("_", 1)[0]
 
 
 def _load_csv(path):
@@ -419,7 +435,7 @@ def _render_correlation_chart(sys_header, sys_rows, device_csv_paths):
             bw_i = h.index("bandwidth_mb_s_interval")
         except ValueError:
             continue
-        dname = re.sub(r"_\d{8}_\d{6}\.csv$", "", os.path.basename(dpath))
+        dname = _dev_name(dpath)
         iops_bucket = {}
         bw_bucket = {}
         for row in r:
@@ -675,8 +691,7 @@ def _render_multi_device_overview(device_csv_paths):
             bw_i = h.index("bandwidth_mb_s_interval")
         except ValueError:
             continue
-        dn = os.path.basename(dpath)
-        dn = re.sub(r"_\d{8}_\d{6}\.csv$", "", dn)
+        dn = _dev_name(dpath)
         bucket = per_dev.setdefault(dn, {})
         for row in r:
             ts = row[ts_i] if ts_i < len(row) else ""
@@ -1021,7 +1036,7 @@ def build_report(session_dir, sid):
         for dp in device_csvs:
             dh, dr = _load_csv(dp)
             if dh:
-                dn = re.sub(r"_\d{8}_\d{6}\.csv$", "", os.path.basename(dp))
+                dn = _dev_name(dp)
                 dev_aggs[dn] = _device_aggregates(dh, dr)
         parts.append(_render_summary(dev_aggs, sys_agg))
         # I/O × System 상관 차트 — summary 직후, 어느 섹션보다 위.

@@ -44,14 +44,25 @@ plt.rcParams.update({
     "legend.fontsize": 8,
     "xtick.labelsize": 8,
     "ytick.labelsize": 8,
-    "figure.dpi": 90,
-    "savefig.dpi": 90,
+    "figure.dpi": 200,
+    "savefig.dpi": 200,
     "savefig.bbox": "tight",
 })
 
 
 def _safe_filename(s):
     return re.sub(r"[^a-zA-Z0-9._-]", "_", s)
+
+
+def _dev_name(csv_path):
+    """Device CSV is `{device}_{sid}.csv` -> return the bare `{device}`.
+
+    A block device name never contains '_' (nvme0n1, sda, ...), and the sid
+    follows the first '_', so split on it. This is robust to the session-id
+    format (it may carry a label like `..._monitor_debug`), unlike the old
+    `_\\d{8}_\\d{6}.csv$` regex which assumed a bare timestamp suffix.
+    """
+    return os.path.basename(csv_path).split("_", 1)[0]
 
 
 def _xtick_thin(ax, labels, max_ticks=12):
@@ -73,11 +84,13 @@ def _place_legend(fig, ax, handles=None, labels=None, max_cols=5):
         return
     ncol = min(max_cols, len(labels))
     nrows = (len(labels) + ncol - 1) // ncol
+    # Anchored well below the x-axis label so it never collides with rotated
+    # tick labels + the "time" xlabel stacked beneath the axes.
     ax.legend(handles, labels,
-              loc="upper center", bbox_to_anchor=(0.5, -0.18),
+              loc="upper center", bbox_to_anchor=(0.5, -0.30),
               ncol=ncol, fontsize=8, frameon=False, handlelength=2.2)
-    # 1 row ~ 0.22, +0.05 per extra row
-    fig.subplots_adjust(bottom=0.22 + 0.05 * max(0, nrows - 1))
+    # 1 row ~ 0.30, +0.05 per extra row
+    fig.subplots_adjust(bottom=0.30 + 0.05 * max(0, nrows - 1))
 
 
 def _save_line(path, labels, datasets, title, ylabel, colors=None, styles=None):
@@ -163,7 +176,7 @@ def _build_correlation_data(sys_header, sys_rows, device_csv_paths):
             bw_i = h.index("bandwidth_mb_s_interval")
         except ValueError:
             continue
-        dname = re.sub(r"_\d{8}_\d{6}\.csv$", "", os.path.basename(dpath))
+        dname = _dev_name(dpath)
         iops_bucket = {}
         bw_bucket = {}
         for row in r:
@@ -219,22 +232,20 @@ def _save_correlation_chart(path, corr, title):
         y_iops = [v if v is not None else np.nan for v in iops]
         h1, = ax_iops.plot(range(len(labels)), y_iops, color=color, linewidth=1.4,
                            linestyle="-", marker="o", markersize=3.2,
-                           label=f"IOPS {dn} [Kiops]  (solid · circle)")
+                           label=f"IOPS {dn}")
         bw = corr["bw"].get(dn) or []
         y_bw = [v if v is not None else np.nan for v in bw]
         h2, = ax_bw.plot(range(len(labels)), y_bw, color=color, linewidth=1.2,
                          linestyle=":", marker="s", markersize=3.2,
-                         label=f"BW {dn} [MB/s]  (dotted · square)")
+                         label=f"BW {dn}")
         handles += [h1, h2]; lbls += [h1.get_label(), h2.get_label()]
 
     y_iow = [v if v is not None else np.nan for v in corr["iowait"]]
     y_sys = [v if v is not None else np.nan for v in corr["sys"]]
     h3, = ax_cpu.plot(range(len(labels)), y_iow, color="#ef4444",
-                      linestyle="--", linewidth=1.3,
-                      label="CPU iowait % (sum)  (dashed)")
+                      linestyle="--", linewidth=1.3, label="iowait %")
     h4, = ax_cpu.plot(range(len(labels)), y_sys, color="#f59e0b",
-                      linestyle="-.", linewidth=1.3,
-                      label="CPU sys % (sum)  (dash-dot)")
+                      linestyle="-.", linewidth=1.3, label="sys %")
     handles += [h3, h4]; lbls += [h3.get_label(), h4.get_label()]
 
     ax_iops.set_title(
@@ -272,7 +283,7 @@ def build_report(session_dir, sid):
     for dp in device_csvs:
         h, r = _load_csv(dp)
         if h:
-            dn = re.sub(r"_\d{8}_\d{6}\.csv$", "", os.path.basename(dp))
+            dn = _dev_name(dp)
             dev_aggs[dn] = _device_aggregates(h, r)
 
     # ---- 차트 생성 ----
@@ -299,7 +310,7 @@ def build_report(session_dir, sid):
                     metric_i = h.index("iops_interval" if metric == "iops" else "bandwidth_mb_s_interval")
                 except ValueError:
                     continue
-                dn = re.sub(r"_\d{8}_\d{6}\.csv$", "", os.path.basename(dpath))
+                dn = _dev_name(dpath)
                 bucket = {}
                 for row in r:
                     ts = row[ts_i] if ts_i < len(row) else ""
@@ -320,7 +331,7 @@ def build_report(session_dir, sid):
         h, r = _load_csv(dpath)
         if not h:
             continue
-        dname = re.sub(r"_\d{8}_\d{6}\.csv$", "", os.path.basename(dpath))
+        dname = _dev_name(dpath)
         labels, series = _build_device_series(h, r)
         if not labels or not series:
             continue

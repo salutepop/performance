@@ -22,6 +22,13 @@ static __always_inline u32 lat_bucket(u64 ns) {
 const volatile bool opt_trace_libaio = false;
 const volatile bool opt_trace_iouring = false;
 
+/* dio 완료 콜백(bio->bi_end_io)의 런타임 주소 — io_trace.c가 /proc/kallsyms에서
+ * 읽어 주입한다. block_rq_complete에서 I/O 경로(파일 iomap vs raw blockdev)를
+ * 판별해 kiocb를 올바른 dio 구조체에서 꺼내기 위한 것. 못 찾으면 0(해당 경로 skip). */
+const volatile __u64 addr_iomap_dio_end_io = 0;
+const volatile __u64 addr_blkdev_end_io = 0;
+const volatile __u64 addr_blkdev_end_io_async = 0;
+
 struct bio_start_ctx {
     u64 ts;
     u64 pid_tgid;
@@ -569,20 +576,37 @@ int BPF_PROG(block_rq_complete, struct request *rq, int error, unsigned int nr_b
         }
     }
     
-    /* C2R 시작점: bio->bi_private(iomap_dio)에서 kiocb를 꺼내 완료 시각을 저장.
-     * libaio·io_uring 모두 같은 맵을 쓰고, 완료측 프로그램(aio_complete /
-     * io_uring_complete)이 각자 모드에서만 attach된다. */
+    /* C2R 시작점: bio에서 kiocb를 꺼내 완료 시각(end_ts)을 저장. I/O 경로마다
+     * dio 구조체의 위치가 달라 bio->bi_end_io 주소로 경로를 판별한다 (세 주소는
+     * io_trace.c가 /proc/kallsyms에서 읽어 rodata로 주입). kiocb는 iomap_dio·
+     * blkdev_dio 모두 offset 0이라 dio 포인터만 구하면 추출은 동일하다.
+     *   iomap_dio_bio_end_io    : 파일 direct I/O (ext4 등) -> bi_private = iomap_dio*
+     *   blkdev_bio_end_io       : raw blockdev, 멀티-bio     -> bi_private = blkdev_dio*
+     *   blkdev_bio_end_io_async : raw blockdev, 단일-bio     -> bi_private 미설정,
+     *                             bio가 blkdev_dio에 내장 -> container_of로 역산
+     * 셋 다 아니면(분할 bio, page-cache writeback 등) C2R은 best-effort로 건너뛴다.
+     * libaio·io_uring 공용 — 완료측(aio_complete / io_uring_complete)이 각 모드에서만 attach. */
     if ((opt_trace_libaio || opt_trace_iouring) && type != -1) {
         struct bio *bio = BPF_CORE_READ(rq, bio);
         if (bio) {
-            void *bi_private = BPF_CORE_READ(bio, bi_private);
-            if (bi_private) {
-                struct kiocb *iocb_ptr = BPF_CORE_READ((struct iomap_dio *)bi_private, iocb);
-                if (iocb_ptr) {
-                    u64 key = (u64)iocb_ptr;
-                    struct comp_ctx cctx = { .ts = end_ts, .type = type, .pid_tgid = tctx->pid_tgid };
-                    bpf_map_update_elem(&iocb_comp_start, &key, &cctx, BPF_ANY);
-                }
+            u64 end_io = (u64)BPF_CORE_READ(bio, bi_end_io);
+            struct kiocb *iocb_ptr = NULL;
+            if (end_io != 0 && end_io == addr_iomap_dio_end_io) {
+                void *p = BPF_CORE_READ(bio, bi_private);
+                if (p) iocb_ptr = BPF_CORE_READ((struct iomap_dio *)p, iocb);
+            } else if (end_io != 0 && end_io == addr_blkdev_end_io) {
+                void *p = BPF_CORE_READ(bio, bi_private);
+                if (p) iocb_ptr = BPF_CORE_READ((struct blkdev_dio *)p, iocb);
+            } else if (end_io != 0 && end_io == addr_blkdev_end_io_async) {
+                /* 단일-bio async 경로는 bi_private를 안 채운다. bio가 blkdev_dio에
+                 * 내장돼 있어 container_of로 dio를 역산 (offset은 CO-RE 재배치). */
+                u64 dio = (u64)bio - bpf_core_field_offset(struct blkdev_dio, bio);
+                iocb_ptr = BPF_CORE_READ((struct blkdev_dio *)dio, iocb);
+            }
+            if (iocb_ptr) {
+                u64 key = (u64)iocb_ptr;
+                struct comp_ctx cctx = { .ts = end_ts, .type = type, .pid_tgid = tctx->pid_tgid };
+                bpf_map_update_elem(&iocb_comp_start, &key, &cctx, BPF_ANY);
             }
         }
     }

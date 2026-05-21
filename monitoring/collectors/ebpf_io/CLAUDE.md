@@ -64,7 +64,7 @@ Attach points:
 | `block_rq_issue` | `tp_btf/block_rq_issue` | always |
 | `block_rq_complete` | `tp_btf/block_rq_complete` | always |
 
-`opt_trace_libaio` / `opt_trace_iouring`는 BPF rodata 변수. 사용자 공간에서 load 전에 세팅하고, 해당 모드가 아니면 C에서 `bpf_program__set_autoattach(..., false)`로 그 모드 전용 프로그램들을 disable한다. 두 모드는 상호배타적이다.
+`opt_trace_libaio` / `opt_trace_iouring`는 BPF rodata 변수. 사용자 공간에서 load 전에 세팅하고, 해당 모드가 아니면 C에서 `bpf_program__set_autoattach(..., false)`로 그 모드 전용 프로그램들을 disable한다. 두 모드는 상호배타적이다. C2R 경로 판별용 `addr_iomap_dio_end_io` / `addr_blkdev_end_io` / `addr_blkdev_end_io_async` rodata도 같은 시점에 `/proc/kallsyms`에서 읽은 주소로 세팅한다 (아래 "bio→iocb 매핑" 참고).
 
 Maps (전부 `io_trace.bpf.c`의 `SEC(".maps")`에서 선언):
 
@@ -95,7 +95,7 @@ QD 추적: `block_rq_issue`에서 `current_qd++`, `block_rq_complete`에서 `cur
 
 핵심 흐름:
 1. argv 파싱 (`-m/--mode`, `-i/--interval`).
-2. `io_trace_bpf__open()` → `skel->rodata->opt_trace_libaio` 설정 → 모드에 따라 syscall 프로그램들 autoattach off → `__load()`.
+2. `io_trace_bpf__open()` → `skel->rodata->opt_trace_libaio` + dio 완료 콜백 주소(`addr_*_end_io`, `resolve_ksym()`이 `/proc/kallsyms`에서 추출) 설정 → 모드에 따라 syscall 프로그램들 autoattach off → `__load()`.
 3. `/sys/dev/block/*/size`를 읽어 `dev_capacity_map`을 채운다 (LBA 정규화에 필요).
 4. `__attach()` 후 1초 sleep 루프.
 5. `SIGUSR1` → `clear_stats_map(device_stats)` (Python이 워크로드 시작 직전 리셋용으로 보냄).
@@ -188,11 +188,11 @@ python3 monitoring/collectors/ebpf_io/collector.py -m libaio  -i 0 -f src/fio.sh
 - **size_hist 경계** — 4096 / 32768 / 131072 byte. Python CSV 컬럼명(`size_hist_4k`, `_32k`, `_128k`, `_large`)이 이걸 가정.
 - **PERCPU 합산은 user-space 책임** — BPF 측에서 PERCPU map 값을 그대로 노출하면 CPU별 부분합만 보인다. `io_trace.c::print_json_report`의 `for (i = 0; i < nr_cpus; i++)` 루프가 그 역할.
 - **`runtime`은 BPF가 모름** — fio runtime / Python `effective_duration` / interval-기반 delta는 각자 다른 시간 기준이다. 최종 리포트의 BW(MB/s)는 `total_bytes / effective_duration`을 쓰고, CSV의 `bandwidth_mb_s_interval`은 interval 사이 delta를 쓴다.
-- **bio→iocb 매핑은 fragile** — `block_rq_complete`에서 `bio->bi_private`를 `iomap_dio*`로 캐스팅해 `iocb`를 꺼낸다. iomap 경로(direct I/O over filesystem 등) 외에서는 동작하지 않을 수 있다. raw block device direct I/O는 OK이지만, 다른 I/O 경로 추가 시 확인 필요.
+- **bio→iocb 매핑은 bi_end_io 주소로 경로 판별** — `block_rq_complete`에서 `kiocb`를 꺼낼 때, `bio->bi_end_io` 주소를 rodata로 주입된 세 dio 완료 콜백과 비교해 I/O 경로를 가른다. `iomap_dio_bio_end_io`(파일 direct I/O)·`blkdev_bio_end_io`(raw blockdev 멀티-bio)는 `bi_private`가 dio를 가리키고, `blkdev_bio_end_io_async`(raw blockdev 단일-bio)는 `bi_private`를 안 채워 bio가 내장된 `blkdev_dio`를 `container_of`로 역산한다. `kiocb`는 `iomap_dio`·`blkdev_dio` 모두 offset 0이라 dio 포인터만 구하면 추출은 동일. 세 콜백 중 어느 것도 아니면(분할 bio = `bio_chain_endio`, page-cache writeback 등) C2R은 best-effort로 skip. 새 I/O 경로 추가 시 그 경로의 end_io를 판별 분기에 더해야 한다.
 
 ## 알려진 sharp edges / 작업 후보
 
-- **C2R는 iomap 경로 의존** — C2R 상관관계는 `block_rq_complete`에서 `bio->bi_private`(iomap_dio) → kiocb 추출에 기댄다 (libaio·io_uring 공통). iomap 기반 파일 direct I/O(ext4 등)에선 동작하지만, raw block device direct I/O(`blkdev_dio` 경로)에선 kiocb를 못 꺼낸다 — 그 경우 S2Q/Q2D/D2C는 잡혀도 C2R이 0이 된다. smoke(`.smoke/smoke.img`, ext4 파일)는 iomap 경로라 OK.
+- **C2R는 kallsyms 의존** — C2R 상관관계는 `bio->bi_end_io`를 `/proc/kallsyms`에서 읽은 세 dio 완료 콜백 주소와 비교한다 (libaio·io_uring 공통). 파일 direct I/O(ext4 등, iomap 경로)와 raw block device direct I/O(`blkdev_dio` 경로) **모두** C2R/R2U가 잡힌다. 단 `CONFIG_KALLSYMS`가 꺼져 있거나 심볼 이름이 다른 커널에선 해당 경로의 C2R만 누락된다 (`io_trace`가 stderr에 warn 출력, S2Q/Q2D/D2C는 영향 없음). 분할 bio(`bio_chain_endio`)는 best-effort skip. smoke(`.smoke/smoke.img`, ext4 파일)는 iomap 경로를 커버하고, raw 경로는 `io_trace -m libaio -c "fio --filename=/dev/<dev> ..."`로 검증 가능.
 - **iouring R2U 대응 없음** — io_uring은 CQE를 CQ ring에 게시하고 사용자는 syscall 없이 ring을 읽는다. libaio의 R2U(엔진 완료→사용자 수확)에 해당하는 측정 지점이 없어 의도적으로 4페이즈(S2Q/Q2D/D2C/C2R)에서 멈춘다.
 - **SQPOLL** — SQPOLL 모드면 `io_uring_submit_req`가 poller kthread에서 실행되지만 `block_bio_queue`도 같은 kthread라 S2Q의 pid_tgid 키 상관은 유지된다.
 - **PERCPU_HASH max_entries=256** — 디바이스 수 상한. 일반 시스템에선 충분하지만 멀티-경로/멀티-디스크 환경에서 한계 가능.

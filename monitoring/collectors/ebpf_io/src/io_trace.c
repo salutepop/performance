@@ -25,6 +25,27 @@ void clear_stats_map(int fd) {
     }
 }
 
+/*
+ * /proc/kallsyms에서 커널 심볼의 런타임 주소를 읽는다. static 함수도 포함된다
+ * (kallsyms는 전역 'T'와 로컬 't'를 모두 노출). io_trace는 root로 실행되므로
+ * kptr_restrict와 무관하게 KASLR이 적용된 실제 주소가 보인다. 못 찾으면 0.
+ */
+static unsigned long long resolve_ksym(const char *name) {
+    FILE *f = fopen("/proc/kallsyms", "r");
+    if (!f) return 0;
+    char line[512], sym[256], type;
+    unsigned long long addr, found = 0;
+    while (fgets(line, sizeof(line), f)) {
+        if (sscanf(line, "%llx %c %255s", &addr, &type, sym) == 3
+            && strcmp(sym, name) == 0) {
+            found = addr;
+            break;
+        }
+    }
+    fclose(f);
+    return found;
+}
+
 void print_json_report(struct bpf_map *device_stats_map, struct bpf_map *engine_stats_map,
                        struct bpf_map *device_qd_map, struct bpf_map *cpu_matrix_map,
                        struct io_stats *stats_array, int nr_cpus) {
@@ -258,6 +279,21 @@ int main(int argc, char **argv) {
 
     skel->rodata->opt_trace_libaio = mode_libaio;
     skel->rodata->opt_trace_iouring = mode_iouring;
+
+    /* C2R 경로 판별용 dio 완료 콜백 주소 — block_rq_complete의 bio->bi_end_io와
+     * 비교해 파일(iomap) / raw blockdev 경로를 가른다. libaio·io_uring 모드에서만
+     * 의미가 있다. 심볼을 못 찾으면 해당 경로의 C2R만 누락되고 나머지는 정상. */
+    if (mode_libaio || mode_iouring) {
+        skel->rodata->addr_iomap_dio_end_io    = resolve_ksym("iomap_dio_bio_end_io");
+        skel->rodata->addr_blkdev_end_io       = resolve_ksym("blkdev_bio_end_io");
+        skel->rodata->addr_blkdev_end_io_async = resolve_ksym("blkdev_bio_end_io_async");
+        if (!skel->rodata->addr_iomap_dio_end_io)
+            fprintf(stderr, "[io_trace] warn: iomap_dio_bio_end_io not in kallsyms"
+                            " — file(ext4) C2R unavailable\n");
+        if (!skel->rodata->addr_blkdev_end_io && !skel->rodata->addr_blkdev_end_io_async)
+            fprintf(stderr, "[io_trace] warn: blkdev_bio_end_io* not in kallsyms"
+                            " — raw block device C2R unavailable\n");
+    }
 
     if (!mode_libaio) {
         bpf_program__set_autoattach(skel->progs.trace_submit_enter, false);

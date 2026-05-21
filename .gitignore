@@ -12,6 +12,9 @@ __pycache__/
 *.bin
 *testfile*
 monitoring/collectors/ebpf_io/src/io_trace
+# eBPF 빌드 산출물 — 커널 BTF·아키텍처 종속이라 추적하지 않고 빌드 때마다 생성
+monitoring/collectors/ebpf_io/src/vmlinux.h
+monitoring/collectors/ebpf_io/src/io_trace.skel.h
 
 # Distribution / packaging
 .Python

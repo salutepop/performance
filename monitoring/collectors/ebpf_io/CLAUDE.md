@@ -163,9 +163,14 @@ CSV 컬럼: timestamp, operation, iops_interval, bandwidth_mb_s_interval, q2d_av
 ## Build / Run
 
 ```bash
-# 빌드 (프로젝트 어디서든)
+# 빌드 — ARM/x86 공용 헬퍼 (의존성 점검 → vmlinux.h 재생성 → 클린 빌드). 권장.
+./scripts/build_ebpf.sh
+./scripts/build_ebpf.sh --deps                    # 빌드 의존성을 apt로 설치(root) 후 빌드
+
+# 직접 make (개발 edit 루프용)
 make -C monitoring/collectors/ebpf_io/src         # vmlinux.h → BPF obj → skeleton → io_trace
 make -C monitoring/collectors/ebpf_io/src clean
+make -C monitoring/collectors/ebpf_io/src distclean  # clean + vmlinux.h (아키텍처 전환 후)
 
 # 단독 실행 (raw JSON을 stdout에 흘림). 엔진/transport는 자동탐지 — mode 인자 없음.
 sudo monitoring/collectors/ebpf_io/src/io_trace -i 1
@@ -183,7 +188,7 @@ python3 monitoring/collectors/ebpf_io/collector.py -i 0 -f src/fio.sh
 - `-i N` — N초마다 CSV 한 줄. `-i 0`이면 timeseries 비활성, 최종 summary만.
 - `-c` vs `-f` — mutually exclusive. 둘 다 없으면 무한 대기(수동 조작용).
 
-빌드 의존성: `clang`, `bpftool`, `libbpf-dev`, `libelf-dev`, `zlib1g-dev`. 커널은 BTF가 켜져 있어야 하며 (`/sys/kernel/btf/vmlinux` 존재), tp_btf 사용을 위해 5.x 이상 권장.
+빌드 의존성: `clang`, `make`, `gcc`, `bpftool`, `libbpf-dev`, `libelf-dev`, `zlib1g-dev`. 커널은 BTF가 켜져 있어야 하며 (`/sys/kernel/btf/vmlinux` 존재), tp_btf 사용을 위해 5.x 이상 권장.
 
 ## Layer 간 컨벤션
 
@@ -206,8 +211,8 @@ python3 monitoring/collectors/ebpf_io/collector.py -i 0 -f src/fio.sh
 - **루프 unroll `#pragma unroll for (i=0; i<256; i++)`** — `io_getevents` 결과 256개까지만 처리. nr > 256인 거대한 batch는 일부 누락.
 - ~~**`opt_interval`이 1초 미만이 안 됨**~~ — `io_trace.c` 메인 루프가 이제 `nanosleep` + float `opt_interval` 사용. `-i 0.5` 등 sub-second 가능 (최소 50ms로 clamp). `collector.py`의 `-i` 도 float. **단** SystemMonitor의 nvidia-smi dmon은 1초 미만 인터벌 지원 안 함 → `int(max(1, interval))`로 clamp되어 GPU 메트릭만 1초 주기 유지.
 - **CSV는 append 모드** — 같은 디렉터리에서 재실행하면 `SESSION_ID`가 달라져 새 파일이 생기지만, 디바이스 이름이 충돌하면 같은 파일에 이어붙는다. 의도된 동작인지 검토.
-- **`sample.txt`, `io_trace.bpf.o`, `io_trace.skel.h`, `io_trace`(바이너리)** — 빌드/실험 산출물. `.gitignore`에 `monitoring/collectors/ebpf_io/src/io_trace`, `*.o`는 들어 있지만 skel.h, sample.txt는 추적 중. 새 워크플로 추가 시 정리 여부 결정.
-- **`vmlinux.h`가 4MB 가까이 됨** — 시스템 커널 BTF 덤프. 다른 커널/머신에서 빌드하려면 `make vmlinux.h`로 재생성 필요.
+- **빌드 산출물은 git 미추적** — `io_trace`(바이너리)·`io_trace.bpf.o`·`io_trace.skel.h`·`vmlinux.h`는 전부 `.gitignore`에 있고 빌드 때마다 생성된다. `sample.txt`만 아직 추적 중 — 새 워크플로 추가 시 정리 여부 결정.
+- **`vmlinux.h`/`io_trace.skel.h`는 커널 BTF·아키텍처 종속** — 시스템 커널 BTF 덤프라 머신마다 다르다. ARM↔x86 등 다른 커널/머신에서 빌드할 땐 재생성이 필수 — `scripts/build_ebpf.sh`(매번 새로 뽑음) 또는 `make distclean && make`로 해결.
 - **fio.sh의 워크로드** — 현재 Seq Write/Read 1M만 활성, Random 4K는 주석 처리. 테스트 시나리오 바꿀 일 잦으니 인자화 고려.
 
 ## 작업 시 출발점 매핑

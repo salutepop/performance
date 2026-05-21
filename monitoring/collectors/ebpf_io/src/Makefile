@@ -3,7 +3,7 @@ BPF_OBJ = $(APP).bpf.o
 SKEL_H = $(APP).skel.h
 ARCH := $(shell uname -m | sed 's/x86_64/x86/' | sed 's/aarch64/arm64/')
 
-.PHONY: all clean run smoke
+.PHONY: all clean distclean run smoke
 
 all: $(APP)
 
@@ -35,3 +35,7 @@ smoke: $(APP)
 # 정리
 clean:
 	rm -f $(APP) $(BPF_OBJ) $(SKEL_H)
+
+# clean + 생성된 vmlinux.h 까지 — 아키텍처/커널 전환 후 깨끗한 재빌드용
+distclean: clean
+	rm -f vmlinux.h

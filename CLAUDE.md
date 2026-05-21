@@ -142,16 +142,22 @@ class MyTest(Scenario):
 > eBPF 서브시스템은 별도 문서가 있다: [`monitoring/collectors/ebpf_io/CLAUDE.md`](./monitoring/collectors/ebpf_io/CLAUDE.md). 이 폴더 코드를 만질 때는 그 문서를 먼저 읽을 것.
 
 ```bash
-# 빌드 (clang + bpftool + libbpf 필요)
+# 빌드 — ARM/x86 공용 헬퍼 (의존성 점검 + 클린 빌드). 권장 진입점.
+./scripts/build_ebpf.sh
+./scripts/build_ebpf.sh --deps                     # 빌드 의존성을 apt로 설치(root) 후 빌드
+./scripts/build_ebpf.sh --check                    # 의존성/환경만 점검
+
+# 직접 make (개발 edit 루프용)
 make -C monitoring/collectors/ebpf_io/src
 make -C monitoring/collectors/ebpf_io/src clean
+make -C monitoring/collectors/ebpf_io/src distclean # clean + vmlinux.h (아키텍처 전환 후)
 make -C monitoring/collectors/ebpf_io/src smoke    # = pmon.py debug
 
 # 단독 실행 (엔진/transport 자동탐지 — mode 인자 없음)
 python3 monitoring/collectors/ebpf_io/collector.py -i 1 -c "fio ..."
 ```
 
-빌드 의존성: `clang`, `bpftool`, `libbpf-dev`, `libelf-dev`, `zlib1g-dev`. `vmlinux.h`는 `/sys/kernel/btf/vmlinux`에서 자동 생성된다.
+빌드 의존성: `clang`, `make`, `gcc`, `bpftool`, `libbpf-dev`, `libelf-dev`, `zlib1g-dev`. `vmlinux.h`와 `io_trace.skel.h`는 git에 추적되지 않고 빌드 시 현재 커널 BTF에서 생성된다 — `scripts/build_ebpf.sh`가 매번 새로 뽑으므로 ARM↔x86 이전 후에도 그냥 재빌드하면 된다.
 
 ### 리포트 생성 (`report/`)
 

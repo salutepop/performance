@@ -28,11 +28,14 @@ I/O 한 건의 전체 시간을 경계 지점으로 잘라 페이즈별로 측�
 ```
 
 - 경계 **CQ** = `nvme_complete_rq` (NVMe Completion Queue 엔트리 처리 시점). **D2C = D2CQ + CQ2C** — nvme_complete_rq tracepoint가 있을 때만 분리되고, 없으면 D2C 단일 구간으로 fallback.
-- **Generic mode**: Q2D, D2C만 측정 (블록 계층 tracepoints만 attach). 어떤 ioengine이든 잡힌다.
-- **Libaio mode**: 위 + S2Q, C2R, R2U. `io_submit`/`io_getevents` syscall tracepoint와 `aio_complete` kprobe를 추가로 attach. submit 경계 = `sys_enter_io_submit`.
-- **Iouring mode**: 위 + S2Q, C2R (R2U 없음). `io_uring_submit_req`/`io_uring_complete` tracepoint를 추가로 attach. submit 경계 = `io_uring_submit_req`. io_uring은 완료를 CQ ring으로 전달(syscall 없음)해 R2U에 해당하는 측정 지점이 없다 — S2Q/Q2D/D2C/C2R 4페이즈로 끝난다.
 
-S2Q는 `pid_submit_start` 맵을, C2R은 `iocb_comp_start` 맵을 libaio·io_uring이 공유한다 (모드 상호배타). io_uring의 C2R 상관: block 계층에서 꺼낸 kiocb 포인터와 `io_uring_complete`의 `req` 포인터가 동일 주소다 — `io_kiocb`의 `cmd` union이 offset 0이라 `req == &io_rw->kiocb`.
+**모드 없음 — 엔진 자동탐지.** 블록 계층(Q2D/D2C) + libaio(`io_submit`/`io_getevents` syscall tracepoint, `aio_complete` kprobe) + io_uring(`io_uring_submit_req`/`io_uring_complete` tracepoint)을 **항상 동시에 attach**한다. I/O별 엔진은 어느 submit/완료 경로가 fire했는지로 판별된다 — 사전 지정(`-m`) 없음.
+
+- **libaio**: S2Q·C2R·R2U 측정. submit 경계 = `sys_enter_io_submit`.
+- **io_uring**: S2Q·C2R 측정. R2U 없음 — 완료를 CQ ring으로 전달(syscall 없음)해 측정 지점 부재. submit 경계 = `io_uring_submit_req`.
+- 어느 엔진도 안 쓰는 I/O(버퍼드 등 다른 경로)는 Q2D/D2C만 잡힌다.
+
+S2Q는 `pid_submit_start`(value `submit_ctx`에 제출 엔진 기록), C2R은 `iocb_comp_start` 맵을 libaio·io_uring이 공유한다. 두 엔진 tracepoint가 항상 attach되므로 엔진 페이즈는 `engine_stats_map`(ARRAY[ENG_MAX])에 **엔진별로 분리** 누적된다. io_uring의 C2R 상관: block 계층에서 꺼낸 kiocb 포인터와 `io_uring_complete`의 `req` 포인터가 동일 주소다 — `io_kiocb`의 `cmd` union이 offset 0이라 `req == &io_rw->kiocb`.
 
 ## 3-layer architecture
 
@@ -51,20 +54,20 @@ collector.py     (Python orchestrator)   ── io_trace를 Popen, 워크로드 
 
 ### Layer 1: `io_trace.bpf.c` — BPF programs
 
-Attach points:
-| Program | Hook | Mode |
+Attach points — **전부 항상 attach**된다 (mode/autoattach 토글 없음):
+| Program | Hook | 용도 |
 | --- | --- | --- |
-| `trace_submit_enter/exit` | `tp/syscalls/sys_enter_io_submit`, `sys_exit_io_submit` | libaio |
-| `trace_getevents_enter/exit` | `sys_enter_io_getevents`, `sys_exit_io_getevents` | libaio |
-| `trace_pgetevents_enter/exit` | `sys_enter_io_pgetevents`, `sys_exit_io_pgetevents` | libaio |
-| `trace_aio_complete` | `kprobe/aio_complete` | libaio |
-| `io_uring_submit_req` | `tp_btf/io_uring_submit_req` | iouring |
-| `io_uring_complete` | `tp_btf/io_uring_complete` | iouring |
-| `block_bio_queue` | `tp_btf/block_bio_queue` | always |
-| `block_rq_issue` | `tp_btf/block_rq_issue` | always |
-| `block_rq_complete` | `tp_btf/block_rq_complete` | always |
+| `trace_submit_enter/exit` | `tp/syscalls/sys_enter_io_submit`, `sys_exit_io_submit` | libaio S2Q |
+| `trace_getevents_enter/exit` | `sys_enter_io_getevents`, `sys_exit_io_getevents` | libaio R2U |
+| `trace_pgetevents_enter/exit` | `sys_enter_io_pgetevents`, `sys_exit_io_pgetevents` | libaio R2U |
+| `trace_aio_complete` | `kprobe/aio_complete` | libaio C2R·R2U |
+| `io_uring_submit_req` | `tp_btf/io_uring_submit_req` | io_uring S2Q |
+| `io_uring_complete` | `tp_btf/io_uring_complete` | io_uring C2R |
+| `block_bio_queue` | `tp_btf/block_bio_queue` | S2Q 끝·Q2D 시작 |
+| `block_rq_issue` | `tp_btf/block_rq_issue` | Q2D 끝·D2C 시작 |
+| `block_rq_complete` | `tp_btf/block_rq_complete` | D2C 끝·C2R 시작 |
 
-`opt_trace_libaio` / `opt_trace_iouring`는 BPF rodata 변수. 사용자 공간에서 load 전에 세팅하고, 해당 모드가 아니면 C에서 `bpf_program__set_autoattach(..., false)`로 그 모드 전용 프로그램들을 disable한다. 두 모드는 상호배타적이다. C2R 경로 판별용 `addr_iomap_dio_end_io` / `addr_blkdev_end_io` / `addr_blkdev_end_io_async` rodata도 같은 시점에 `/proc/kallsyms`에서 읽은 주소로 세팅한다 (아래 "bio→iocb 매핑" 참고).
+엔진 mode rodata(`opt_trace_*`)·autoattach 토글은 없다 — 두 엔진 프로그램이 항상 붙고, 각 I/O의 엔진은 어느 경로가 fire했는지로 판별된다. C2R 경로 판별용 `addr_iomap_dio_end_io` / `addr_blkdev_end_io` / `addr_blkdev_end_io_async` rodata는 load 전에 `/proc/kallsyms`에서 읽은 주소로 세팅한다 (아래 "bio→iocb 매핑" 참고).
 
 Maps (전부 `io_trace.bpf.c`의 `SEC(".maps")`에서 선언):
 
@@ -73,11 +76,11 @@ Maps (전부 `io_trace.bpf.c`의 `SEC(".maps")`에서 선언):
 | `bio_start` | HASH | `bio*` | `bio_start_ctx` | bio enqueue 시각 (Q2D 시작점) |
 | `req_start` | HASH | `request*` | `trace_ctx` | rq issue 시각 + 직전 Q2D 지연 |
 | `device_stats` | **PERCPU_HASH** | `dev_id` (maj<<20\|min) | `io_stats` | 디바이스 단위 누적 통계 |
-| `pid_submit_start` | HASH | `pid_tgid` | `u64 ts` | submit 시각 (S2Q 시작점, libaio·io_uring 공유) |
+| `pid_submit_start` | HASH | `pid_tgid` | `submit_ctx` (ts+engine) | submit 시각·엔진 (S2Q 시작점, libaio·io_uring 공유) |
 | `active_getevents_events` | HASH | `pid_tgid` | `events ptr` | io_getevents의 events 인자 |
 | `iocb_complete_ts` | HASH | `{pid_tgid,iocb}` | `u64 ts` | aio_complete 시각 (R2U 시작점) |
 | `iocb_comp_start` | HASH | `iocb*` | `comp_ctx` | rq_complete 시각 (C2R 시작점, libaio·io_uring 공유) |
-| `engine_stats_map` | ARRAY[1] | 0 | `engine_stats` | 엔진 페이즈(S2Q/C2R/R2U) 글로벌 누적 |
+| `engine_stats_map` | ARRAY[ENG_MAX] | `eng_type` (0=libaio,1=iouring) | `engine_stats` | 엔진 페이즈(S2Q/C2R/R2U) 엔진별 누적 |
 | `scratch_stats` | PERCPU_ARRAY[1] | 0 | `io_stats` | 0-초기화용 임시 버퍼 |
 | `dev_capacity_map` | HASH | `dev_id` | `u64 sectors` | LBA bucket 계산용 (디바이스 용량) |
 
@@ -94,8 +97,8 @@ QD 추적: `block_rq_issue`에서 `current_qd++`, `block_rq_complete`에서 `cur
 ### Layer 2: `io_trace.c` — userspace loader
 
 핵심 흐름:
-1. argv 파싱 (`-m/--mode`, `-i/--interval`).
-2. `io_trace_bpf__open()` → `skel->rodata->opt_trace_libaio` + dio 완료 콜백 주소(`addr_*_end_io`, `resolve_ksym()`이 `/proc/kallsyms`에서 추출) 설정 → 모드에 따라 syscall 프로그램들 autoattach off → `__load()`.
+1. argv 파싱 (`-i/--interval`만. `-m`은 받아도 무시 — 엔진 자동탐지라 mode 없음).
+2. `io_trace_bpf__open()` → dio 완료 콜백 주소(`addr_*_end_io`, `resolve_ksym()`이 `/proc/kallsyms`에서 추출)를 rodata에 설정 → `__load()`. autoattach 토글 없음 — 모든 프로그램이 붙는다.
 3. `/sys/dev/block/*/size`를 읽어 `dev_capacity_map`을 채운다 (LBA 정규화에 필요).
 4. `__attach()` 후 1초 sleep 루프.
 5. `SIGUSR1` → `clear_stats_map(device_stats)` (Python이 워크로드 시작 직전 리셋용으로 보냄).
@@ -126,14 +129,15 @@ JSON 스키마 (이게 layer 사이 contract):
     }
   ],
   "engine_overhead": {
-    "s2q_count": ..., "s2q_lat_total": ...,
-    "c2r_{read,write,flush}_count|total": ...,
-    "r2u_{read,write,flush}_count|total": ...
+    "libaio":  { "s2q_count|lat_total": ...,
+                 "c2r_{read,write,flush}_count|total": ...,
+                 "r2u_{read,write,flush}_count|total": ... },
+    "iouring": { "s2q_count|lat_total": ..., "c2r_*": ..., "r2u_*": 0 }
   }
 }
 ```
 
-`engine_overhead`는 libaio·io_uring 공용 단일 블록 — 모드 상호배타라 하나의 `engine_stats` 구조체/맵을 둘이 공유한다. 비활성 페이즈는 0 (io_uring은 `r2u_*` = 0, generic은 전부 0).
+`engine_overhead`는 **엔진별 블록**(`libaio`/`iouring`)으로 나뉜다 — 두 엔진 tracepoint가 항상 attach되므로 `engine_stats_map` ARRAY[ENG_MAX]를 엔진 인덱스로 갈라 누적한 결과다. 활동이 없는 엔진/페이즈는 0 (io_uring은 `r2u_*` 항상 0). collector는 엔진 무관 소비자(CSV·`phase_avg_us`·full-stack 표)를 위해 `_agg_engines()`로 두 블록을 합산한 flat 뷰를 만든다.
 
 ### Cross-cutting: System metrics
 
@@ -141,8 +145,8 @@ JSON 스키마 (이게 layer 사이 contract):
 
 ### Layer 3: `collector.py` — Python orchestrator
 
-`run_benchmark(mode, cmd|script_file, interval)`:
-1. `sudo ./io_trace -i {interval} [-m {mode}]`을 `Popen`(stdout=PIPE).
+`run_benchmark(cmd|script_file, interval)`:
+1. `sudo ./io_trace -i {interval}`을 `Popen`(stdout=PIPE). 엔진 mode 인자 없음.
 2. `time.sleep(1.5)`로 attach 안정화 대기 → `drop_caches` → `SIGUSR1`로 통계 리셋 (워크로드 시작 직전 상태에서 0부터).
 3. 워크로드는 별도 thread(`run_workload_thread`)에서 `subprocess.run(cmd_or_bash_script_file)`. 워크로드 종료 시 메인 PID에 `SIGINT`를 쏴서 깨끗하게 정리.
 4. 메인 thread는 trace_proc.stdout을 라인 단위로 읽으며 `---JSON_START---`/`---JSON_END---` 사이를 버퍼링.
@@ -160,19 +164,19 @@ CSV 컬럼: timestamp, operation, iops_interval, bandwidth_mb_s_interval, q2d_av
 make -C monitoring/collectors/ebpf_io/src         # vmlinux.h → BPF obj → skeleton → io_trace
 make -C monitoring/collectors/ebpf_io/src clean
 
-# 단독 실행 (raw JSON을 stdout에 흘림)
-sudo monitoring/collectors/ebpf_io/src/io_trace -m libaio -i 1
+# 단독 실행 (raw JSON을 stdout에 흘림). 엔진/transport는 자동탐지 — mode 인자 없음.
+sudo monitoring/collectors/ebpf_io/src/io_trace -i 1
 
 # 워크로드와 함께 실행 (Session 밖 standalone 경로)
-python3 monitoring/collectors/ebpf_io/collector.py -m generic -i 1 -c "fio --name=t --filename=/dev/nvme0n1 ..."
-python3 monitoring/collectors/ebpf_io/collector.py -m libaio  -i 0 -f src/fio.sh
+python3 monitoring/collectors/ebpf_io/collector.py -i 1 -c "fio --name=t --filename=/dev/nvme0n1 ..."
+python3 monitoring/collectors/ebpf_io/collector.py -i 0 -f src/fio.sh
 
 # 보통은 pmon.py가 EbpfIoCollector를 통해 구동 (권장)
 ./pmon.py monitor --fio "fio ..." --ebpf on
 ```
 
 옵션:
-- `-m {generic|libaio|iouring}` — 모드별 추가 페이즈는 위 "Full-Stack" 절 참고. iouring은 fio `--ioengine=io_uring` 워크로드라야 S2Q/C2R이 잡힌다.
+- 엔진 mode 인자 없음 — libaio·io_uring을 항상 추적, I/O별 자동 판별. (`-m`은 받아도 무시 — 하위호환)
 - `-i N` — N초마다 CSV 한 줄. `-i 0`이면 timeseries 비활성, 최종 summary만.
 - `-c` vs `-f` — mutually exclusive. 둘 다 없으면 무한 대기(수동 조작용).
 
@@ -192,7 +196,7 @@ python3 monitoring/collectors/ebpf_io/collector.py -m libaio  -i 0 -f src/fio.sh
 
 ## 알려진 sharp edges / 작업 후보
 
-- **C2R는 kallsyms 의존** — C2R 상관관계는 `bio->bi_end_io`를 `/proc/kallsyms`에서 읽은 세 dio 완료 콜백 주소와 비교한다 (libaio·io_uring 공통). 파일 direct I/O(ext4 등, iomap 경로)와 raw block device direct I/O(`blkdev_dio` 경로) **모두** C2R/R2U가 잡힌다. 단 `CONFIG_KALLSYMS`가 꺼져 있거나 심볼 이름이 다른 커널에선 해당 경로의 C2R만 누락된다 (`io_trace`가 stderr에 warn 출력, S2Q/Q2D/D2C는 영향 없음). 분할 bio(`bio_chain_endio`)는 best-effort skip. smoke(`.smoke/smoke.img`, ext4 파일)는 iomap 경로를 커버하고, raw 경로는 `io_trace -m libaio -c "fio --filename=/dev/<dev> ..."`로 검증 가능.
+- **C2R는 kallsyms 의존** — C2R 상관관계는 `bio->bi_end_io`를 `/proc/kallsyms`에서 읽은 세 dio 완료 콜백 주소와 비교한다 (libaio·io_uring 공통). 파일 direct I/O(ext4 등, iomap 경로)와 raw block device direct I/O(`blkdev_dio` 경로) **모두** C2R/R2U가 잡힌다. 단 `CONFIG_KALLSYMS`가 꺼져 있거나 심볼 이름이 다른 커널에선 해당 경로의 C2R만 누락된다 (`io_trace`가 stderr에 warn 출력, S2Q/Q2D/D2C는 영향 없음). 분할 bio(`bio_chain_endio`)는 best-effort skip. smoke(`.smoke/smoke.img`, ext4 파일)는 iomap 경로를 커버하고, raw 경로는 `collector.py -c "fio --filename=/dev/<dev> ..."`로 검증 가능.
 - **iouring R2U 대응 없음** — io_uring은 CQE를 CQ ring에 게시하고 사용자는 syscall 없이 ring을 읽는다. libaio의 R2U(엔진 완료→사용자 수확)에 해당하는 측정 지점이 없어 의도적으로 4페이즈(S2Q/Q2D/D2C/C2R)에서 멈춘다.
 - **SQPOLL** — SQPOLL 모드면 `io_uring_submit_req`가 poller kthread에서 실행되지만 `block_bio_queue`도 같은 kthread라 S2Q의 pid_tgid 키 상관은 유지된다.
 - **PERCPU_HASH max_entries=256** — 디바이스 수 상한. 일반 시스템에선 충분하지만 멀티-경로/멀티-디스크 환경에서 한계 가능.
@@ -208,7 +212,7 @@ python3 monitoring/collectors/ebpf_io/collector.py -m libaio  -i 0 -f src/fio.sh
 | 하고 싶은 일 | 손대야 할 곳 |
 | --- | --- |
 | 새 페이즈/지연 추가 (예: scheduler 큐 진입) | `io_trace.h`의 struct → `io_trace.bpf.c`에 hook 추가 → maps에 누적 → `print_json_report`에 필드 추가 → Python `phase_stats`/CSV 컬럼 추가 |
-| 새 ioengine 지원 (iouring 등) | `io_trace.bpf.c`에 해당 syscall tracepoint 추가 → `opt_trace_*` rodata 플래그 패턴 따라가기 → `io_trace.c`의 mode 분기에 autoattach 토글 추가 → `collector.py`의 `choices`와 모드 분기 |
+| 새 ioengine 지원 | `io_trace.h`의 `eng_type`에 엔진 추가 → `io_trace.bpf.c`에 submit/완료 tracepoint 추가(상시 attach, `submit_ctx.engine` 기록) → `engine_stats_map` 인덱스로 누적 → `io_trace.c::print_engine_json`·`collector.py::_agg_engines`/`_engines_summary`에 엔진 키 추가 |
 | 출력 포맷 추가 (예: Prometheus, parquet) | `collector.py::parse_and_store_metrics`/`print_final_summary`만 건드리면 됨 — JSON 컨트랙트는 유지 |
 | 새 메트릭 (예: p99 latency) | BPF 단에서 히스토그램 추가 (현재는 mean/min/max만 있음). `lat_stats`에 bucket array 추가하는 게 표준 패턴 |
 | LBA 해상도 변경 | `io_trace.h::LBA_BUCKETS` → `collector.py`의 `lba_{i}` 컬럼 생성 루프 및 `+ [f"lba_{i}" for i in range(64)]` 동기화 |

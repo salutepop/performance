@@ -28,7 +28,6 @@ RESULTS_DIR = os.path.join(ROOT, "results")
 class Scenario:
     """sub-class override points: name, fio_cmd, optional analyze."""
     name: str = "scenario"
-    mode: str = "libaio"       # generic / libaio / iouring
     interval: float = 1.0
     report_formats: str = "all"  # auto report formats (all/md/json/png/pdf/none)
 
@@ -49,7 +48,6 @@ class Scenario:
                "--fio", self.fio_cmd(),
                "--label", self.name,
                "--ebpf", "on",
-               "--ebpf-mode", self.mode,
                "--ebpf-interval", str(self.interval),
                "--report", self.report_formats]
         print(f"[scenario {self.name}] launching pmon monitor...")

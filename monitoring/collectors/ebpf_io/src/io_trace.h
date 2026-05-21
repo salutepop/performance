@@ -68,13 +68,24 @@ struct dev_qd {
 };
 
 /*
- * 엔진 페이즈(S2Q/C2R/R2U) 글로벌 누적. block 페이즈(Q2D/D2C) 밖의 구간으로,
- * libaio·io_uring 공통 — mode가 상호배타라 한 구조체/맵을 둘이 공유한다.
+ * 엔진 종류. 트레이서는 libaio·io_uring tracepoint를 항상 동시에 attach하고,
+ * 어느 경로가 fire했는지로 I/O별 엔진을 판별한다(사전 mode 지정 없음).
+ * engine_stats는 이 인덱스로 엔진마다 분리 누적된다.
+ */
+enum eng_type {
+    ENG_LIBAIO = 0,
+    ENG_IOURING,
+    ENG_MAX
+};
+
+/*
+ * 엔진 페이즈(S2Q/C2R/R2U) 누적. block 페이즈(Q2D/D2C) 밖의 구간이다.
  *   S2Q : submit            -> block_bio_queue            (제출 경로)
  *   C2R : block_rq_complete -> aio_complete / io_uring CQE (엔진 완료 핸드오프)
  *   R2U : aio_complete      -> io_getevents 반환           (user 수확)
  * io_uring은 완료를 CQ ring으로 전달(syscall 없음)해 R2U 대응이 없다 → r2u_* = 0.
  * S2Q는 op 구분 없는 글로벌, C2R/R2U는 block 계층에서 분류한 op별.
+ * engine_stats_map은 ARRAY[ENG_MAX] — 엔진별로 한 구조체씩.
  */
 struct engine_stats {
     unsigned long long s2q_count;

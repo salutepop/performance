@@ -46,6 +46,26 @@ static unsigned long long resolve_ksym(const char *name) {
     return found;
 }
 
+/* engine_overhead JSON 한 엔진 블록 출력. last면 trailing comma 생략. */
+static void print_engine_json(const char *name, const struct engine_stats *e, int last) {
+    printf("    \"%s\": {\n", name);
+    printf("      \"s2q_count\": %llu,\n", e->s2q_count);
+    printf("      \"s2q_lat_total\": %llu,\n", e->s2q_lat_total);
+    printf("      \"c2r_read_count\": %llu,\n", e->c2r_read_count);
+    printf("      \"c2r_read_total\": %llu,\n", e->c2r_read_total);
+    printf("      \"c2r_write_count\": %llu,\n", e->c2r_write_count);
+    printf("      \"c2r_write_total\": %llu,\n", e->c2r_write_total);
+    printf("      \"c2r_flush_count\": %llu,\n", e->c2r_flush_count);
+    printf("      \"c2r_flush_total\": %llu,\n", e->c2r_flush_total);
+    printf("      \"r2u_read_count\": %llu,\n", e->r2u_read_count);
+    printf("      \"r2u_read_total\": %llu,\n", e->r2u_read_total);
+    printf("      \"r2u_write_count\": %llu,\n", e->r2u_write_count);
+    printf("      \"r2u_write_total\": %llu,\n", e->r2u_write_total);
+    printf("      \"r2u_flush_count\": %llu,\n", e->r2u_flush_count);
+    printf("      \"r2u_flush_total\": %llu\n", e->r2u_flush_total);
+    printf("    }%s\n", last ? "" : ",");
+}
+
 void print_json_report(struct bpf_map *device_stats_map, struct bpf_map *engine_stats_map,
                        struct bpf_map *device_qd_map, struct bpf_map *cpu_matrix_map,
                        struct io_stats *stats_array, int nr_cpus) {
@@ -193,28 +213,18 @@ void print_json_report(struct bpf_map *device_stats_map, struct bpf_map *engine_
     }
     printf("\n  ],\n");
 
-    /* 엔진 페이즈(S2Q/C2R/R2U) — libaio·io_uring 공용 블록. 비활성 페이즈는 0
-     * (io_uring은 r2u_* = 0, generic은 전부 0). */
-    struct engine_stats eng_st = {0};
-    unsigned int eng_key = 0;
-    if (engine_stats_map)
-        bpf_map_lookup_elem(bpf_map__fd(engine_stats_map), &eng_key, &eng_st);
-
+    /* 엔진 페이즈(S2Q/C2R/R2U) — 엔진별 분리 출력. engine_stats_map은 ARRAY[ENG_MAX].
+     * 두 엔진 tracepoint가 항상 attach되므로, 비활성 엔진은 전부 0으로 나온다. */
+    struct engine_stats eng_libaio = {0}, eng_iouring = {0};
+    if (engine_stats_map) {
+        int ef = bpf_map__fd(engine_stats_map);
+        unsigned int k_lib = ENG_LIBAIO, k_iou = ENG_IOURING;
+        bpf_map_lookup_elem(ef, &k_lib, &eng_libaio);
+        bpf_map_lookup_elem(ef, &k_iou, &eng_iouring);
+    }
     printf("  \"engine_overhead\": {\n");
-    printf("    \"s2q_count\": %llu,\n", eng_st.s2q_count);
-    printf("    \"s2q_lat_total\": %llu,\n", eng_st.s2q_lat_total);
-    printf("    \"c2r_read_count\": %llu,\n", eng_st.c2r_read_count);
-    printf("    \"c2r_read_total\": %llu,\n", eng_st.c2r_read_total);
-    printf("    \"c2r_write_count\": %llu,\n", eng_st.c2r_write_count);
-    printf("    \"c2r_write_total\": %llu,\n", eng_st.c2r_write_total);
-    printf("    \"c2r_flush_count\": %llu,\n", eng_st.c2r_flush_count);
-    printf("    \"c2r_flush_total\": %llu,\n", eng_st.c2r_flush_total);
-    printf("    \"r2u_read_count\": %llu,\n", eng_st.r2u_read_count);
-    printf("    \"r2u_read_total\": %llu,\n", eng_st.r2u_read_total);
-    printf("    \"r2u_write_count\": %llu,\n", eng_st.r2u_write_count);
-    printf("    \"r2u_write_total\": %llu,\n", eng_st.r2u_write_total);
-    printf("    \"r2u_flush_count\": %llu,\n", eng_st.r2u_flush_count);
-    printf("    \"r2u_flush_total\": %llu\n", eng_st.r2u_flush_total);
+    print_engine_json("libaio", &eng_libaio, 0);
+    print_engine_json("iouring", &eng_iouring, 1);
     printf("  },\n");
 
     /* SQ x CQ CPU 매트릭스 — sparse: 실제 발생한 (issue,cq) 쌍만. */
@@ -249,18 +259,11 @@ int main(int argc, char **argv) {
     struct bpf_map *device_qd_map;
     struct bpf_map *cpu_matrix_map;
 
-    bool mode_libaio = false;
-    bool mode_iouring = false;
     double opt_interval = 1.0;   // 초 단위, sub-second (예: 0.5) 허용
 
+    /* 엔진(libaio/io_uring) 사전 지정 없음 — 두 엔진 tracepoint를 항상 attach하고
+     * 어느 게 fire했는지로 I/O별 엔진을 판별한다. -m 인자는 받아도 무시(하위호환). */
     for (int i = 1; i < argc; i++) {
-        const char *mode_str = NULL;
-        if (strncmp(argv[i], "--mode=", 7) == 0) mode_str = argv[i] + 7;
-        else if (strcmp(argv[i], "-m") == 0 && i + 1 < argc) mode_str = argv[++i];
-
-        if (mode_str && strcmp(mode_str, "libaio") == 0) mode_libaio = true;
-        if (mode_str && strcmp(mode_str, "iouring") == 0) mode_iouring = true;
-
         if (strncmp(argv[i], "--interval=", 11) == 0) {
             opt_interval = atof(argv[i] + 11);
         } else if (strcmp(argv[i], "-i") == 0 && i + 1 < argc) {
@@ -277,38 +280,19 @@ int main(int argc, char **argv) {
     skel = io_trace_bpf__open();
     if (!skel) return 1;
 
-    skel->rodata->opt_trace_libaio = mode_libaio;
-    skel->rodata->opt_trace_iouring = mode_iouring;
-
     /* C2R 경로 판별용 dio 완료 콜백 주소 — block_rq_complete의 bio->bi_end_io와
-     * 비교해 파일(iomap) / raw blockdev 경로를 가른다. libaio·io_uring 모드에서만
-     * 의미가 있다. 심볼을 못 찾으면 해당 경로의 C2R만 누락되고 나머지는 정상. */
-    if (mode_libaio || mode_iouring) {
-        skel->rodata->addr_iomap_dio_end_io    = resolve_ksym("iomap_dio_bio_end_io");
-        skel->rodata->addr_blkdev_end_io       = resolve_ksym("blkdev_bio_end_io");
-        skel->rodata->addr_blkdev_end_io_async = resolve_ksym("blkdev_bio_end_io_async");
-        if (!skel->rodata->addr_iomap_dio_end_io)
-            fprintf(stderr, "[io_trace] warn: iomap_dio_bio_end_io not in kallsyms"
-                            " — file(ext4) C2R unavailable\n");
-        if (!skel->rodata->addr_blkdev_end_io && !skel->rodata->addr_blkdev_end_io_async)
-            fprintf(stderr, "[io_trace] warn: blkdev_bio_end_io* not in kallsyms"
-                            " — raw block device C2R unavailable\n");
-    }
+     * 비교해 파일(iomap) / raw blockdev 경로를 가른다. 심볼을 못 찾으면 해당
+     * 경로의 C2R만 누락되고 나머지는 정상. 모든 엔진 tracepoint가 상시 attach. */
+    skel->rodata->addr_iomap_dio_end_io    = resolve_ksym("iomap_dio_bio_end_io");
+    skel->rodata->addr_blkdev_end_io       = resolve_ksym("blkdev_bio_end_io");
+    skel->rodata->addr_blkdev_end_io_async = resolve_ksym("blkdev_bio_end_io_async");
+    if (!skel->rodata->addr_iomap_dio_end_io)
+        fprintf(stderr, "[io_trace] warn: iomap_dio_bio_end_io not in kallsyms"
+                        " — file(ext4) C2R unavailable\n");
+    if (!skel->rodata->addr_blkdev_end_io && !skel->rodata->addr_blkdev_end_io_async)
+        fprintf(stderr, "[io_trace] warn: blkdev_bio_end_io* not in kallsyms"
+                        " — raw block device C2R unavailable\n");
 
-    if (!mode_libaio) {
-        bpf_program__set_autoattach(skel->progs.trace_submit_enter, false);
-        bpf_program__set_autoattach(skel->progs.trace_submit_exit, false);
-        bpf_program__set_autoattach(skel->progs.trace_aio_complete, false);
-        bpf_program__set_autoattach(skel->progs.trace_getevents_enter, false);
-        bpf_program__set_autoattach(skel->progs.trace_getevents_exit, false);
-        bpf_program__set_autoattach(skel->progs.trace_pgetevents_enter, false);
-        bpf_program__set_autoattach(skel->progs.trace_pgetevents_exit, false);
-    }
-    if (!mode_iouring) {
-        bpf_program__set_autoattach(skel->progs.io_uring_submit_req, false);
-        bpf_program__set_autoattach(skel->progs.io_uring_complete, false);
-    }
-    
     err = io_trace_bpf__load(skel);
     if (err) goto cleanup;
 
@@ -345,9 +329,8 @@ int main(int argc, char **argv) {
     device_qd_map = bpf_object__find_map_by_name(skel->obj, "device_qd");
     cpu_matrix_map = bpf_object__find_map_by_name(skel->obj, "cpu_matrix");
 
-    printf("[PID: %d] io_trace is running (Modes: Generic%s%s) | Interval: %.3fs\n",
-            getpid(), mode_libaio ? " + Libaio" : "",
-            mode_iouring ? " + Io_uring" : "", opt_interval);
+    printf("[PID: %d] io_trace is running (auto-detect: block + libaio + io_uring)"
+           " | Interval: %.3fs\n", getpid(), opt_interval);
     fflush(stdout);
 
     /*

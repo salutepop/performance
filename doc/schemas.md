@@ -14,9 +14,9 @@
 | `bandwidth_mb_s_interval` | float MB/s | 인터벌 평균 대역폭 |
 | `q2d_avg_us_interval` | float us | 인터벌 평균 Q2D (블록큐 진입→dispatch) |
 | `d2c_avg_us_interval` | float us | 인터벌 평균 D2C (dispatch→completion, 디스크 실제 처리 시간) |
-| `s2q_avg_us_interval` | float us | libaio·io_uring 모드: 인터벌 평균 S2Q (submit→block_bio_queue). 글로벌 값이라 같은 인터벌 모든 op 행에 같은 값 들어감 |
-| `c2r_avg_us_interval` | float us | libaio·io_uring 모드: 인터벌 평균 C2R (rq_complete→엔진 완료 = aio_complete/io_uring CQE). op별 |
-| `r2u_avg_us_interval` | float us | libaio 모드 한정: 인터벌 평균 R2U (aio_complete→io_getevents 반환). op별. io_uring은 0 |
+| `s2q_avg_us_interval` | float us | 인터벌 평균 S2Q (submit→block_bio_queue). libaio·io_uring 자동탐지·합산, 글로벌 값이라 같은 인터벌 모든 op 행에 같은 값 |
+| `c2r_avg_us_interval` | float us | 인터벌 평균 C2R (rq_complete→엔진 완료 = aio_complete/io_uring CQE). libaio·io_uring 자동탐지·합산, op별 |
+| `r2u_avg_us_interval` | float us | 인터벌 평균 R2U (aio_complete→io_getevents 반환). libaio I/O 한정, op별. io_uring은 0 |
 | `sq_cq_diff_ratio` | float [0,1] | SQ(issue) CPU vs CQ(completion) CPU 불일치 비율. **device 단위** — 같은 인터벌 모든 op 행에 같은 값 |
 | `d2c_p50_us` | float us | 인터벌 d2c log2(ns) 히스토그램 delta 기준 p50 |
 | `d2c_p99_us` | float us | 인터벌 d2c p99 (tail latency) |

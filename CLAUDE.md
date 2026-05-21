@@ -86,7 +86,7 @@ from monitoring import Session
 from monitoring.collectors import SystemCollector, EbpfIoCollector
 
 with Session(session_dir, sys_info,
-             collectors=[SystemCollector(), EbpfIoCollector(mode="libaio")],
+             collectors=[SystemCollector(), EbpfIoCollector()],
              reports="all"):
     run_workload(...)            # I/O를 일으키는 무엇이든
 # 종료 시: collector 역순 stop → 리포트 생성
@@ -147,8 +147,8 @@ make -C monitoring/collectors/ebpf_io/src
 make -C monitoring/collectors/ebpf_io/src clean
 make -C monitoring/collectors/ebpf_io/src smoke    # = pmon.py debug
 
-# 단독 실행
-python3 monitoring/collectors/ebpf_io/collector.py -m libaio -i 1 -c "fio ..."
+# 단독 실행 (엔진/transport 자동탐지 — mode 인자 없음)
+python3 monitoring/collectors/ebpf_io/collector.py -i 1 -c "fio ..."
 ```
 
 빌드 의존성: `clang`, `bpftool`, `libbpf-dev`, `libelf-dev`, `zlib1g-dev`. `vmlinux.h`는 `/sys/kernel/btf/vmlinux`에서 자동 생성된다.

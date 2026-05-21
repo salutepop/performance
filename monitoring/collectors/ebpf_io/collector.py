@@ -40,6 +40,31 @@ _ENGINE_OP_KEY = {
     "flush": "flush",
 }
 
+# engine_overhead의 각 엔진 sub-dict가 갖는 누적 카운터/총합 키.
+_ENGINE_KEYS = (
+    "s2q_count", "s2q_lat_total",
+    "c2r_read_count", "c2r_read_total", "c2r_write_count", "c2r_write_total",
+    "c2r_flush_count", "c2r_flush_total",
+    "r2u_read_count", "r2u_read_total", "r2u_write_count", "r2u_write_total",
+    "r2u_flush_count", "r2u_flush_total",
+)
+
+
+def _agg_engines(engine_overhead):
+    """engine_overhead {libaio:{...}, iouring:{...}} → 엔진 합산 flat dict.
+
+    트레이서는 두 엔진을 항상 동시에 추적하고 engine_overhead를 엔진별로 나눠
+    보고한다. CSV·phase_avg_us·full-stack 표처럼 엔진을 구분하지 않는 소비자는
+    이 합산 뷰를 쓴다 (avg = 합산 total / 합산 count → 가중평균)."""
+    eo = engine_overhead or {}
+    agg = {k: 0 for k in _ENGINE_KEYS}
+    for eng in eo.values():
+        if not isinstance(eng, dict):
+            continue
+        for k in _ENGINE_KEYS:
+            agg[k] += eng.get(k, 0)
+    return agg
+
 
 LAT_HIST_BUCKETS = 32
 LBA_BUCKETS = 128  # MUST match src/io_trace.h. 변경 시 BPF 재빌드 필요.
@@ -166,7 +191,8 @@ def parse_and_store_metrics(json_str):
         timestamp = datetime.now().strftime("%H:%M:%S")
 
         # engine_overhead(엔진 페이즈 S2Q/C2R/R2U) 누적값을 인터벌 delta로 변환.
-        sys_st = bpf_data.get("engine_overhead", {}) or {}
+        # 엔진별 분리 보고를 합산 — per-interval CSV는 엔진을 구분하지 않는다.
+        sys_st = _agg_engines(bpf_data.get("engine_overhead"))
 
         def _delta_avg_us(cnt_k, tot_k):
             """누적 count/total_ns 키 한 쌍의 인터벌 delta → avg us. 데이터 없으면 0."""
@@ -405,7 +431,36 @@ def print_op_stats(op_name, bpf_stats, comp_phases, duration):
     return cnt, q2d_ms, d2c_ms, comp_out
 
 
-def print_final_summary(raw_json, effective_duration, mode):
+def _print_engine_lines(engine_overhead):
+    """engine_overhead의 엔진별 한 줄 요약. 활동이 관측된 엔진만 출력한다.
+    어떤 엔진이 도는지는 추적 중 자동 판별된 결과 — 사전 지정이 아니다."""
+    eo = engine_overhead or {}
+    ops = ("read", "write", "flush")
+    shown = []
+    for name in ("libaio", "iouring"):
+        eng = eo.get(name) or {}
+        s2q_c = eng.get("s2q_count", 0)
+        c2r_c = sum(eng.get(f"c2r_{o}_count", 0) for o in ops)
+        if s2q_c == 0 and c2r_c == 0:
+            continue
+        s2q_avg = (eng.get("s2q_lat_total", 0) / s2q_c / 1000.0) if s2q_c else 0.0
+        c2r_t = sum(eng.get(f"c2r_{o}_total", 0) for o in ops)
+        c2r_avg = (c2r_t / c2r_c / 1000.0) if c2r_c else 0.0
+        r2u_c = sum(eng.get(f"r2u_{o}_count", 0) for o in ops)
+        r2u_t = sum(eng.get(f"r2u_{o}_total", 0) for o in ops)
+        r2u_avg = (r2u_t / r2u_c / 1000.0) if r2u_c else 0.0
+        shown.append(f"{name:<8} S2Q={s2q_avg:.2f}us  C2R={c2r_avg:.2f}us  "
+                     f"R2U={r2u_avg:.2f}us  (S2Q n={s2q_c:,})")
+    if shown:
+        print(" Engines observed (auto-detected):")
+        for s in shown:
+            print(f"   - {s}")
+    else:
+        print(" Engines observed: none (no libaio/io_uring activity)")
+    print()
+
+
+def print_final_summary(raw_json, effective_duration):
     try:
         bpf_data = json.loads(raw_json)
         print("\n" + "=" * 100)
@@ -414,22 +469,24 @@ def print_final_summary(raw_json, effective_duration, mode):
         )
         print("=" * 100)
 
-        # 페이즈 구성. block 페이즈(Q2D/D2C)와 S2Q는 공통. 완료측은 엔진별:
-        #   libaio  → C2R, R2U (R2U = io_getevents 반환까지)
-        #   iouring → C2R 만 (CQ ring 직접 읽기라 R2U 관측 불가)
-        ov = bpf_data.get("engine_overhead", {}) or {}
+        # engine_overhead는 엔진별로 보고된다. 엔진별 한 줄 요약 후, full-stack
+        # 표는 엔진 합산(_agg_engines)으로 그린다. block 페이즈(Q2D/D2C)와 S2Q는
+        # 공통, 완료측은 libaio→C2R+R2U / io_uring→C2R(R2U=0).
+        eo = bpf_data.get("engine_overhead", {}) or {}
+        _print_engine_lines(eo)
+        ov = _agg_engines(eo)
         submit_phase = "S2Q"
         submit_cnt = ov.get("s2q_count", 0)
         submit_total_ns = ov.get("s2q_lat_total", 0)
-        comp_phase_names = ["C2R", "R2U"] if mode != "iouring" else ["C2R"]
+        comp_phase_names = ["C2R", "R2U"]
 
         def _comp_for(lib_key):
-            phases = [("C2R", (ov.get(f"c2r_{lib_key}_count", 0),
-                               ov.get(f"c2r_{lib_key}_total", 0) / 1000000.0))]
-            if mode != "iouring":
-                phases.append(("R2U", (ov.get(f"r2u_{lib_key}_count", 0),
-                                       ov.get(f"r2u_{lib_key}_total", 0) / 1000000.0)))
-            return phases
+            return [
+                ("C2R", (ov.get(f"c2r_{lib_key}_count", 0),
+                         ov.get(f"c2r_{lib_key}_total", 0) / 1000000.0)),
+                ("R2U", (ov.get(f"r2u_{lib_key}_count", 0),
+                         ov.get(f"r2u_{lib_key}_total", 0) / 1000000.0)),
+            ]
 
         # phase_stats[phase][op] = (count, sum_ms, avg_us)
         phase_stats = {p: {} for p in [submit_phase, "Q2D", "D2C"] + comp_phase_names}
@@ -546,26 +603,54 @@ def print_final_summary(raw_json, effective_duration, mode):
         print_phase(_phase_disp[submit_phase], submit_phase, True, False)
         print_phase(_phase_disp["Q2D"], "Q2D", False, False)
         print_phase(_phase_disp["D2C"], "D2C", False, False)
-        if mode != "generic":
-            for name in comp_phase_names:
-                print_phase(_phase_disp[name], name, False, True)
+        for name in comp_phase_names:
+            print_phase(_phase_disp[name], name, False, True)
         print("=" * table_width)
     except Exception as e:
         print(f"[-] Parsing Error in Final Summary: {e}")
 
 
-def build_summary(bpf_data, duration, mode):
+def _engines_summary(engine_overhead):
+    """engine_overhead → 엔진별 평균 us 요약 (ebpf_summary.json의 'engines' 블록).
+
+    어떤 엔진이 도는지는 추적 중 자동 판별된다. active=False면 그 엔진의 I/O가
+    관측되지 않았다는 뜻."""
+    eo = engine_overhead or {}
+    ops = ("read", "write", "flush")
+    out = {}
+    for name in ("libaio", "iouring"):
+        eng = eo.get(name) or {}
+        s2q_c = eng.get("s2q_count", 0)
+        entry = {
+            "s2q_count": s2q_c,
+            "s2q_avg_us": round(eng.get("s2q_lat_total", 0) / s2q_c / 1000.0, 2) if s2q_c else 0.0,
+        }
+        for ph in ("c2r", "r2u"):
+            for op in ops:
+                c = eng.get(f"{ph}_{op}_count", 0)
+                entry[f"{ph}_{op}_avg_us"] = round(
+                    eng.get(f"{ph}_{op}_total", 0) / c / 1000.0, 2) if c else 0.0
+        entry["active"] = bool(s2q_c) or any(
+            eng.get(f"c2r_{op}_count", 0) for op in ops)
+        out[name] = entry
+    return out
+
+
+def build_summary(bpf_data, duration):
     """Structured end-of-run summary for charting (ebpf_summary_<sid>.json).
 
     Same numbers as the printed FINAL REPORT but machine-readable, so the
     report/ layer can draw real charts instead of re-parsing stdout text.
     """
-    sys_st = bpf_data.get("engine_overhead", {}) or {}
+    eo = bpf_data.get("engine_overhead", {}) or {}
+    sys_st = _agg_engines(eo)  # 엔진 합산 — per-device phase_avg_us용
     s2q_cnt = sys_st.get("s2q_count", 0)
     s2q_avg_us = round(sys_st.get("s2q_lat_total", 0) / 1000.0 / s2q_cnt, 2) if s2q_cnt else 0.0
 
-    out = {"duration_s": round(duration, 2), "mode": mode,
-           "s2q_avg_us": s2q_avg_us, "devices": {},
+    out = {"duration_s": round(duration, 2),
+           "s2q_avg_us": s2q_avg_us,
+           "engines": _engines_summary(eo),
+           "devices": {},
            "sqcq_matrix": bpf_data.get("sqcq_matrix", [])}
 
     for dev in bpf_data.get("devices", []):
@@ -647,15 +732,11 @@ def run_workload_thread(cmd, script_file):
         os.kill(os.getpid(), signal.SIGINT)
 
 
-def run_benchmark(mode="generic", cmd=None, script_file=None, interval=1, enable_sysmon=True):
+def run_benchmark(cmd=None, script_file=None, interval=1, enable_sysmon=True):
     # io_trace binary is built into src/ next to collector.py.
     io_trace_bin = os.path.join(os.path.dirname(os.path.abspath(__file__)), "src", "io_trace")
     trace_cmd = ["sudo", io_trace_bin, "-i", str(interval)]
-    if mode != "generic":
-        trace_cmd.extend(["-m", mode])
-        print(f"[*] eBPF Tracer starting in: {mode.upper()} Mode")
-    else:
-        print("[*] eBPF Tracer starting in: Generic Block Mode")
+    print("[*] eBPF Tracer starting (auto-detect: block + libaio + io_uring)")
 
     trace_proc = subprocess.Popen(trace_cmd, stdout=subprocess.PIPE, text=True)
     time.sleep(1.5)
@@ -758,9 +839,9 @@ def run_benchmark(mode="generic", cmd=None, script_file=None, interval=1, enable
         )
 
     if last_valid_json != "{}":
-        print_final_summary(last_valid_json, effective_duration, mode)
+        print_final_summary(last_valid_json, effective_duration)
         try:
-            summary = build_summary(json.loads(last_valid_json), effective_duration, mode)
+            summary = build_summary(json.loads(last_valid_json), effective_duration)
             os.makedirs(OUTPUT_DIR, exist_ok=True)
             sp = os.path.join(OUTPUT_DIR, f"ebpf_summary_{SESSION_ID}.json")
             with open(sp, "w") as f:
@@ -773,13 +854,6 @@ def run_benchmark(mode="generic", cmd=None, script_file=None, interval=1, enable
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Universal eBPF I/O Monitor & Profiler"
-    )
-    parser.add_argument(
-        "-m",
-        "--mode",
-        type=str,
-        default="generic",
-        choices=["generic", "libaio", "iouring"],
     )
     parser.add_argument(
         "-i",
@@ -827,6 +901,6 @@ if __name__ == "__main__":
     if args.session_id:
         SESSION_ID = args.session_id
     run_benchmark(
-        mode=args.mode, cmd=args.cmd, script_file=args.file, interval=args.interval,
+        cmd=args.cmd, script_file=args.file, interval=args.interval,
         enable_sysmon=not args.no_sysmon,
     )

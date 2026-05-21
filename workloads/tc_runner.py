@@ -137,7 +137,7 @@ def _discover_cases(tc_filter, all_tcs):
 
 def run_test_cases(tc_filter=None, all_tcs=False, quick=False,
                    report_formats="md,json,png,pdf",
-                   ebpf_toggle="auto", ebpf_mode="libaio", ebpf_interval=1.0):
+                   ebpf_toggle="auto", ebpf_interval=1.0):
     """Discover and run test cases inside monitoring Sessions.
 
     Returns 0 on success, non-zero on error.
@@ -176,13 +176,13 @@ def run_test_cases(tc_filter=None, all_tcs=False, quick=False,
     if quick:
         print("[!] Quick mode: every workload forced to 1s runtime\n")
 
-    resolved_ebpf_mode = resolve_ebpf_mode(ebpf_toggle, ebpf_mode)
+    resolved_ebpf_mode = resolve_ebpf_mode(ebpf_toggle)
     if resolved_ebpf_mode == "off":
         if ebpf_toggle == "auto":
             print("[*] eBPF tracer skipped (io_trace not built). "
                   "Run `make -C monitoring/collectors/ebpf_io/src` to enable.")
     else:
-        print(f"[*] eBPF tracer on (mode={resolved_ebpf_mode}, interval={ebpf_interval}s)")
+        print(f"[*] eBPF tracer on (auto-detect, interval={ebpf_interval}s)")
 
     for tc_file in tc_files:
         ext = os.path.splitext(tc_file)[1].lower()

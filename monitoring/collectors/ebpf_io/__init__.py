@@ -43,8 +43,7 @@ class EbpfIoCollector(Collector):
 
     name = "ebpf_io"
 
-    def __init__(self, mode="libaio", interval=1.0, verbose=True):
-        self.mode = mode
+    def __init__(self, interval=1.0, verbose=True):
         self.interval = float(interval)
         self.verbose = verbose
         self._proc = None
@@ -57,7 +56,6 @@ class EbpfIoCollector(Collector):
             return
         cmd = [
             sys.executable, COLLECTOR_PY,
-            "-m", self.mode,
             "-i", str(self.interval),
             "--output-dir", session_dir,
             "--session-id", session_id,
@@ -91,7 +89,7 @@ class EbpfIoCollector(Collector):
             return
         self._proc = proc
         if self.verbose:
-            print(f"  [eBPF] tracer started (mode={self.mode}, "
+            print(f"  [eBPF] tracer started (auto-detect, "
                   f"interval={self.interval}s) -> {session_dir}")
 
     def stop(self):

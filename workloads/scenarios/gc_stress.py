@@ -20,7 +20,6 @@ from .base import Scenario
 
 class GcStress(Scenario):
     name = "gc_stress"
-    mode = "libaio"
     interval = 1.0
 
     def fio_cmd(self):

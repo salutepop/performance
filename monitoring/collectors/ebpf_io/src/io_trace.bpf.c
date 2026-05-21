@@ -19,9 +19,6 @@ static __always_inline u32 lat_bucket(u64 ns) {
     return b;
 }
 
-const volatile bool opt_trace_libaio = false;
-const volatile bool opt_trace_iouring = false;
-
 /* dio 완료 콜백(bio->bi_end_io)의 런타임 주소 — io_trace.c가 /proc/kallsyms에서
  * 읽어 주입한다. block_rq_complete에서 I/O 경로(파일 iomap vs raw blockdev)를
  * 판별해 kiocb를 올바른 dio 구조체에서 꺼내기 위한 것. 못 찾으면 0(해당 경로 skip). */
@@ -32,6 +29,13 @@ const volatile __u64 addr_blkdev_end_io_async = 0;
 struct bio_start_ctx {
     u64 ts;
     u64 pid_tgid;
+};
+
+/* submit 시각 + 어느 엔진(io_submit / io_uring_submit_req)이 제출했는지.
+ * block_bio_queue가 이 engine으로 S2Q를 해당 엔진 통계에 누적한다. */
+struct submit_ctx {
+    u64 ts;
+    u32 engine;
 };
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
@@ -75,8 +79,8 @@ struct {
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 10240);
-    __type(key, u64); 
-    __type(value, u64); 
+    __type(key, u64);
+    __type(value, struct submit_ctx);
 } pid_submit_start SEC(".maps");
 
 struct {
@@ -110,13 +114,20 @@ struct {
     __type(value, struct comp_ctx);
 } iocb_comp_start SEC(".maps");
 
-/* 엔진 페이즈(S2Q/C2R/R2U) 글로벌 누적. libaio·io_uring 공용 (mode 상호배타). */
+/* 엔진 페이즈(S2Q/C2R/R2U) 누적 — ARRAY[ENG_MAX], 엔진(libaio/io_uring)별 분리.
+ * 두 엔진 tracepoint를 항상 동시에 attach하므로 인덱스로 갈라 누적한다. */
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
-    __uint(max_entries, 1);
+    __uint(max_entries, ENG_MAX);
     __type(key, u32);
     __type(value, struct engine_stats);
 } engine_stats_map SEC(".maps");
+
+/* 엔진 인덱스로 engine_stats 포인터를 얻는다. 범위 밖이면 NULL. */
+static __always_inline struct engine_stats *eng_stats(u32 engine) {
+    if (engine >= ENG_MAX) return NULL;
+    return bpf_map_lookup_elem(&engine_stats_map, &engine);
+}
 
 struct {
     __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
@@ -166,9 +177,9 @@ static __always_inline struct dev_qd *get_or_init_dev_qd(u32 dev) {
 // Libaio Tracepoints 생략 (이전 코드와 동일, 분량관계상 주요 함수만 배치)
 SEC("tracepoint/syscalls/sys_enter_io_submit")
 int trace_submit_enter(void *ctx) {
-    u64 ts = bpf_ktime_get_ns();
     u64 pid_tgid = bpf_get_current_pid_tgid();
-    bpf_map_update_elem(&pid_submit_start, &pid_tgid, &ts, BPF_ANY);
+    struct submit_ctx sc = { .ts = bpf_ktime_get_ns(), .engine = ENG_LIBAIO };
+    bpf_map_update_elem(&pid_submit_start, &pid_tgid, &sc, BPF_ANY);
     return 0;
 }
 
@@ -191,8 +202,7 @@ int trace_aio_complete(struct pt_regs *ctx) {
         pid_tgid = cctx->pid_tgid;
         if (ts > cctx->ts) {
             u64 c2r_lat = ts - cctx->ts;
-            u32 stat_key = 0;
-            struct engine_stats *st = bpf_map_lookup_elem(&engine_stats_map, &stat_key);
+            struct engine_stats *st = eng_stats(ENG_LIBAIO);
             if (st) {
                 if (cctx->type == IO_READ || cctx->type == IO_READ_AHEAD) {
                     __sync_fetch_and_add(&st->c2r_read_count, 1);
@@ -235,8 +245,7 @@ int trace_getevents_exit(struct trace_event_raw_sys_exit *ctx) {
     if (!events_ptr_p) return 0;
     u64 events_ptr = *events_ptr_p;
     bpf_map_delete_elem(&active_getevents_events, &pid_tgid);
-    u32 key = 0;
-    struct engine_stats *st = bpf_map_lookup_elem(&engine_stats_map, &key);
+    struct engine_stats *st = eng_stats(ENG_LIBAIO);
     if (!st) return 0;
     struct io_event ev;
     #pragma unroll
@@ -285,8 +294,7 @@ int trace_pgetevents_exit(struct trace_event_raw_sys_exit *ctx) {
     if (!events_ptr_p) return 0;
     u64 events_ptr = *events_ptr_p;
     bpf_map_delete_elem(&active_getevents_events, &pid_tgid);
-    u32 key = 0;
-    struct engine_stats *st = bpf_map_lookup_elem(&engine_stats_map, &key);
+    struct engine_stats *st = eng_stats(ENG_LIBAIO);
     if (!st) return 0;
     struct io_event ev;
     #pragma unroll
@@ -327,9 +335,9 @@ int trace_pgetevents_exit(struct trace_event_raw_sys_exit *ctx) {
  */
 SEC("tp_btf/io_uring_submit_req")
 int BPF_PROG(io_uring_submit_req, void *req) {
-    u64 ts = bpf_ktime_get_ns();
     u64 pid_tgid = bpf_get_current_pid_tgid();
-    bpf_map_update_elem(&pid_submit_start, &pid_tgid, &ts, BPF_ANY);
+    struct submit_ctx sc = { .ts = bpf_ktime_get_ns(), .engine = ENG_IOURING };
+    bpf_map_update_elem(&pid_submit_start, &pid_tgid, &sc, BPF_ANY);
     return 0;
 }
 
@@ -341,8 +349,7 @@ int BPF_PROG(io_uring_complete, void *uring_ctx, void *req) {
     if (!cctx) return 0;
     if (cctx->ts > 0 && ts > cctx->ts) {
         u64 c2r_lat = ts - cctx->ts;
-        u32 stat_key = 0;
-        struct engine_stats *st = bpf_map_lookup_elem(&engine_stats_map, &stat_key);
+        struct engine_stats *st = eng_stats(ENG_IOURING);
         if (st) {
             if (cctx->type == IO_READ || cctx->type == IO_READ_AHEAD) {
                 __sync_fetch_and_add(&st->c2r_read_count, 1);
@@ -365,13 +372,13 @@ int BPF_PROG(block_bio_queue, struct bio *bio) {
     u64 ts = bpf_ktime_get_ns();
     u64 pid_tgid = bpf_get_current_pid_tgid();
     /* S2Q: 직전 submit(io_submit syscall / io_uring_submit_req) -> 이 시점.
-     * 두 엔진이 pid_submit_start 맵을 공유하고 결과도 같은 s2q 카운터에 누적. */
-    if (opt_trace_libaio || opt_trace_iouring) {
-        u64 *submit_ts = bpf_map_lookup_elem(&pid_submit_start, &pid_tgid);
-        if (submit_ts && ts > *submit_ts) {
-            u64 s2q_lat = ts - *submit_ts;
-            u32 key = 0;
-            struct engine_stats *st = bpf_map_lookup_elem(&engine_stats_map, &key);
+     * 두 엔진이 pid_submit_start를 공유하고, 제출 엔진(submit_ctx.engine)별로
+     * S2Q를 누적한다. submit 기록이 없으면(다른 I/O 경로) 그냥 건너뜀. */
+    {
+        struct submit_ctx *sc = bpf_map_lookup_elem(&pid_submit_start, &pid_tgid);
+        if (sc && ts > sc->ts) {
+            u64 s2q_lat = ts - sc->ts;
+            struct engine_stats *st = eng_stats(sc->engine);
             if (st) {
                 __sync_fetch_and_add(&st->s2q_count, 1);
                 __sync_fetch_and_add(&st->s2q_lat_total, s2q_lat);
@@ -585,8 +592,8 @@ int BPF_PROG(block_rq_complete, struct request *rq, int error, unsigned int nr_b
      *   blkdev_bio_end_io_async : raw blockdev, 단일-bio     -> bi_private 미설정,
      *                             bio가 blkdev_dio에 내장 -> container_of로 역산
      * 셋 다 아니면(분할 bio, page-cache writeback 등) C2R은 best-effort로 건너뛴다.
-     * libaio·io_uring 공용 — 완료측(aio_complete / io_uring_complete)이 각 모드에서만 attach. */
-    if ((opt_trace_libaio || opt_trace_iouring) && type != -1) {
+     * 완료측(aio_complete / io_uring_complete)은 둘 다 상시 attach — 매칭되는 쪽이 소비. */
+    if (type != -1) {
         struct bio *bio = BPF_CORE_READ(rq, bio);
         if (bio) {
             u64 end_io = (u64)BPF_CORE_READ(bio, bi_end_io);

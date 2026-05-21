@@ -11,7 +11,6 @@ from .base import Scenario
 
 class SampleRandRead(Scenario):
     name = "sample_randread"
-    mode = "libaio"
     interval = 1.0
 
     def fio_cmd(self):

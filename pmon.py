@@ -80,7 +80,6 @@ def cmd_monitor(args):
             quick=args.quick,
             report_formats=args.report,
             ebpf_toggle=args.ebpf,
-            ebpf_mode=args.ebpf_mode,
             ebpf_interval=args.ebpf_interval,
         )
 
@@ -98,7 +97,7 @@ def cmd_monitor(args):
 
     sys_info = _discover_sys_info()
     session_dir = _build_session_dir(args.label)
-    ebpf_mode = resolve_ebpf_mode(args.ebpf, args.ebpf_mode)
+    ebpf_mode = resolve_ebpf_mode(args.ebpf)
 
     metadata = {
         "system": {"discovered": sys_info},
@@ -176,13 +175,14 @@ def _generate_reports(session_dir, session_id, fmt):
 
 # ---------------------------------------------------------------------------- debug
 
-# debug exercises the full pipeline with the same 4-phase workload as tc00_smoke:
-# seq write -> seq read -> rand write -> rand read.
+# debug exercises the full pipeline with a 4-phase fio workload, split across
+# both I/O engines so engine auto-detection is self-tested:
+#   seq write/read -> libaio,  rand write/read -> io_uring.
 _DEBUG_WORKLOADS = [
-    {"name": "seq_write_128k", "rw": "write",     "bs": "128k", "iodepth": 32, "numjobs": 1, "size": "1G"},
-    {"name": "seq_read_128k",  "rw": "read",      "bs": "128k", "iodepth": 32, "numjobs": 1, "size": "1G"},
-    {"name": "rand_write_4k",  "rw": "randwrite", "bs": "4k",   "iodepth": 32, "numjobs": 8, "size": "1G"},
-    {"name": "rand_read_4k",   "rw": "randread",  "bs": "4k",   "iodepth": 32, "numjobs": 8, "size": "1G"},
+    {"name": "seq_write_128k", "rw": "write",     "bs": "128k", "iodepth": 32, "numjobs": 1, "size": "1G", "ioengine": "libaio"},
+    {"name": "seq_read_128k",  "rw": "read",      "bs": "128k", "iodepth": 32, "numjobs": 1, "size": "1G", "ioengine": "libaio"},
+    {"name": "rand_write_4k",  "rw": "randwrite", "bs": "4k",   "iodepth": 32, "numjobs": 8, "size": "1G", "ioengine": "io_uring"},
+    {"name": "rand_read_4k",   "rw": "randread",  "bs": "4k",   "iodepth": 32, "numjobs": 8, "size": "1G", "ioengine": "io_uring"},
 ]
 
 
@@ -209,21 +209,17 @@ def cmd_debug(args):
     sys_info = _discover_sys_info()
     session_dir = _build_session_dir("debug")
     sid = os.path.basename(session_dir)
-    ebpf_mode = resolve_ebpf_mode("auto", args.ebpf_mode)
-    # Match the fio ioengine to the tracer mode so the eBPF path is exercised
-    # end-to-end: iouring mode needs io_uring I/O to populate S2Q/C2R.
-    fio_ioengine = "io_uring" if ebpf_mode == "iouring" else "libaio"
+    ebpf_mode = resolve_ebpf_mode("auto")
 
     print(f"[debug] session -> {session_dir}")
-    print(f"[debug] config: 4 workloads x {duration}s, ebpf={ebpf_mode}, "
-          f"ioengine={fio_ioengine}, reports=all")
+    print(f"[debug] config: 4 workloads x {duration}s (2 libaio + 2 io_uring), "
+          f"ebpf={ebpf_mode}, reports=all")
 
     fio_done = []
     with Session(session_dir, sys_info, ebpf_mode=ebpf_mode,
                  ebpf_interval=1.0, reports="all"):
         for wl in _DEBUG_WORKLOADS:
-            result = run_fio_job(disk=SMOKE_IMG,
-                                 workload={**wl, "ioengine": fio_ioengine},
+            result = run_fio_job(disk=SMOKE_IMG, workload=wl,
                                  fio_path="fio", runtime_override=duration)
             if result:
                 with open(os.path.join(session_dir, f"fio_{wl['name']}.json"), "w") as f:
@@ -293,19 +289,16 @@ def cmd_debug(args):
                     summary = json.load(f)
                 ndev = len(summary.get("devices", {}))
                 print(f"  [OK] eBPF summary: ebpf_summary_{sid}.json ({ndev} device(s))")
-                # io_uring phases (S2Q/C2R) must actually be measured, not 0.
-                if ebpf_mode == "iouring":
-                    got = any(
-                        (op.get("phase_avg_us", {}).get(k) or 0) > 0
-                        for dev in summary.get("devices", {}).values()
-                        for op in dev.get("ops", {}).values()
-                        for k in ("s2q", "c2r")
-                    )
-                    if got:
-                        print("  [OK] eBPF iouring phases populated (S2Q/C2R)")
-                    else:
-                        failures.append(
-                            "eBPF iouring phases all zero (S2Q/C2R not measured)")
+                # Engine auto-detect: debug drives both libaio and io_uring
+                # workloads — both must show up in the summary's engines block.
+                engs = summary.get("engines", {})
+                active = sorted(n for n, e in engs.items() if e.get("active"))
+                if "libaio" in active and "iouring" in active:
+                    print(f"  [OK] eBPF engine auto-detect: {', '.join(active)}")
+                else:
+                    failures.append(
+                        f"eBPF engine auto-detect incomplete — observed "
+                        f"{active or 'none'}, expected libaio + iouring")
             except Exception as e:
                 failures.append(f"ebpf_summary JSON parse error: {e}")
 
@@ -339,13 +332,12 @@ def cmd_debug(args):
 def cmd_run(args):
     """Deprecated. Forwards to `monitor`."""
     print("[pmon] 'run' is deprecated; use 'monitor' instead.", file=sys.stderr)
-    # Map old --mode to new --ebpf-mode; old run implied eBPF on.
+    # old `run` implied eBPF on; engine is auto-detected now so --mode is ignored.
     args.duration = None
     args.tc = None
     args.quick = False
     args.label = "adhoc"
     args.ebpf = "on"
-    args.ebpf_mode = args.mode
     args.ebpf_interval = args.interval
     return cmd_monitor(args)
 
@@ -354,9 +346,8 @@ def cmd_run(args):
 
 def _add_ebpf_args(parser):
     parser.add_argument("--ebpf", choices=["auto", "on", "off"], default="auto",
-                        help="eBPF I/O tracer toggle (default auto)")
-    parser.add_argument("--ebpf-mode", choices=["generic", "libaio", "iouring"],
-                        default="libaio", help="eBPF mode (default libaio)")
+                        help="eBPF I/O tracer toggle (default auto). Engine "
+                             "(libaio/io_uring) and transport are auto-detected.")
     parser.add_argument("--ebpf-interval", type=float, default=1.0,
                         help="eBPF CSV polling interval seconds (default 1.0)")
 
@@ -408,9 +399,6 @@ def main(argv=None):
                           help="developer self-test: 4-phase fio + monitoring + all reports")
     pdbg.add_argument("--duration", type=int, default=3,
                       help="seconds per workload phase (default 3)")
-    pdbg.add_argument("--ebpf-mode", choices=["generic", "libaio", "iouring"],
-                      default="libaio",
-                      help="eBPF mode + matching fio ioengine (default libaio)")
     pdbg.set_defaults(func=cmd_debug)
 
     # Deprecated alias for backward compatibility.

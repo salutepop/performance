@@ -74,7 +74,6 @@ def _build_loader():
 
 class PcieContention(Scenario):
     name = "pcie_contention"
-    mode = "libaio"
     interval = 1.0
     load_seconds = 8     # GPU bounce duration. fio runtime과 비슷하게 잡음.
 

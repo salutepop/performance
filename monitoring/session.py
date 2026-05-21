@@ -9,12 +9,12 @@ is correctly opened and closed.
 Usage:
     # explicit collector list
     with Session(session_dir, sys_info,
-                 collectors=[SystemCollector(), EbpfIoCollector(mode="libaio")],
+                 collectors=[SystemCollector(), EbpfIoCollector()],
                  reports="all"):
         run_workload(...)
 
     # or let Session build the default list from ebpf_mode (backward compat)
-    with Session(session_dir, sys_info, ebpf_mode="libaio", reports="all"):
+    with Session(session_dir, sys_info, ebpf_mode="on", reports="all"):
         run_workload(...)
 
 On exit, collectors are stopped in reverse start order, then the configured
@@ -28,11 +28,12 @@ from .collectors.ebpf_io import EbpfIoCollector, ebpf_available
 from .collectors.system_collector import SystemCollector
 
 
-def resolve_ebpf_mode(toggle, mode):
-    """Resolve --ebpf {auto,on,off} + --ebpf-mode into a concrete mode string.
+def resolve_ebpf_mode(toggle):
+    """Resolve --ebpf {auto,on,off} into "on" or "off".
 
-    Returns: "off" | "generic" | "libaio" | "iouring".
-    Exits with rc=1 if toggle="on" but the binary is missing.
+    The tracer auto-detects engine (libaio/io_uring) and transport (pcie/rdma/
+    tcp) at runtime, so there is no engine mode to pick — only whether eBPF
+    tracing runs at all. Exits rc=1 if toggle="on" but the binary is missing.
     """
     if toggle == "off":
         return "off"
@@ -44,18 +45,21 @@ def resolve_ebpf_mode(toggle, mode):
                 file=sys.stderr,
             )
             sys.exit(1)
-        return mode
+        return "on"
     # auto
-    return mode if ebpf_available() else "off"
+    return "on" if ebpf_available() else "off"
 
 
 def default_collectors(ebpf_mode="off", ebpf_interval=1.0, monitor_interval=1.0,
                        verbose=True):
-    """Build the standard collector list: system always, eBPF when requested."""
+    """Build the standard collector list: system always, eBPF when requested.
+
+    ebpf_mode is "on"/"off" — the tracer auto-detects engine and transport.
+    """
     collectors = [SystemCollector(interval=monitor_interval)]
     if ebpf_mode and ebpf_mode != "off":
         collectors.append(
-            EbpfIoCollector(mode=ebpf_mode, interval=ebpf_interval, verbose=verbose)
+            EbpfIoCollector(interval=ebpf_interval, verbose=verbose)
         )
     return collectors
 
@@ -73,7 +77,8 @@ class Session:
         Explicit collector list. If None, built from ebpf_mode via
         default_collectors().
     ebpf_mode : str
-        Used only when collectors is None. "off" or generic/libaio/iouring.
+        Used only when collectors is None. "on" or "off" — the tracer
+        auto-detects engine/transport, so there is no engine mode to pick.
     ebpf_interval / monitor_interval : float
         Polling intervals, used only when collectors is None.
     reports : str

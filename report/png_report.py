@@ -301,7 +301,9 @@ def _save_correlation_chart(path, corr, title, phases=None):
 # S2Q/Q2D/D2C/C2R are common; R2U is libaio-only (io_uring reaps the CQ ring
 # in userspace with no syscall, so it stays 0 and is dropped from the bar).
 # The D2C disk region is split by the nvme_complete_rq tracepoint (CQ boundary)
-# into D2CQ (device round-trip) + CQ2C (block completion), both orange family.
+# into D2CQ + CQ2C (block completion), both orange family. D2CQ is the device
+# round-trip for local PCIe NVMe; for NVMe-oF (rdma/tcp/loop) it is the whole
+# transport+remote round-trip — the per-device [transport] tag says which.
 # "d2c" is the fallback single segment when nvme_complete_rq didn't fire (so no
 # time is ever lost from the bar). Zero-sum segments are skipped by the chart.
 _PHASE_ORDER = ["s2q", "q2d", "d2cq", "cq2c", "d2c", "c2r", "r2u"]
@@ -309,7 +311,7 @@ _PHASE_ORDER = ["s2q", "q2d", "d2cq", "cq2c", "d2c", "c2r", "r2u"]
 _PHASE_LABELS = {
     "s2q":  "1. S2Q  submit -> block queue",
     "q2d":  "2. Q2D  block queue -> dispatch",
-    "d2cq": "3. D2CQ  dispatch -> device done (NVMe HW)",
+    "d2cq": "3. D2CQ  dispatch -> device/fabric done",
     "cq2c": "4. CQ2C  device done -> block complete",
     "d2c":  "3+4. D2C  device + completion (unsplit)",
     "c2r":  "5. C2R  block complete -> engine ready (CQE/aio)",
@@ -337,12 +339,23 @@ def _load_ebpf_summary(session_dir, sid):
         return None
 
 
+def _dev_tag(dev, dd):
+    """Device label with its auto-detected transport, e.g. 'nvme0n1 [pcie]'.
+
+    transport is resolved by the collector at trace time (sysfs) and carried
+    in ebpf_summary — it tells the reader whether D2CQ is a local device
+    round-trip (pcie) or a fabric/transport round-trip (rdma/tcp/loop)."""
+    tp = (dd.get("transport") or "").strip()
+    return f"{dev} [{tp}]" if tp else dev
+
+
 def _ebpf_rows(summary, field):
     """Flatten summary -> [(label, value), ...] over every device/op."""
     rows = []
     for dev, dd in summary.get("devices", {}).items():
+        tag = _dev_tag(dev, dd)
         for op, od in dd.get("ops", {}).items():
-            rows.append((f"{dev}  {op}", od.get(field)))
+            rows.append((f"{tag}  {op}", od.get(field)))
     return rows
 
 
@@ -350,8 +363,9 @@ def _ebpf_rows_full(summary):
     """Flatten summary -> [(label, op_dict), ...] over every device/op."""
     rows = []
     for dev, dd in summary.get("devices", {}).items():
+        tag = _dev_tag(dev, dd)
         for op, od in dd.get("ops", {}).items():
-            rows.append((f"{dev}  {op}", od))
+            rows.append((f"{tag}  {op}", od))
     return rows
 
 
@@ -419,7 +433,7 @@ def _save_ebpf_qd_chart(path, summary):
     for dev, dd in summary.get("devices", {}).items():
         h = dd.get("qd_hist") or []
         if h and sum(h) > 0:
-            series.append((dev, h))
+            series.append((_dev_tag(dev, dd), h))
     if not series:
         return False
     nb = max(len(h) for _, h in series)
@@ -434,7 +448,8 @@ def _save_ebpf_qd_chart(path, summary):
     width = 0.8 / len(series)
     for i, (dev, h) in enumerate(series):
         xs = [b + i * width for b in range(nb)]
-        ax.bar(xs, h[:nb], width=width, color=_PALETTE[i % len(_PALETTE)], label=dev)
+        ax.bar(xs, h[:nb], width=width, color=_PALETTE[i % len(_PALETTE)],
+               label=dev)
     ax.set_xlabel("device queue depth (in-flight I/O at issue; last bucket = >=63)")
     ax.set_ylabel("I/O count")
     ax.set_title("eBPF device queue-depth distribution")

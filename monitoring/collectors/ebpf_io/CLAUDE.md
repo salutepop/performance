@@ -28,6 +28,7 @@ I/O 한 건의 전체 시간을 경계 지점으로 잘라 페이즈별로 측�
 ```
 
 - 경계 **CQ** = `nvme_complete_rq` (NVMe Completion Queue 엔트리 처리 시점). **D2C = D2CQ + CQ2C** — nvme_complete_rq tracepoint가 있을 때만 분리되고, 없으면 D2C 단일 구간으로 fallback.
+- **D2CQ의 의미는 transport에 따라 다르다.** `nvme_complete_rq`는 NVMe 코어 공통 tracepoint라 PCIe·rdma·tcp·loop 모두에서 발생한다 — 단 로컬 PCIe에선 D2CQ가 "디바이스 왕복(컨트롤러+미디어)", NVMe-oF(rdma/tcp/loop)에선 "transport+원격 타깃 왕복"(host가 내부를 분해 불가)이다. transport는 추적 시점에 sysfs(`/sys/block/<dev>/device/transport`)에서 자동 판별돼 `ebpf_summary`의 디바이스별 `transport` 필드로 실린다 (collector `resolve_transport()`). 리포트는 이 값으로 디바이스에 `[pcie]`/`[rdma]` 등을 태그한다.
 
 **모드 없음 — 엔진 자동탐지.** 블록 계층(Q2D/D2C) + libaio(`io_submit`/`io_getevents` syscall tracepoint, `aio_complete` kprobe) + io_uring(`io_uring_submit_req`/`io_uring_complete` tracepoint)을 **항상 동시에 attach**한다. I/O별 엔진은 어느 submit/완료 경로가 fire했는지로 판별된다 — 사전 지정(`-m`) 없음.
 

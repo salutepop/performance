@@ -142,6 +142,20 @@ def resolve_dev_name(dev):
     return get_real_dev_name(dev.get("dev_name", ""))
 
 
+def resolve_transport(devname):
+    """디바이스의 NVMe transport를 sysfs에서 즉석 판별 (pcie/rdma/tcp/loop).
+
+    추적 시점에 `/sys/block/<dev>/device/transport`를 읽는다 — 사전 지정 없이
+    어느 디바이스가 로컬 PCIe인지 NVMe-oF(rdma/tcp/loop)인지 자동 판별. NVMe가
+    아니거나 판별 불가면 빈 문자열. (멀티패스 path device 이름으로도 동작 —
+    `/sys/block/nvmeXcYnZ/device`가 컨트롤러를 가리킨다.)"""
+    try:
+        with open(f"/sys/block/{devname}/device/transport") as f:
+            return f.read().strip()
+    except Exception:
+        return ""
+
+
 def save_csv_buffers():
     global csv_buffers
     if not csv_buffers:
@@ -522,7 +536,9 @@ def print_final_summary(raw_json, effective_duration):
             bpf_total_cnt = sum(op["total_count"] for op in ops.values())
             if bpf_total_cnt > 0 and bpf_total_cnt > (total_sys_ios * 0.05):
                 real_name = resolve_dev_name(dev)
-                print(f" Target Device: {dev['dev_name']} [{real_name}]")
+                tp = resolve_transport(real_name)
+                print(f" Target Device: {dev['dev_name']} "
+                      f"[{real_name}{', ' + tp if tp else ''}]")
                 sqcq = dev.get("sqcq", {}) or {}
                 _same = sqcq.get("same", 0)
                 _diff = sqcq.get("diff", 0)
@@ -670,7 +686,8 @@ def build_summary(bpf_data, duration):
         if not _is_monitored_dev(real):
             continue
         sqcq = dev.get("sqcq", {}) or {}
-        dev_out = {"sqcq": {"same": sqcq.get("same", 0), "diff": sqcq.get("diff", 0)},
+        dev_out = {"transport": resolve_transport(real),
+                   "sqcq": {"same": sqcq.get("same", 0), "diff": sqcq.get("diff", 0)},
                    "qd_hist": list(dev.get("qd_hist", [])),
                    "ops": {}}
         for op, st in dev.get("operations", {}).items():

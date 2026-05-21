@@ -20,6 +20,16 @@ enum io_req_type {
 #define LBA_BUCKETS 128   // 0..LBA_BUCKETS-1 (각 bucket = capacity_sectors / LBA_BUCKETS)
 #define LAT_HIST_BUCKETS 32   // log2(ns) buckets: 0=[1,2)ns ... 30=~1s. clamp to 31.
 #define QD_HIST_BUCKETS 64    // device queue-depth histogram: bucket = min(total in-flight, 63)
+#define DISK_NAME_LEN 32      // 커널 gendisk.disk_name 길이
+
+/*
+ * 디바이스의 커널 disk_name (gendisk.disk_name). block 계층 tracepoint가 보는
+ * gendisk에서 BPF가 직접 읽어 보고한다 — NVMe 멀티패스의 hidden path device
+ * (nvmeXcYnZ)처럼 /sys/dev/block 엔트리가 없는 디바이스도 실명으로 식별된다.
+ */
+struct dev_name {
+    char name[DISK_NAME_LEN];
+};
 
 struct lat_stats {
     unsigned long long total;

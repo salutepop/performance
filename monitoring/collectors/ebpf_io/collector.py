@@ -129,6 +129,19 @@ def get_real_dev_name(dev_id_str):
     return dev_id_str.replace("(", "_").replace(")", "_").replace(":", "_")
 
 
+def resolve_dev_name(dev):
+    """JSON device 객체 → 표시용 디바이스명.
+
+    BPF가 gendisk에서 직접 캡처한 `disk_name`을 우선 쓴다 — NVMe 멀티패스의
+    hidden path device(nvmeXcYnZ)처럼 /sys/dev/block 엔트리가 없는 디바이스도
+    실명으로 식별된다. disk_name이 비어 있으면(구버전 io_trace) dev(maj:min) →
+    /sys/dev/block realpath 해석으로 fallback."""
+    name = (dev.get("disk_name") or "").strip()
+    if name:
+        return name
+    return get_real_dev_name(dev.get("dev_name", ""))
+
+
 def save_csv_buffers():
     global csv_buffers
     if not csv_buffers:
@@ -219,8 +232,7 @@ def parse_and_store_metrics(json_str):
             }
 
         for dev in bpf_data.get("devices", []):
-            dev_name_raw = dev["dev_name"]
-            real_name = get_real_dev_name(dev_name_raw)
+            real_name = resolve_dev_name(dev)
             if not _is_monitored_dev(real_name):
                 continue  # loop/ram/dm-/md 등 가상 디바이스 제외
 
@@ -495,7 +507,7 @@ def print_final_summary(raw_json, effective_duration):
 
         # loop/ram/dm-/md 등 가상 디바이스 제외하고 비율 계산
         monitored_devs = [d for d in bpf_data["devices"]
-                          if _is_monitored_dev(get_real_dev_name(d["dev_name"]))]
+                          if _is_monitored_dev(resolve_dev_name(d))]
         total_sys_ios = sum(
             sum(op["total_count"] for op in dev["operations"].values())
             for dev in monitored_devs
@@ -509,7 +521,7 @@ def print_final_summary(raw_json, effective_duration):
             ops = dev["operations"]
             bpf_total_cnt = sum(op["total_count"] for op in ops.values())
             if bpf_total_cnt > 0 and bpf_total_cnt > (total_sys_ios * 0.05):
-                real_name = get_real_dev_name(dev["dev_name"])
+                real_name = resolve_dev_name(dev)
                 print(f" Target Device: {dev['dev_name']} [{real_name}]")
                 sqcq = dev.get("sqcq", {}) or {}
                 _same = sqcq.get("same", 0)
@@ -654,7 +666,7 @@ def build_summary(bpf_data, duration):
            "sqcq_matrix": bpf_data.get("sqcq_matrix", [])}
 
     for dev in bpf_data.get("devices", []):
-        real = get_real_dev_name(dev["dev_name"])
+        real = resolve_dev_name(dev)
         if not _is_monitored_dev(real):
             continue
         sqcq = dev.get("sqcq", {}) or {}

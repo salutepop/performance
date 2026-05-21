@@ -82,7 +82,8 @@ Maps (전부 `io_trace.bpf.c`의 `SEC(".maps")`에서 선언):
 | `iocb_comp_start` | HASH | `iocb*` | `comp_ctx` | rq_complete 시각 (C2R 시작점, libaio·io_uring 공유) |
 | `engine_stats_map` | ARRAY[ENG_MAX] | `eng_type` (0=libaio,1=iouring) | `engine_stats` | 엔진 페이즈(S2Q/C2R/R2U) 엔진별 누적 |
 | `scratch_stats` | PERCPU_ARRAY[1] | 0 | `io_stats` | 0-초기화용 임시 버퍼 |
-| `dev_capacity_map` | HASH | `dev_id` | `u64 sectors` | LBA bucket 계산용 (디바이스 용량) |
+| `dev_capacity_map` | HASH | `dev_id` | `u64 sectors` | LBA bucket 계산용 (디바이스 용량). `block_rq_issue`가 `gendisk.part0->bd_nr_sectors`에서 채움 (+ io_trace.c가 `/sys/dev/block` 스캔으로 보강) |
+| `dev_name_map` | HASH | `dev_id` | `dev_name` (char[32]) | 커널 `disk_name`. `block_rq_issue`가 처음 본 디바이스에 1회 캡처 — hidden 멀티패스 device도 식별 |
 
 핵심 데이터 구조 (`io_trace.h`):
 - `io_req_type`: READ=0, READ_AHEAD=1, WRITE=2, FLUSH=3, DISCARD=4 — 이 순서는 C와 Python 양쪽이 의존한다.
@@ -112,6 +113,7 @@ JSON 스키마 (이게 layer 사이 contract):
   "devices": [
     {
       "dev_name": "dev(259:0)",
+      "disk_name": "nvme0n1",          // 커널 gendisk.disk_name (BPF가 캡처)
       "operations": {
         "read"|"write"|"read_ahead"|"flush"|"discard": {
           "total_count": <u64>, "total_bytes": <u64>,
@@ -153,7 +155,7 @@ JSON 스키마 (이게 layer 사이 contract):
 5. 매 JSON마다 `parse_and_store_metrics()`로 누적값을 **delta**로 변환해 IOPS/BW/avg-lat 계산, 5초마다 `save_csv_buffers()`로 flush.
 6. 종료 시 마지막 JSON으로 `print_final_summary()` — phase × {Total, READ, WRITE, READ-AHEAD, FLUSH}의 Call/Sum(ms)/Avg(us) 테이블 출력. operation별 `Q2D pct`, `D2C pct` 라인에 p50/p95/p99/p99.9 (`compute_percentiles(hist)`가 log2 bucket을 선형 보간하여 us로 변환).
 
-CSV 출력 위치: `{output_dir}/{real_dev_name}_{SESSION_ID}.csv`. `Session`이 구동할 땐 `--output-dir`로 세션 디렉터리가 주입되고, standalone 실행 시엔 `results/ebpf_standalone/`. 디바이스 이름은 `dev(maj:min)` → `/sys/dev/block/maj:min` realpath로 `nvme0n1` 같은 실명으로 변환.
+CSV 출력 위치: `{output_dir}/{real_dev_name}_{SESSION_ID}.csv`. `Session`이 구동할 땐 `--output-dir`로 세션 디렉터리가 주입되고, standalone 실행 시엔 `results/ebpf_standalone/`. 디바이스 이름은 `resolve_dev_name()`이 결정 — JSON의 `disk_name`(BPF가 gendisk에서 캡처한 커널 실명)을 우선 쓰고, 없으면 `dev(maj:min)` → `/sys/dev/block` realpath로 fallback. NVMe 멀티패스의 hidden path device(`nvmeXcYnZ`)는 `/sys/dev/block` 엔트리가 없어 과거엔 `dev_259_3`로 떨어졌으나, 이제 `disk_name`으로 정상 식별된다 (path↔namespace head 정규화·집계는 별도 작업).
 
 CSV 컬럼: timestamp, operation, iops_interval, bandwidth_mb_s_interval, q2d_avg_us_interval, d2c_avg_us_interval, **s2q_avg_us_interval, c2r_avg_us_interval, r2u_avg_us_interval** (S2Q/C2R은 양 엔진, R2U는 libaio에서만 0 이상 값), **sq_cq_diff_ratio** (디바이스 단위, 같은 인터벌의 모든 op row에 동일), **d2c_p50_us, d2c_p99_us, q2d_p99_us** (인터벌 히스토그램 delta에서 계산한 percentile — `prev_hists` 글로벌 dict로 추적), current_qd, max_qd, total_io_count, total_bytes, q2d/d2c {total,min,max}_ns, size_hist_{4k,32k,128k,large}, lba_0 … lba_63. s2q는 글로벌(같은 인터벌 내 모든 행 동일). c2r/r2u는 op별이며 read_ahead/discard는 완료측 경로 없어 0.
 

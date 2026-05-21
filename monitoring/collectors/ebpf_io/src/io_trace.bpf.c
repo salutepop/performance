@@ -143,6 +143,15 @@ struct {
     __type(value, u64);
 } dev_capacity_map SEC(".maps");
 
+/* dev_id -> 커널 disk_name. block_rq_issue에서 처음 본 디바이스에 1회 채운다.
+ * /sys/dev/block 엔트리가 없는 멀티패스 hidden path device도 식별 가능. */
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 256);
+    __type(key, u32);
+    __type(value, struct dev_name);
+} dev_name_map SEC(".maps");
+
 /*
  * QD 글로벌 카운터: cross-CPU atomic이 필요해 PERCPU가 아닌 일반 HASH를 사용.
  * key=dev_id, value=struct dev_qd ({current_qd[5], max_qd[5]}).
@@ -417,6 +426,20 @@ int BPF_PROG(block_rq_issue, struct request *rq) {
     struct gendisk *disk = BPF_CORE_READ(rq, q, disk);
     if (disk) {
         u32 dev = (BPF_CORE_READ(disk, major) << 20) | BPF_CORE_READ(disk, first_minor);
+
+        /* 처음 본 디바이스면 커널 disk_name + 용량(sectors)을 캡처한다. block
+         * 계층이 보는 gendisk에서 직접 읽으므로, /sys/dev/block 엔트리가 없는
+         * 멀티패스 hidden path device(nvmeXcYnZ)도 실명·LBA가 정상 동작한다. */
+        if (!bpf_map_lookup_elem(&dev_name_map, &dev)) {
+            struct dev_name dn = {};
+            bpf_probe_read_kernel_str(
+                dn.name, sizeof(dn.name),
+                (void *)disk + bpf_core_field_offset(struct gendisk, disk_name));
+            bpf_map_update_elem(&dev_name_map, &dev, &dn, BPF_NOEXIST);
+            u64 cap = BPF_CORE_READ(disk, part0, bd_nr_sectors);
+            if (cap > 0)
+                bpf_map_update_elem(&dev_capacity_map, &dev, &cap, BPF_NOEXIST);
+        }
 
         u64 cmd_flags = BPF_CORE_READ(rq, cmd_flags);
         u32 op = cmd_flags & 255;

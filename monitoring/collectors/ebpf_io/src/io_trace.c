@@ -68,6 +68,7 @@ static void print_engine_json(const char *name, const struct engine_stats *e, in
 
 void print_json_report(struct bpf_map *device_stats_map, struct bpf_map *engine_stats_map,
                        struct bpf_map *device_qd_map, struct bpf_map *cpu_matrix_map,
+                       struct bpf_map *dev_name_map,
                        struct io_stats *stats_array, int nr_cpus) {
     const char *type_names[IO_MAX_TYPES] = {"read", "read_ahead", "write", "flush", "discard"};
 
@@ -143,6 +144,13 @@ void print_json_report(struct bpf_map *device_stats_map, struct bpf_map *engine_
 
                 printf("    {\n");
                 printf("      \"dev_name\": \"dev(%u:%u)\",\n", major, minor);
+                /* 커널 disk_name — BPF가 gendisk에서 직접 캡처. 멀티패스 hidden
+                 * device 등 /sys/dev/block에 없는 디바이스도 실명으로 나온다. */
+                struct dev_name dn = {0};
+                if (dev_name_map)
+                    bpf_map_lookup_elem(bpf_map__fd(dev_name_map), &next_key, &dn);
+                dn.name[DISK_NAME_LEN - 1] = '\0';
+                printf("      \"disk_name\": \"%s\",\n", dn.name);
                 printf("      \"operations\": {\n");
 
                 int first_op = 1;
@@ -258,6 +266,7 @@ int main(int argc, char **argv) {
     struct bpf_map *engine_stats_map;
     struct bpf_map *device_qd_map;
     struct bpf_map *cpu_matrix_map;
+    struct bpf_map *dev_name_map;
 
     double opt_interval = 1.0;   // 초 단위, sub-second (예: 0.5) 허용
 
@@ -328,6 +337,7 @@ int main(int argc, char **argv) {
     engine_stats_map = bpf_object__find_map_by_name(skel->obj, "engine_stats_map");
     device_qd_map = bpf_object__find_map_by_name(skel->obj, "device_qd");
     cpu_matrix_map = bpf_object__find_map_by_name(skel->obj, "cpu_matrix");
+    dev_name_map = bpf_object__find_map_by_name(skel->obj, "dev_name_map");
 
     printf("[PID: %d] io_trace is running (auto-detect: block + libaio + io_uring)"
            " | Interval: %.3fs\n", getpid(), opt_interval);
@@ -368,7 +378,8 @@ int main(int argc, char **argv) {
         double now_s = ts_now.tv_sec + ts_now.tv_nsec / 1e9;
         if (now_s + 1e-9 >= next_report) {
             print_json_report(device_stats_map, engine_stats_map,
-                              device_qd_map, cpu_matrix_map, stats_array, nr_cpus);
+                              device_qd_map, cpu_matrix_map, dev_name_map,
+                              stats_array, nr_cpus);
             next_report += opt_interval;
             /* print이 한 인터벌 넘게 걸려 deadline이 과거가 됐으면, 밀린 만큼
              * 리포트를 몰아 찍지 말고 현재 시각 기준으로 다음 격자에 재동기화. */
@@ -378,7 +389,8 @@ int main(int argc, char **argv) {
     }
 
     print_json_report(device_stats_map, engine_stats_map,
-                      device_qd_map, cpu_matrix_map, stats_array, nr_cpus);
+                      device_qd_map, cpu_matrix_map, dev_name_map,
+                      stats_array, nr_cpus);
 
     free(stats_array);
 cleanup:

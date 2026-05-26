@@ -186,6 +186,79 @@ _DEBUG_WORKLOADS = [
 ]
 
 
+def _mounts_overlapping(target):
+    """target과 겹치는 mount들의 [(dev, mountpoint)] — raw block device 안전 가드.
+
+    탐지: target 자체가 마운트됐거나, target이 다른 마운트된 디바이스의 부모이거나
+    (e.g. /dev/nvme0n1 ⊃ /dev/nvme0n1p2), 그 반대(파티션 → 부모 디스크). nvme의
+    'p<N>' 와 sd-스타일 '<N>' 파티션 명명 둘 다 처리.
+    """
+    if not target.startswith("/dev/"):
+        return []
+
+    def _is_part_of(child, parent):
+        if not child.startswith(parent) or child == parent:
+            return False
+        tail = child[len(parent):]
+        return tail.startswith("p") or (tail and tail[0].isdigit())
+
+    target = os.path.realpath(target)
+    hits = []
+    try:
+        with open("/proc/mounts") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) < 2 or not parts[0].startswith("/dev/"):
+                    continue
+                dev = os.path.realpath(parts[0])
+                if dev == target or _is_part_of(dev, target) or _is_part_of(target, dev):
+                    hits.append((parts[0], parts[1]))
+    except OSError:
+        pass
+    return hits
+
+
+def _resolve_debug_target(target_arg):
+    """--target 인자 해석 → (path, kind, created_file). kind: 'raw' | 'file'.
+
+    None 이면 기본 SMOKE_IMG(1 GiB regular file, 없으면 생성). /dev/ 시작이면
+    raw block device — 마운트된 디바이스면 안전상 거부. 그 외는 일반 파일로
+    취급, 없으면 1 GiB로 생성. SystemExit on safety violation."""
+    if not target_arg:
+        if not os.path.isfile(SMOKE_IMG):
+            os.makedirs(os.path.dirname(SMOKE_IMG), exist_ok=True)
+            with open(SMOKE_IMG, "wb") as f:
+                f.truncate(1 * 1024 * 1024 * 1024)
+            print(f"[debug] created test file {SMOKE_IMG} (1 GiB)")
+        return SMOKE_IMG, "file"
+
+    if target_arg.startswith("/dev/"):
+        if not os.path.exists(target_arg):
+            print(f"[debug] target {target_arg} does not exist", file=sys.stderr)
+            raise SystemExit(2)
+        mounts = _mounts_overlapping(target_arg)
+        if mounts:
+            print(f"[debug] REFUSING to run on {target_arg} — it overlaps with "
+                  f"mounted filesystem(s):", file=sys.stderr)
+            for dev, mnt in mounts:
+                print(f"        {dev} → {mnt}", file=sys.stderr)
+            print(f"[debug] writing here would destroy data. Pick an unmounted "
+                  f"device or unmount first.", file=sys.stderr)
+            raise SystemExit(2)
+        return target_arg, "raw"
+
+    # regular file path (e.g. /mnt/test/x.img) — create if missing
+    if not os.path.isfile(target_arg):
+        parent = os.path.dirname(target_arg) or "."
+        if not os.path.isdir(parent):
+            print(f"[debug] parent dir does not exist: {parent}", file=sys.stderr)
+            raise SystemExit(2)
+        with open(target_arg, "wb") as f:
+            f.truncate(1 * 1024 * 1024 * 1024)
+        print(f"[debug] created test file {target_arg} (1 GiB)")
+    return target_arg, "file"
+
+
 def cmd_debug(args):
     """Developer self-test: 4-phase fio workload + monitoring + every report.
 
@@ -197,14 +270,7 @@ def cmd_debug(args):
     from workloads.fio_runner import run_fio_job
 
     duration = max(1, int(args.duration))
-
-    # Ensure the test file exists (user-owned 1 GiB, so a sudo fio run won't
-    # leave a root-owned file behind).
-    if not os.path.isfile(SMOKE_IMG):
-        os.makedirs(os.path.dirname(SMOKE_IMG), exist_ok=True)
-        with open(SMOKE_IMG, "wb") as f:
-            f.truncate(1 * 1024 * 1024 * 1024)
-        print(f"[debug] created test file {SMOKE_IMG} (1 GiB)")
+    target, kind = _resolve_debug_target(args.target)
 
     sys_info = _discover_sys_info()
     session_dir = _build_session_dir("debug")
@@ -212,6 +278,7 @@ def cmd_debug(args):
     ebpf_mode = resolve_ebpf_mode("auto")
 
     print(f"[debug] session -> {session_dir}")
+    print(f"[debug] target  -> {target} ({kind})")
     print(f"[debug] config: 4 workloads x {duration}s (2 libaio + 2 io_uring), "
           f"ebpf={ebpf_mode}, reports=all")
 
@@ -219,7 +286,7 @@ def cmd_debug(args):
     with Session(session_dir, sys_info, ebpf_mode=ebpf_mode,
                  ebpf_interval=1.0, reports="all"):
         for wl in _DEBUG_WORKLOADS:
-            result = run_fio_job(disk=SMOKE_IMG, workload=wl,
+            result = run_fio_job(disk=target, workload=wl,
                                  fio_path="fio", runtime_override=duration)
             if result:
                 with open(os.path.join(session_dir, f"fio_{wl['name']}.json"), "w") as f:
@@ -399,6 +466,10 @@ def main(argv=None):
                           help="developer self-test: 4-phase fio + monitoring + all reports")
     pdbg.add_argument("--duration", type=int, default=3,
                       help="seconds per workload phase (default 3)")
+    pdbg.add_argument("--target", default=None,
+                      help="override fio target: raw block dev (/dev/nvmeXn1, "
+                           "mounted devices refused) or file path. "
+                           "default: .smoke/smoke.img on root fs")
     pdbg.set_defaults(func=cmd_debug)
 
     # Deprecated alias for backward compatibility.

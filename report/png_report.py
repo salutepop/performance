@@ -660,9 +660,9 @@ def _save_device_timeline(path, dname, labels, series, phases=None):
     """One figure per device — IOPS / Bandwidth / D2C / Q2D / QD over a shared
     time axis. The two latency rows use a log y scale (latency is heavy-tailed,
     so a single outlier interval would flatten a linear axis) and plot each
-    active op's interval avg (solid) plus p99 (dashed). The QD row plots the
-    instantaneous queue depth at interval end (solid) and the peak QD seen in
-    the interval (dashed), per op."""
+    active op's interval avg (solid) plus p99 (dashed). The QD row stacks the
+    per-op current queue depth so the stack height = total in-flight on the
+    device at interval end."""
     n = len(labels)
     if n == 0 or not series:
         return False
@@ -710,25 +710,25 @@ def _save_device_timeline(path, dname, labels, series, phases=None):
     ax_d2c.set_ylabel("D2C latency\n[us · log]", fontsize=8)
     ax_q2d.set_ylabel("Q2D latency\n[us · log]", fontsize=8)
 
-    # QD row — only ops whose max_qd hits at least 1 in any interval. Plot
-    # current_qd (solid) and max_qd (dashed) per op to show how the device
-    # queue actually filled vs the per-interval peak.
-    qd_active = [op for op, s in series.items()
-                 if any((v or 0) > 0 for v in (s.get("max_qd") or []))]
-    drew_qd = False
-    for op in qd_active:
-        s = series[op]
-        c = _OP_COLORS.get(op)
-        cur = _nan(s.get("current_qd"))
-        mx = _nan(s.get("max_qd"))
-        if any(not np.isnan(v) for v in cur):
-            ax_qd.plot(x, cur, color=c, linewidth=1.3, marker=".",
-                       markersize=3, label=f"{op} current")
-            drew_qd = True
-        if any(not np.isnan(v) for v in mx):
-            ax_qd.plot(x, mx, color=c, linewidth=1.0, linestyle="--",
-                       label=f"{op} peak")
-    if not drew_qd:
+    # QD row — stacked area of per-op current_qd. The stack height shows the
+    # device's total in-flight at interval end; bands show each op's share.
+    # stackplot can't take NaN, so missing intervals collapse to 0.
+    def _zeros(vals):
+        return [(v if isinstance(v, (int, float)) else 0.0) for v in (vals or [])]
+
+    qd_active = [op for op in series
+                 if any((v or 0) > 0 for v in (series[op].get("current_qd") or []))]
+    if qd_active:
+        stack = [_zeros(series[op].get("current_qd")) for op in qd_active]
+        colors = [_OP_COLORS.get(op, None) for op in qd_active]
+        ax_qd.stackplot(x, *stack, labels=qd_active, colors=colors,
+                        alpha=0.85, linewidth=0)
+        # total line on top (sum of all ops) — same as stack top, but a thin
+        # outline makes the peak readable when bands are similar in color.
+        totals = [sum(col) for col in zip(*stack)]
+        ax_qd.plot(x, totals, color="#222", linewidth=0.8, alpha=0.6,
+                   label="total")
+    else:
         ax_qd.text(0.5, 0.5, "no QD samples", ha="center", va="center",
                    transform=ax_qd.transAxes, color="#999")
     ax_qd.set_ylabel("Queue depth\n[in-flight]", fontsize=8)
@@ -743,7 +743,7 @@ def _save_device_timeline(path, dname, labels, series, phases=None):
     ax_qd.set_xlabel("time")
     _xtick_thin(ax_qd, labels)
     fig.suptitle(f"{dname} — I/O timeline  (IOPS · Bandwidth · D2C · Q2D · QD, "
-                 f"latency: solid avg / dashed p99, QD: solid current / dashed peak)",
+                 f"latency: solid avg / dashed p99, QD: stacked per-op current)",
                  y=0.997)
     fig.subplots_adjust(top=0.96, bottom=0.06, left=0.09, right=0.97, hspace=0.16)
     fig.savefig(path)

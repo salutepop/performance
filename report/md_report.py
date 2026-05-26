@@ -288,17 +288,19 @@ def _device_chart_block(header, rows):
     out.append("```")
     out.append("")
 
-    # QD timeseries (per-op current_qd) — only ops that actually filled the queue
+    # QD timeseries — per-op current_qd plus the device total (sum across ops)
+    # so the same numbers you see stacked in the PNG are readable here too.
     qd_ops = [(op, _) for op, _ in totals
-              if any((v or 0) > 0 for v in (series.get(op, {}).get("max_qd") or []))]
+              if any((v or 0) > 0 for v in (series.get(op, {}).get("current_qd") or []))]
     if qd_ops:
         out.extend(["**Queue depth over time (sparkline = current QD)**", "", "```"])
+        op_curs = {op: (series.get(op, {}).get("current_qd") or []) for op, _ in qd_ops}
         for op, _ in qd_ops:
-            cur = series.get(op, {}).get("current_qd") or []
-            mx = series.get(op, {}).get("max_qd") or []
-            # peak across the run as a single-number anchor
-            peak = max((v for v in mx if isinstance(v, (int, float))), default=0)
-            out.append(f"{_spark_line(op, cur, 'QD')}  (peak {peak:.0f})")
+            out.append(_spark_line(op, op_curs[op], "QD"))
+        # total = per-interval sum across ops (zip stops at shortest, which is fine
+        # since per-op series are all reindexed onto the same labels timeline)
+        total_cur = [sum((v or 0) for v in col) for col in zip(*op_curs.values())]
+        out.append(_spark_line("total", total_cur, "QD"))
         out.append("```")
         out.append("")
     return out

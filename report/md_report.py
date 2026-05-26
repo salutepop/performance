@@ -274,17 +274,33 @@ def _device_chart_block(header, rows):
         return []
 
     spark_w = _spark_width(len(labels))
-    out = ["**Per-op activity (sparkline = IOPS over time)**", "", "```"]
     lw = max(len(op) for op, _ in totals)
-    for op, _ in totals:
-        iops = series.get(op, {}).get("iops") or []
-        ds = _downsample(iops, spark_w)
+
+    def _spark_line(op, values, unit):
+        ds = _downsample(values, spark_w)
         nums = [v for v in ds if isinstance(v, (int, float))]
         lo, hi = (min(nums), max(nums)) if nums else (0, 0)
-        spark = ac.sparkline(ds)
-        out.append(f"{op:<{lw}} │{spark:<{spark_w}}│ {_fmt_num(lo)} → {_fmt_num(hi)} IOPS")
+        return f"{op:<{lw}} │{ac.sparkline(ds):<{spark_w}}│ {_fmt_num(lo)} → {_fmt_num(hi)} {unit}"
+
+    out = ["**Per-op activity (sparkline = IOPS over time)**", "", "```"]
+    for op, _ in totals:
+        out.append(_spark_line(op, series.get(op, {}).get("iops") or [], "IOPS"))
     out.append("```")
     out.append("")
+
+    # QD timeseries (per-op current_qd) — only ops that actually filled the queue
+    qd_ops = [(op, _) for op, _ in totals
+              if any((v or 0) > 0 for v in (series.get(op, {}).get("max_qd") or []))]
+    if qd_ops:
+        out.extend(["**Queue depth over time (sparkline = current QD)**", "", "```"])
+        for op, _ in qd_ops:
+            cur = series.get(op, {}).get("current_qd") or []
+            mx = series.get(op, {}).get("max_qd") or []
+            # peak across the run as a single-number anchor
+            peak = max((v for v in mx if isinstance(v, (int, float))), default=0)
+            out.append(f"{_spark_line(op, cur, 'QD')}  (peak {peak:.0f})")
+        out.append("```")
+        out.append("")
     return out
 
 

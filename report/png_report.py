@@ -657,10 +657,12 @@ def _save_io_timeline(path, dname, labels, read_series, write_series,
 
 
 def _save_device_timeline(path, dname, labels, series, phases=None):
-    """One figure per device — IOPS / Bandwidth / D2C / Q2D over a shared time
-    axis. The two latency rows use a log y scale (latency is heavy-tailed, so a
-    single outlier interval would flatten a linear axis) and plot each active
-    op's interval avg (solid) plus p99 (dashed)."""
+    """One figure per device — IOPS / Bandwidth / D2C / Q2D / QD over a shared
+    time axis. The two latency rows use a log y scale (latency is heavy-tailed,
+    so a single outlier interval would flatten a linear axis) and plot each
+    active op's interval avg (solid) plus p99 (dashed). The QD row plots the
+    instantaneous queue depth at interval end (solid) and the peak QD seen in
+    the interval (dashed), per op."""
     n = len(labels)
     if n == 0 or not series:
         return False
@@ -669,8 +671,8 @@ def _save_device_timeline(path, dname, labels, series, phases=None):
     def _nan(vals):
         return [v if v is not None else np.nan for v in (vals or [])]
 
-    fig, (ax_iops, ax_bw, ax_d2c, ax_q2d) = plt.subplots(
-        4, 1, figsize=(11, 12), sharex=True)
+    fig, (ax_iops, ax_bw, ax_d2c, ax_q2d, ax_qd) = plt.subplots(
+        5, 1, figsize=(11, 14), sharex=True)
 
     # IOPS / Bandwidth — per-op lines (0 is meaningful here, so linear y)
     for op, s in series.items():
@@ -708,17 +710,42 @@ def _save_device_timeline(path, dname, labels, series, phases=None):
     ax_d2c.set_ylabel("D2C latency\n[us · log]", fontsize=8)
     ax_q2d.set_ylabel("Q2D latency\n[us · log]", fontsize=8)
 
-    for ax in (ax_iops, ax_bw, ax_d2c, ax_q2d):
+    # QD row — only ops whose max_qd hits at least 1 in any interval. Plot
+    # current_qd (solid) and max_qd (dashed) per op to show how the device
+    # queue actually filled vs the per-interval peak.
+    qd_active = [op for op, s in series.items()
+                 if any((v or 0) > 0 for v in (s.get("max_qd") or []))]
+    drew_qd = False
+    for op in qd_active:
+        s = series[op]
+        c = _OP_COLORS.get(op)
+        cur = _nan(s.get("current_qd"))
+        mx = _nan(s.get("max_qd"))
+        if any(not np.isnan(v) for v in cur):
+            ax_qd.plot(x, cur, color=c, linewidth=1.3, marker=".",
+                       markersize=3, label=f"{op} current")
+            drew_qd = True
+        if any(not np.isnan(v) for v in mx):
+            ax_qd.plot(x, mx, color=c, linewidth=1.0, linestyle="--",
+                       label=f"{op} peak")
+    if not drew_qd:
+        ax_qd.text(0.5, 0.5, "no QD samples", ha="center", va="center",
+                   transform=ax_qd.transAxes, color="#999")
+    ax_qd.set_ylabel("Queue depth\n[in-flight]", fontsize=8)
+    ax_qd.set_ylim(bottom=0)
+
+    for ax in (ax_iops, ax_bw, ax_d2c, ax_q2d, ax_qd):
         ax.grid(True, alpha=0.3)
         ax.set_xlim(-0.5, (n - 0.5) if n > 1 else 0.5)
         ax.legend(loc="upper right", fontsize=7, ncol=2, framealpha=0.85)
         _overlay_phases(ax, labels, phases, label=(ax is ax_iops))
 
-    ax_q2d.set_xlabel("time")
-    _xtick_thin(ax_q2d, labels)
-    fig.suptitle(f"{dname} — I/O timeline  (IOPS · Bandwidth · D2C · Q2D, "
-                 f"latency: solid avg / dashed p99)", y=0.997)
-    fig.subplots_adjust(top=0.95, bottom=0.07, left=0.09, right=0.97, hspace=0.16)
+    ax_qd.set_xlabel("time")
+    _xtick_thin(ax_qd, labels)
+    fig.suptitle(f"{dname} — I/O timeline  (IOPS · Bandwidth · D2C · Q2D · QD, "
+                 f"latency: solid avg / dashed p99, QD: solid current / dashed peak)",
+                 y=0.997)
+    fig.subplots_adjust(top=0.96, bottom=0.06, left=0.09, right=0.97, hspace=0.16)
     fig.savefig(path)
     plt.close(fig)
     return True
@@ -1029,7 +1056,7 @@ def build_report(session_dir, sid):
                     ["op", "total IO", "peak BW(MB/s)", "avg D2C(us)", "peak QD"],
                     ["l"] + ["r"] * 4))
                 lines.append("")
-            for fk, alt in [(f"{safe}_devtl", "I/O timeline (IOPS·BW·D2C·Q2D)"),
+            for fk, alt in [(f"{safe}_devtl", "I/O timeline (IOPS·BW·D2C·Q2D·QD)"),
                             (f"{safe}_iotime", "I/O size mix & LBA region")]:
                 if fk in fig_refs:
                     lines.append(f"![{alt}]({fig_refs[fk]})")

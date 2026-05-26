@@ -158,6 +158,8 @@ def _build_device_series(header, rows, timeline=None):
     p99_i = header.index("d2c_p99_us") if "d2c_p99_us" in header else -1
     q2d_i = header.index("q2d_avg_us_interval") if "q2d_avg_us_interval" in header else -1
     q2d_p99_i = header.index("q2d_p99_us") if "q2d_p99_us" in header else -1
+    cqd_i = header.index("current_qd") if "current_qd" in header else -1
+    mqd_i = header.index("max_qd") if "max_qd" in header else -1
 
     def _f(v):
         try:
@@ -182,6 +184,8 @@ def _build_device_series(header, rows, timeline=None):
             "p99":  _f(row[p99_i])  if 0 <= p99_i < len(row) else None,
             "q2d":     _f(row[q2d_i])     if 0 <= q2d_i < len(row) else None,
             "q2d_p99": _f(row[q2d_p99_i]) if 0 <= q2d_p99_i < len(row) else None,
+            "current_qd": _f(row[cqd_i]) if 0 <= cqd_i < len(row) else None,
+            "max_qd":     _f(row[mqd_i]) if 0 <= mqd_i < len(row) else None,
         }
     out = timeline if timeline is not None else labels
     series = {}
@@ -194,6 +198,8 @@ def _build_device_series(header, rows, timeline=None):
             "p99":  [by_ts.get(t, {}).get("p99")  for t in out],
             "q2d":     [by_ts.get(t, {}).get("q2d")     for t in out],
             "q2d_p99": [by_ts.get(t, {}).get("q2d_p99") for t in out],
+            "current_qd": [by_ts.get(t, {}).get("current_qd") for t in out],
+            "max_qd":     [by_ts.get(t, {}).get("max_qd")     for t in out],
         }
     return out, series
 

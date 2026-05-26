@@ -179,10 +179,12 @@ def _generate_reports(session_dir, session_id, fmt):
 # both I/O engines so engine auto-detection is self-tested:
 #   seq write/read -> libaio,  rand write/read -> io_uring.
 _DEBUG_WORKLOADS = [
-    {"name": "seq_write_128k", "rw": "write",     "bs": "128k", "iodepth": 32, "numjobs": 1, "size": "1G", "ioengine": "libaio"},
-    {"name": "seq_read_128k",  "rw": "read",      "bs": "128k", "iodepth": 32, "numjobs": 1, "size": "1G", "ioengine": "libaio"},
-    {"name": "rand_write_4k",  "rw": "randwrite", "bs": "4k",   "iodepth": 32, "numjobs": 8, "size": "1G", "ioengine": "io_uring"},
-    {"name": "rand_read_4k",   "rw": "randread",  "bs": "4k",   "iodepth": 32, "numjobs": 8, "size": "1G", "ioengine": "io_uring"},
+    # Seq large-block: bandwidth-bound → deep queue (QD), single job is enough.
+    # Random small-block: completion-CPU-bound → many jobs (NUMA cores), QD per-job kept moderate.
+    {"name": "seq_write_128k", "rw": "write",     "bs": "128k", "iodepth": 128, "numjobs": 1,  "size": "1G", "ioengine": "libaio"},
+    {"name": "seq_read_128k",  "rw": "read",      "bs": "128k", "iodepth": 128, "numjobs": 1,  "size": "1G", "ioengine": "libaio"},
+    {"name": "rand_write_4k",  "rw": "randwrite", "bs": "4k",   "iodepth": 32,  "numjobs": 16, "size": "1G", "ioengine": "io_uring"},
+    {"name": "rand_read_4k",   "rw": "randread",  "bs": "4k",   "iodepth": 32,  "numjobs": 16, "size": "1G", "ioengine": "io_uring"},
 ]
 
 

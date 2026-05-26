@@ -10,11 +10,14 @@ CLI:
 
 import argparse
 import glob
+import json
 import os
 import sys
 from datetime import datetime
 
-from .datasource import _discover_session, _load_topology, _load_csv
+from . import asciichart as ac
+from .datasource import (_build_device_series, _discover_session,
+                         _load_csv, _load_topology)
 
 
 def _col_index(header, name):
@@ -220,6 +223,125 @@ def _top_findings(sys_agg, dev_aggs):
     return findings
 
 
+def _spark_width(n, cap=80):
+    """sparkline 줄당 차지할 컬럼 수. 너무 길면 cap에 맞춰 다운샘플."""
+    return min(n, cap)
+
+
+def _downsample(values, target):
+    """길이 N 시퀀스를 target 길이로 평균 다운샘플. None은 평균에서 제외."""
+    n = len(values)
+    if n <= target or target <= 0:
+        return values
+    out = []
+    for i in range(target):
+        lo = i * n // target
+        hi = max(lo + 1, (i + 1) * n // target)
+        bucket = [v for v in values[lo:hi] if isinstance(v, (int, float))]
+        out.append(sum(bucket) / len(bucket) if bucket else None)
+    return out
+
+
+def _fmt_num(v):
+    """1234.5 → '1.2K', 1234567 → '1.2M' (sparkline 축 힌트용 압축 표기)."""
+    if v is None:
+        return "-"
+    a = abs(v)
+    if a >= 1e9:
+        return f"{v/1e9:.1f}G"
+    if a >= 1e6:
+        return f"{v/1e6:.1f}M"
+    if a >= 1e3:
+        return f"{v/1e3:.1f}K"
+    return f"{v:.1f}" if a < 100 else f"{v:.0f}"
+
+
+def _device_chart_block(header, rows):
+    """device CSV → ASCII 차트 블록(IOPS hbar + per-op sparkline). md 라인 리스트."""
+    labels, series = _build_device_series(header, rows)
+    if not series:
+        return []
+
+    # op별 총 IO(인터벌 IOPS의 합 = 총 I/O 카운트의 근사). 0이거나 None인 op는 제외.
+    totals = []
+    for op in ("read", "write", "read_ahead", "flush", "discard"):
+        s = series.get(op, {})
+        iops = s.get("iops") or []
+        total = sum(v for v in iops if isinstance(v, (int, float)))
+        if total > 0:
+            totals.append((op, total))
+    if not totals:
+        return []
+
+    spark_w = _spark_width(len(labels))
+    out = ["**Per-op activity (sparkline = IOPS over time)**", "", "```"]
+    lw = max(len(op) for op, _ in totals)
+    for op, _ in totals:
+        iops = series.get(op, {}).get("iops") or []
+        ds = _downsample(iops, spark_w)
+        nums = [v for v in ds if isinstance(v, (int, float))]
+        lo, hi = (min(nums), max(nums)) if nums else (0, 0)
+        spark = ac.sparkline(ds)
+        out.append(f"{op:<{lw}} │{spark:<{spark_w}}│ {_fmt_num(lo)} → {_fmt_num(hi)} IOPS")
+    out.append("```")
+    out.append("")
+    return out
+
+
+_PHASE_ORDER = ("s2q", "q2d", "d2c", "c2r", "r2u")
+_PHASE_DESC = {
+    "s2q": "submit→queue", "q2d": "queue→driver", "d2c": "driver→completion",
+    "c2r": "completion→IRQ", "r2u": "IRQ→userspace",
+}
+
+
+def _load_ebpf_summary(session_dir, sid):
+    p = os.path.join(session_dir, f"ebpf_summary_{sid}.json")
+    if not os.path.exists(p):
+        return None
+    try:
+        with open(p) as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _ebpf_phase_block(ebpf):
+    """ebpf_summary.json → per-device-per-op latency phase stacked bars."""
+    if not ebpf:
+        return []
+    devs = ebpf.get("devices") or {}
+    if not devs:
+        return []
+    out = ["## 3. eBPF latency phase breakdown", "",
+           "_Proportional split of average I/O time across kernel phases (s2q/q2d/d2c/c2r/r2u)._", ""]
+    for dev, dd in sorted(devs.items()):
+        ops = (dd or {}).get("ops") or {}
+        op_list = [(op, ops[op].get("phase_avg_us") or {})
+                   for op in ("read", "write", "read_ahead", "flush", "discard")
+                   if op in ops and (ops[op].get("io_count") or 0) > 0]
+        if not op_list:
+            continue
+        out.append(f"### {dev}")
+        out.append("")
+        for op, phases in op_list:
+            segs = [(name, phases.get(name) or 0.0) for name in _PHASE_ORDER]
+            total = sum(v for _, v in segs)
+            if total <= 0:
+                continue
+            bar, legend = ac.stacked(segs, width=56)
+            out.append(f"**{op}** — avg total {total:.1f} us")
+            out.append("")
+            out.append("```")
+            out.append(bar)
+            for ch, name, val, pct in legend:
+                desc = _PHASE_DESC.get(name, "")
+                out.append(f"  {ch} {name:<3} {val:>7.2f} us ({pct:>5.1f}%)  {desc}")
+            out.append("```")
+            out.append("")
+    return out
+
+
 def _md_table(rows, headers, align=None):
     """Markdown 표. rows: list of list. align: per-col 'l'|'r'|'c' (기본 'r')."""
     n = len(headers)
@@ -246,10 +368,13 @@ def build_report(session_dir, sid):
     sys_agg = _system_aggregates(sys_h, sys_r) if sys_h else {}
 
     dev_aggs = {}
+    dev_csv = {}  # basename → (header, rows) for chart rendering
     for dpath in device_csvs:
         h, r = _load_csv(dpath)
         if h:
-            dev_aggs[os.path.basename(dpath)] = _device_aggregates(h, r)
+            base = os.path.basename(dpath)
+            dev_aggs[base] = _device_aggregates(h, r)
+            dev_csv[base] = (h, r)
 
     lines = [
         f"# Performance Report — session {sid}",
@@ -335,8 +460,19 @@ def build_report(session_dir, sid):
                 ["l"] + ["r"] * 6))
         lines.append("")
 
-    # System aggregate
-    lines.append("## 3. System aggregate")
+        # ASCII chart: per-op IOPS sparkline (matplotlib 없는 환경에서도 패턴 확인)
+        h_csv, r_csv = dev_csv.get(dname, (None, None))
+        if h_csv:
+            lines.extend(_device_chart_block(h_csv, r_csv))
+
+    # eBPF latency phase breakdown (선택 — ebpf_summary가 있을 때만)
+    ebpf = _load_ebpf_summary(session_dir, sid)
+    ebpf_lines = _ebpf_phase_block(ebpf)
+    lines.extend(ebpf_lines)
+
+    # System aggregate (eBPF 블록 유무에 따라 섹션 번호가 바뀜)
+    sys_sect = 4 if ebpf_lines else 3
+    lines.append(f"## {sys_sect}. System aggregate")
     lines.append("")
     cpu = sys_agg.get("cpu", {})
     if cpu:
@@ -345,6 +481,7 @@ def build_report(session_dir, sid):
         # 노드별 행: user/sys/iowait/irq/softirq avg, iowait peak
         nodes_seen = sorted({k.split("_")[0].replace("node", "") for k in cpu})
         rows = []
+        busy_items = []  # (node, user+sys+iowait) for hbar
         for node in nodes_seen:
             u = cpu.get(f"node{node}_user_pct", {}).get("avg")
             s = cpu.get(f"node{node}_sys_pct", {}).get("avg")
@@ -353,10 +490,20 @@ def build_report(session_dir, sid):
             ir = cpu.get(f"node{node}_irq_pct", {}).get("avg")
             so = cpu.get(f"node{node}_softirq_pct", {}).get("avg")
             rows.append([f"node{node}", _fmt(u), _fmt(s), _fmt(io), _fmt(io_pk), _fmt(ir), _fmt(so)])
+            busy = (u or 0) + (s or 0) + (io or 0)
+            busy_items.append((f"node{node}", busy))
         lines.append(_md_table(rows,
             ["node", "user avg", "sys avg", "iowait avg", "iowait peak", "irq avg", "softirq avg"],
             ["l"] + ["r"] * 6))
         lines.append("")
+        # NUMA balance hbar — multi-node에서만 의미 있음 (single-node는 표만으로 충분)
+        if len(busy_items) >= 2:
+            lines.append("**NUMA balance** (user + sys + iowait avg %)")
+            lines.append("")
+            lines.append("```")
+            lines.append(ac.hbar(busy_items, width=40, value_fmt="{:.2f}", unit="%"))
+            lines.append("```")
+            lines.append("")
 
     mem = sys_agg.get("mem", {})
     if mem:

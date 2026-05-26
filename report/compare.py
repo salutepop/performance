@@ -203,9 +203,10 @@ def _phase_perf_summary(session, phase_key):
 
 
 def _phase_aligned_series(session, phase_key):
-    """primary CSV를 phase 윈도우로 자르고 0초 기준 rel-second 라벨로 재인덱싱.
+    """primary CSV를 phase 윈도우로 자르고 첫 데이터 포인트가 0초가 되도록 재인덱싱.
 
-    반환: (rel_secs[], series{op: {iops/bw/d2c/current_qd/...}})."""
+    각 세션은 wall-clock이 다르므로 phase의 첫 in-window interval을 origin으로
+    삼아 모든 디바이스 곡선이 같은 0초에서 시작하게 한다."""
     windows = _phase_windows(session)
     if phase_key not in windows:
         return [], {}
@@ -223,17 +224,20 @@ def _phase_aligned_series(session, phase_key):
         if ts_i >= len(row):
             continue
         ep = _ts_to_epoch(row[ts_i], date)
-        # 0.5s 마진 — interval 경계가 phase boundary와 정확히 일치하지 않을 수 있음
+        # phase boundary와 interval 경계가 정확히 일치하지 않을 수 있어 ±0.5s
+        # 관용 — 단 아래에서 첫 in-window 행을 origin으로 잡으므로 음수는 안 남음
         if ep is None or ep < start - 0.5 or ep > end + 0.5:
             continue
         in_phase.append(row)
     if not in_phase:
         return [], {}
     labels, series = _build_device_series(h, in_phase)
-    rel = []
-    for t in labels:
-        ep = _ts_to_epoch(t, date)
-        rel.append((ep - start) if ep is not None else None)
+    epochs = [_ts_to_epoch(t, date) for t in labels]
+    valid = [e for e in epochs if e is not None]
+    if not valid:
+        return [], series
+    origin = valid[0]
+    rel = [(e - origin) if e is not None else None for e in epochs]
     return rel, series
 
 

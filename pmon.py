@@ -162,6 +162,25 @@ def cmd_summary(args):
     return summary_main(argv)
 
 
+def cmd_compare(args):
+    """Multi-session comparison report (auto-called by debug --target X Y, also runnable standalone)."""
+    from report.compare import main as compare_main
+    argv = []
+    if args.sessions:
+        argv += args.sessions
+    if args.session_dirs:
+        argv += ["--session-dirs", *args.session_dirs]
+    if args.dir:
+        argv += ["--dir", args.dir]
+    if args.last is not None:
+        argv += ["--last", str(args.last)]
+    if args.out:
+        argv += ["-o", args.out]
+    if args.format:
+        argv += ["--format", args.format]
+    return compare_main(argv)
+
+
 def _generate_reports(session_dir, session_id, fmt):
     """fmt: comma-separated subset of md,json,png,pdf, or 'all'/'none'."""
     if fmt == "none":
@@ -466,6 +485,16 @@ def cmd_debug(args):
 
     if multi:
         _print_target_comparison(runs)
+        # 자동 비교 리포트 생성 (matplotlib 없으면 md만, 있으면 pdf까지)
+        try:
+            from report.compare import build_compare_report
+            session_dirs = [sd for _, sd, _ in runs]
+            out = build_compare_report(session_dirs)
+            if out:
+                print(f"\n[compare] cross-device report -> {out}")
+        except Exception as e:
+            print(f"\n[compare] failed to build comparison report: {e}",
+                  file=sys.stderr)
 
     print()
     if all_failures:
@@ -544,6 +573,22 @@ def main(argv=None):
     ps.add_argument("--session-id", default=None)
     ps.add_argument("-o", "--output", default=None)
     ps.set_defaults(func=cmd_summary)
+
+    pc = sub.add_parser("compare",
+                        help="build a multi-session comparison report (cross-device)")
+    pc.add_argument("sessions", nargs="*",
+                    help="session IDs (substring) to find under --dir")
+    pc.add_argument("--session-dirs", nargs="+",
+                    help="explicit session directory paths")
+    pc.add_argument("--dir", default="results",
+                    help="results root for --sessions/--last (default: results)")
+    pc.add_argument("--last", type=int, default=None,
+                    help="auto-select the N most recent sessions under --dir")
+    pc.add_argument("-o", "--out", default=None,
+                    help="output dir (default: <results>/compare_<ts>)")
+    pc.add_argument("--format", default="md,pdf",
+                    help="comma-separated formats: md, pdf (default: md,pdf)")
+    pc.set_defaults(func=cmd_compare)
 
     pdbg = sub.add_parser("debug",
                           help="developer self-test: 4-phase fio + monitoring + all reports")

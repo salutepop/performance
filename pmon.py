@@ -259,44 +259,22 @@ def _resolve_debug_target(target_arg):
     return target_arg, "file"
 
 
-def cmd_debug(args):
-    """Developer self-test: 4-phase fio workload + monitoring + every report.
+def _target_label(path):
+    """Generate session-dir suffix from a target path.
 
-    Creates a test file, runs seq write -> seq read -> rand write -> rand read
-    (each `--duration` seconds) inside a monitored Session, renders all report
-    formats, then validates artifacts. Exit code: 0 PASS / 1 FAIL.
+    /dev/nvme4n1   -> 'nvme4n1'
+    /mnt/test/x.img -> 'x'
+    .../smoke.img  -> 'smoke'
     """
-    from monitoring import Session, resolve_ebpf_mode
-    from workloads.fio_runner import run_fio_job
+    if path.startswith("/dev/"):
+        return path[len("/dev/"):].replace("/", "_")
+    base = os.path.basename(path) or "debug"
+    return base.rsplit(".", 1)[0] if "." in base else base
 
-    duration = max(1, int(args.duration))
-    target, kind = _resolve_debug_target(args.target)
 
-    sys_info = _discover_sys_info()
-    session_dir = _build_session_dir("debug")
-    sid = os.path.basename(session_dir)
-    ebpf_mode = resolve_ebpf_mode("auto")
-
-    print(f"[debug] session -> {session_dir}")
-    print(f"[debug] target  -> {target} ({kind})")
-    print(f"[debug] config: 4 workloads x {duration}s (2 libaio + 2 io_uring), "
-          f"ebpf={ebpf_mode}, reports=all")
-
-    fio_done = []
-    with Session(session_dir, sys_info, ebpf_mode=ebpf_mode,
-                 ebpf_interval=1.0, reports="all"):
-        for wl in _DEBUG_WORKLOADS:
-            result = run_fio_job(disk=target, workload=wl,
-                                 fio_path="fio", runtime_override=duration)
-            if result:
-                with open(os.path.join(session_dir, f"fio_{wl['name']}.json"), "w") as f:
-                    json.dump(result, f, indent=4)
-                fio_done.append(wl["name"])
-            else:
-                print(f"[debug] workload {wl['name']} produced no result")
-
-    # ----- artifact checks
-    print("\n[debug] checking artifacts...")
+def _validate_debug_artifacts(session_dir, sid, ebpf_mode, fio_done):
+    """Run the artifact-existence checks for a single debug session.
+    Prints OK lines, returns list of failure strings (empty = PASS)."""
     failures = []
 
     topo = os.path.join(session_dir, f"topology_{sid}.json")
@@ -369,7 +347,6 @@ def cmd_debug(args):
             except Exception as e:
                 failures.append(f"ebpf_summary JSON parse error: {e}")
 
-    # every report format
     expected_reports = {
         "md": f"report_{sid}.md",
         "json": f"summary_{sid}.json",
@@ -383,11 +360,115 @@ def cmd_debug(args):
         failures.append(f"reports missing: {', '.join(missing)}")
     print(f"  [{'OK' if not missing else '!!'}] reports: "
           f"{len(found)}/{len(expected_reports)} — {', '.join(found)}")
+    return failures
+
+
+def _read_phase_perf(session_dir):
+    """fio_*.json 4종 읽어 {phase: {bw_mb, iops, p99_us}} 반환. 누락된 phase는 None."""
+    out = {}
+    for wl in _DEBUG_WORKLOADS:
+        name = wl["name"]
+        p = os.path.join(session_dir, f"fio_{name}.json")
+        if not os.path.isfile(p):
+            out[name] = None
+            continue
+        try:
+            with open(p) as f:
+                j = json.load(f)
+            job = j["jobs"][0]
+            op = "write" if "write" in name else "read"
+            s = job[op]
+            out[name] = {
+                "bw_mb": s["bw"] / 1024.0,
+                "iops": s["iops"],
+                "p99_us": s["clat_ns"]["percentile"]["99.000000"] / 1000.0,
+            }
+        except (KeyError, ValueError, OSError):
+            out[name] = None
+    return out
+
+
+def _print_target_comparison(runs):
+    """runs: [(label, session_dir, sid)]. 4-phase x target 비교표 출력."""
+    print()
+    print("=" * 78)
+    print(" Cross-target performance comparison")
+    print("=" * 78)
+    perfs = [(lbl, _read_phase_perf(sd)) for lbl, sd, _ in runs]
+    lw = max(len(lbl) for lbl, _ in perfs)
+    for wl in _DEBUG_WORKLOADS:
+        name = wl["name"]
+        print(f"\n  {name}  ({wl['rw']}, bs={wl['bs']}, qd={wl['iodepth']}"
+              f"x{wl['numjobs']}, {wl['ioengine']})")
+        print(f"    {'target':<{lw}}  {'BW(MB/s)':>10} {'IOPS':>10} {'p99(us)':>10}")
+        for lbl, perf in perfs:
+            p = perf.get(name)
+            if p is None:
+                print(f"    {lbl:<{lw}}  {'-':>10} {'-':>10} {'-':>10}")
+            else:
+                print(f"    {lbl:<{lw}}  {p['bw_mb']:>10.1f} {p['iops']:>10.0f} "
+                      f"{p['p99_us']:>10.1f}")
+    print()
+
+
+def cmd_debug(args):
+    """Developer self-test: 4-phase fio workload + monitoring + every report.
+
+    With multiple --target args, runs the 4-phase suite once per target in
+    separate sessions and prints a cross-target comparison table at the end.
+    Exit code: 0 if all targets PASS, 1 otherwise.
+    """
+    from monitoring import Session, resolve_ebpf_mode
+    from workloads.fio_runner import run_fio_job
+
+    duration = max(1, int(args.duration))
+    target_args = args.target or [None]   # None → default SMOKE_IMG
+    # Resolve all targets up-front so any safety violation fails fast.
+    resolved = [_resolve_debug_target(t) for t in target_args]
+    multi = len(resolved) > 1
+
+    sys_info = _discover_sys_info()
+    ebpf_mode = resolve_ebpf_mode("auto")
+
+    all_failures = []
+    runs = []  # [(label, session_dir, sid)]
+    for idx, (target, kind) in enumerate(resolved, 1):
+        label = f"debug_{_target_label(target)}" if multi else "debug"
+        session_dir = _build_session_dir(label)
+        sid = os.path.basename(session_dir)
+
+        if multi:
+            print(f"\n[debug] === run {idx}/{len(resolved)}: {target} ({kind}) ===")
+        print(f"[debug] session -> {session_dir}")
+        print(f"[debug] target  -> {target} ({kind})")
+        print(f"[debug] config: 4 workloads x {duration}s (2 libaio + 2 io_uring), "
+              f"ebpf={ebpf_mode}, reports=all")
+
+        fio_done = []
+        with Session(session_dir, sys_info, ebpf_mode=ebpf_mode,
+                     ebpf_interval=1.0, reports="all"):
+            for wl in _DEBUG_WORKLOADS:
+                result = run_fio_job(disk=target, workload=wl,
+                                     fio_path="fio", runtime_override=duration)
+                if result:
+                    with open(os.path.join(session_dir, f"fio_{wl['name']}.json"), "w") as f:
+                        json.dump(result, f, indent=4)
+                    fio_done.append(wl["name"])
+                else:
+                    print(f"[debug] workload {wl['name']} produced no result")
+
+        print("\n[debug] checking artifacts...")
+        failures = _validate_debug_artifacts(session_dir, sid, ebpf_mode, fio_done)
+        all_failures.extend(f"[{target}] {msg}" for msg in failures)
+        runs.append((_target_label(target), session_dir, sid))
+
+    if multi:
+        _print_target_comparison(runs)
 
     print()
-    if failures:
-        print(f"[debug] FAIL — {len(failures)} issue(s):")
-        for f in failures:
+    if all_failures:
+        print(f"[debug] FAIL — {len(all_failures)} issue(s):")
+        for f in all_failures:
             print(f"  - {f}")
         return 1
     print("[debug] PASS")
@@ -466,9 +547,11 @@ def main(argv=None):
                           help="developer self-test: 4-phase fio + monitoring + all reports")
     pdbg.add_argument("--duration", type=int, default=3,
                       help="seconds per workload phase (default 3)")
-    pdbg.add_argument("--target", default=None,
-                      help="override fio target: raw block dev (/dev/nvmeXn1, "
-                           "mounted devices refused) or file path. "
+    pdbg.add_argument("--target", nargs="+", default=None,
+                      help="override fio target(s): raw block dev (/dev/nvmeXn1, "
+                           "mounted devices refused) or file path. Multiple values "
+                           "run the 4-phase suite once per target in separate "
+                           "sessions and print a comparison table. "
                            "default: .smoke/smoke.img on root fs")
     pdbg.set_defaults(func=cmd_debug)
 

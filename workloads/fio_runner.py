@@ -52,7 +52,13 @@ def run_fio_job(disk, workload, numa_node=None, fio_path="fio", runtime_override
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-        return json.loads(result.stdout)
+        # fio가 stdout에 경고를 prepend하는 경우가 있다 (예: ≥2 TiB 디바이스에서
+        # "Switching to tausworthe64"). JSON 본문은 첫 '{'부터 시작하므로 거기서 자른다.
+        out = result.stdout
+        brace = out.find("{")
+        if brace > 0:
+            out = out[brace:]
+        return json.loads(out)
     except subprocess.CalledProcessError as e:
         print(f"[Error] {fio_path} execution failed: {e}")
         print(f"[Error Output]\n{e.stderr}")

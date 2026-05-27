@@ -48,7 +48,7 @@ class Scenario:
                 )
 
         # [요청 2] 현재까지 수집된 모든 디스크의 결과를 하나의 테이블로 병합 출력
-        # ram0 측정이 끝나면 ram0 테이블이, ram1까지 끝나면 ram0+ram1 병합 테이블이 출력됩니다.
+        # 첫 번째 디스크가 끝나면 그 디스크 단독 테이블, 두 번째까지 끝나면 두 디스크 병합 테이블이 출력됩니다.
         self._print_combined_report()
 
     def _print_combined_report(self):

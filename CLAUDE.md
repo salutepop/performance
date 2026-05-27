@@ -202,5 +202,4 @@ Multi-disk 시나리오(`run_all_disks=True`)는 `disk_label="multi_disk"`로 �
 - **eBPF는 sudo NOPASSWD 경로에 의존**한다. `monitoring/collectors/ebpf_io/src/io_trace` 바이너리가 sudoers의 NOPASSWD 룰에 등록돼 있어야 `pmon.py debug` / `--ebpf on`이 동작한다 (DEV_RULES.md 참고). 바이너리를 옮기면 sudoers도 갱신해야 한다.
 - `tc10_multi_ssd_optimal.py`는 최적화 비교군 측정에서 `sudo fio`를 직접 호출한다. `fio_path` 설정이 무시되므로 환경에 따라 깨질 수 있음.
 - `config/system.json`의 `target_disks` 기본값은 빈 배열 — `SystemDiscovery`가 발견한 NVMe namespace로 자동 채워진다. 특정 디바이스만 쓰려면 명시적으로 채우면 된다.
-- `doc/test_cases_analysis.md`에 TC05 라벨 버그(QD64로 잘못 표기)가 언급돼 있다 — 코드는 QD1로 동작하지만 출력 라벨이 어긋날 수 있음.
 - `report.png_report` / `report.pdf_report`는 matplotlib 필요. 미설치 시 자동 스킵 (`report.__main__`이 ImportError를 잡아 다른 포맷만 생성).

@@ -428,12 +428,15 @@ def _save_phase_timeline(path, phase_key, phase_label, sessions, plt, np):
                      linewidth=1.5, marker=".", markersize=4)
         ax_bw.plot(x, _sum("bw"), label=s["label"], color=color,
                    linewidth=1.5, marker=".", markersize=4)
-        ax_qd.plot(x, _sum("current_qd"), label=s["label"], color=color,
+        # max_qd (per-interval peak) — engine-stable. libaio batches submit/
+        # complete so current_qd snapshots fall in burst dead zones; max_qd
+        # captures the real high-water mark within the interval.
+        ax_qd.plot(x, _sum("max_qd"), label=s["label"], color=color,
                    linewidth=1.5, marker=".", markersize=4)
         have_data = True
     for ax, ylabel in ((ax_iops, "IOPS\n[ops/s]"),
                        (ax_bw, "Bandwidth\n[MB/s]"),
-                       (ax_qd, "Queue depth\n[in-flight]")):
+                       (ax_qd, "Queue depth\n[peak in interval]")):
         ax.set_ylabel(ylabel, fontsize=9)
         ax.grid(True, alpha=0.3)
         ax.legend(loc="best", fontsize=8, framealpha=0.9)
@@ -548,7 +551,7 @@ def build_compare_report(session_dirs, out_dir=None, formats=("md", "pdf")):
         # phase-aligned sparklines (ASCII)
         for metric, unit, title in [
             ("iops", "IOPS", "IOPS over phase"),
-            ("current_qd", "QD", "Queue depth over phase"),
+            ("max_qd", "QD", "Queue depth peak over phase"),
         ]:
             blk = _phase_sparkline_block(sessions, phase_key, metric, unit, title)
             if blk:

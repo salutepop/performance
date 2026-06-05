@@ -139,6 +139,88 @@ def _build_system_series(header, rows):
     return {"labels": labels, "cpu": cpu_series, "irq": irq_series, "mem": mem_series, "gpu": gpu_series}
 
 
+def _build_overview_series(sys_header, sys_rows, device_csv_paths):
+    """단일 리소스 오버뷰 차트용 시리즈 — Total CPU %, 사용 메모리, 디바이스별
+    bandwidth를 system_metrics 타임라인 위에 한 번에 묶는다.
+
+    반환 {labels, cpu:[%], mem:[GB], mem_label, bw:{dev:[MB/s]}} 또는 None.
+
+    - cpu: 노드별 (user+sys+iowait+irq+softirq)를 노드 수로 평균 → 시스템 전체
+      busy %. 각 node_*_pct는 그 노드 jiffies 기준 비율이라 노드 평균이 곧
+      시스템 전체 비율.
+    - mem: per-NUMA used MB 합을 GB로. NUMA meminfo가 없으면 MemAvailable로
+      폴백(라벨도 그에 맞게 바뀐다).
+    - bw: 디바이스 CSV의 bandwidth_mb_s_interval을 op 합산 후 labels로 reindex."""
+    if not sys_header or not sys_rows:
+        return None
+    try:
+        ts_i = sys_header.index("timestamp")
+    except ValueError:
+        return None
+    labels = [r[ts_i] for r in sys_rows if ts_i < len(r)]
+
+    def _f(row, col):
+        i = sys_header.index(col)
+        if i < len(row) and row[i] not in ("", None):
+            try:
+                return float(row[i])
+            except ValueError:
+                return 0.0
+        return 0.0
+
+    # Total CPU% — 노드별 busy 합을 노드 수로 평균
+    cpu_cols = [c for c in sys_header if c.startswith("node") and (
+        c.endswith("_user_pct") or c.endswith("_sys_pct")
+        or c.endswith("_iowait_pct") or c.endswith("_irq_pct")
+        or c.endswith("_softirq_pct"))]
+    nodes = sorted({c.split("_")[0] for c in cpu_cols})
+    cpu = []
+    for row in sys_rows:
+        if not nodes:
+            cpu.append(None)
+            continue
+        per_node = [sum(_f(row, c) for c in cpu_cols if c.startswith(nd + "_"))
+                    for nd in nodes]
+        cpu.append(sum(per_node) / len(per_node))
+
+    # Memory — per-NUMA used 합(GB), 없으면 MemAvailable(GB)
+    used_cols = [c for c in sys_header
+                 if c.startswith("node") and c.endswith("_mem_used_mb")]
+    if used_cols:
+        mem_label = "Mem used [GB]"
+        mem = [sum(_f(row, c) for c in used_cols) / 1024.0 for row in sys_rows]
+    elif "mem_available_mb" in sys_header:
+        mem_label = "Mem avail [GB]"
+        mem = [_f(row, "mem_available_mb") / 1024.0 for row in sys_rows]
+    else:
+        mem_label, mem = None, []
+
+    # Per-device bandwidth [MB/s] — op 합산 후 labels로 reindex
+    bw = {}
+    for dpath in device_csv_paths or []:
+        h, r = _load_csv(dpath)
+        if not h:
+            continue
+        try:
+            dts_i = h.index("timestamp")
+            bw_i = h.index("bandwidth_mb_s_interval")
+        except ValueError:
+            continue
+        bucket = {}
+        for row in r:
+            ts = row[dts_i] if dts_i < len(row) else ""
+            try:
+                v = (float(row[bw_i])
+                     if bw_i < len(row) and row[bw_i] not in ("", None) else 0.0)
+            except ValueError:
+                v = 0.0
+            bucket[ts] = bucket.get(ts, 0.0) + v
+        bw[_dev_name(dpath)] = [bucket.get(t) for t in labels]
+
+    return {"labels": labels, "cpu": cpu, "mem": mem,
+            "mem_label": mem_label, "bw": bw}
+
+
 def _build_device_series(header, rows, timeline=None):
     """device CSV → (labels[], series{op:{iops,bw,d2c,p50,p99,q2d,q2d_p99}}). 모든 op timestamp 통합·정렬.
 

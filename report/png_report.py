@@ -30,6 +30,7 @@ from .datasource import (
     _discover_session, _load_topology, _load_csv, _dev_name,
     _timestamp_window, _crop_rows,
     _build_device_series, _build_system_series, _build_lba_heatmap,
+    _build_overview_series,
     _OP_COLORS, _PALETTE,
 )
 from .md_report import (
@@ -219,6 +220,8 @@ _IOPS_COLOR = "#1f77b4"   # blue
 _BW_COLOR = "#2ca02c"     # green
 _IOWAIT_COLOR = "#d62728" # red
 _SYS_COLOR = "#ff7f0e"    # orange
+_CPU_COLOR = "#d62728"    # red (overview total CPU)
+_MEM_COLOR = "#9467bd"    # purple (overview memory)
 
 
 def _save_correlation_chart(path, corr, title, phases=None):
@@ -295,6 +298,76 @@ def _save_correlation_chart(path, corr, title, phases=None):
     _place_legend(fig, ax_iops, handles=handles, labels=lbls, max_cols=4)
     fig.savefig(path)
     plt.close(fig)
+
+
+def _save_overview_chart(path, ov, title, phases=None):
+    """단일 결합 시계열 — Total CPU %, 사용 메모리, 디바이스별 bandwidth를
+    공유 x축 + 3 y축에 한 그래프로.
+
+    축 배치: CPU % (바깥 왼쪽) · Bandwidth [MB/s] (안쪽 왼쪽) · Memory [GB]
+    (오른쪽). CPU는 dashed, BW는 solid(디바이스별 green 계열), Mem은 dotted."""
+    labels = ov["labels"]
+    if not labels:
+        return False
+    fig, ax_cpu = plt.subplots(figsize=(11, 4))
+    ax_bw = ax_cpu.twinx()
+    ax_mem = ax_cpu.twinx()
+
+    # BW 축은 CPU 축 옆 안쪽-왼쪽으로 옮긴다 (correlation 차트와 동일 패턴).
+    ax_bw.yaxis.tick_left()
+    ax_bw.yaxis.set_label_position("left")
+    ax_bw.spines["left"].set_position(("axes", -0.08))
+    ax_bw.spines["left"].set_visible(True)
+    ax_bw.spines["right"].set_visible(False)
+    ax_bw.set_frame_on(True); ax_bw.patch.set_visible(False)
+    fig.subplots_adjust(left=0.12, right=0.88)
+
+    x = range(len(labels))
+    handles, lbls = [], []
+
+    # Total CPU % (바깥 왼쪽)
+    y_cpu = [v if v is not None else np.nan for v in ov["cpu"]]
+    h, = ax_cpu.plot(x, y_cpu, color=_CPU_COLOR, linewidth=1.6, linestyle="--",
+                     marker="x", markersize=3.4, label="Total CPU %")
+    handles.append(h); lbls.append(h.get_label())
+
+    # 디바이스별 BW (안쪽 왼쪽) — 단일이면 고정 green, 여럿이면 green 계열 음영
+    devs = list(ov["bw"].keys())
+    bw_cols = ([_BW_COLOR] if len(devs) <= 1
+               else plt.cm.Greens(np.linspace(0.5, 0.95, len(devs))))
+    for i, dn in enumerate(devs):
+        y = [v if v is not None else np.nan for v in ov["bw"][dn]]
+        h, = ax_bw.plot(x, y, color=bw_cols[i], linewidth=1.5, linestyle="-",
+                        marker="^", markersize=3.2, label=f"BW {dn}")
+        handles.append(h); lbls.append(h.get_label())
+
+    # Memory (오른쪽)
+    if ov.get("mem_label") and ov["mem"]:
+        y_mem = [v if v is not None else np.nan for v in ov["mem"]]
+        h, = ax_mem.plot(x, y_mem, color=_MEM_COLOR, linewidth=1.5,
+                         linestyle=":", marker="o", markersize=3.0,
+                         label=ov["mem_label"])
+        handles.append(h); lbls.append(h.get_label())
+        ax_mem.set_ylabel(ov["mem_label"], color=_MEM_COLOR)
+        ax_mem.tick_params(axis="y", colors=_MEM_COLOR)
+    else:
+        ax_mem.set_visible(False)
+
+    ax_cpu.set_title(title, fontsize=10)
+    ax_cpu.set_xlabel("time")
+    ax_cpu.set_ylabel("Total CPU [%]", color=_CPU_COLOR)
+    ax_bw.set_ylabel("Bandwidth [MB/s]", color=_BW_COLOR)
+    ax_cpu.set_ylim(0, None)
+    ax_bw.set_ylim(0, None)
+    ax_cpu.tick_params(axis="y", colors=_CPU_COLOR)
+    ax_bw.tick_params(axis="y", colors=_BW_COLOR)
+    ax_cpu.grid(True, alpha=0.3)
+    _overlay_phases(ax_cpu, labels, phases, label=True)
+    _xtick_thin(ax_cpu, labels)
+    _place_legend(fig, ax_cpu, handles=handles, labels=lbls, max_cols=4)
+    fig.savefig(path)
+    plt.close(fig)
+    return True
 
 
 # eBPF full-stack phases, in pipeline order. Unified for libaio + io_uring:
@@ -832,6 +905,15 @@ def build_report(session_dir, sid):
         _save_correlation_chart(path, corr, "I/O x System correlation", phases)
         fig_refs["correlation"] = os.path.relpath(path, session_dir)
 
+    # 1.2 Resource overview — total CPU % + memory + per-device BW in one chart
+    ov = _build_overview_series(sys_h, sys_r, device_csvs)
+    if ov and ov["labels"]:
+        path = os.path.join(figs_dir, "overview.png")
+        if _save_overview_chart(path, ov,
+                                "Resource overview - CPU / Memory / Device BW",
+                                phases):
+            fig_refs["overview"] = os.path.relpath(path, session_dir)
+
     # 1.5 eBPF full-stack analysis (latency breakdown / size / QD / SQ-CQ matrix)
     ebpf = _load_ebpf_summary(session_dir, sid)
     if ebpf and ebpf.get("devices"):
@@ -1010,6 +1092,9 @@ def build_report(session_dir, sid):
     lines.append("")
 
     # Overview — 세션 한눈에 보기
+    if "overview" in fig_refs:
+        lines += ["## Resource overview", "",
+                  f"![resource-overview]({fig_refs['overview']})", ""]
     if "correlation" in fig_refs:
         lines += ["## I/O x System correlation", "",
                   f"![correlation]({fig_refs['correlation']})", ""]

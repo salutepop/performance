@@ -355,11 +355,19 @@ def main(argv=None):
     pngs = _order_pngs(pngs)
     font_used = _setup_kr_font()
 
-    md_path = os.path.join(sd, f"report_{sid}.md")
+    # 커버는 ASCII 도식을 뺀 PDF 전용 markdown으로 빌드 (PDF는 GUI라 PNG 차트가
+    # 도식을 담당; sparkline/stacked bar 같은 텍스트 도식은 CUI md 파일에만 남긴다).
     md_text = None
-    if os.path.exists(md_path):
-        with open(md_path, encoding="utf-8") as f:
-            md_text = f.read()
+    try:
+        from .md_report import build_report as _build_md
+        md_text = _build_md(sd, sid, ascii_charts=False)
+    except Exception as e:
+        print(f"[pdf_report] cover build failed ({e}); falling back to md file",
+              file=sys.stderr)
+        md_path = os.path.join(sd, f"report_{sid}.md")
+        if os.path.exists(md_path):
+            with open(md_path, encoding="utf-8") as f:
+                md_text = f.read()
 
     cover_title = f"Performance Report — {sid}"
     pages = 0

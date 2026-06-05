@@ -374,7 +374,12 @@ def _md_table(rows, headers, align=None):
     return "\n".join(out)
 
 
-def build_report(session_dir, sid):
+def build_report(session_dir, sid, ascii_charts=True):
+    """세션 산출물 → Markdown 리포트.
+
+    ascii_charts: True면 sparkline/eBPF stacked bar/NUMA hbar 등 텍스트
+    도식을 포함(CUI용 기본). False면 표·수치·findings만 남긴다 — PDF(GUI)
+    커버처럼 PNG 차트가 따로 있어 텍스트 도식이 중복/깨지는 환경용."""
     topo = _load_topology(session_dir, sid)
     sys_path = os.path.join(session_dir, f"system_metrics_{sid}.csv")
     device_csvs = sorted(
@@ -479,13 +484,16 @@ def build_report(session_dir, sid):
         lines.append("")
 
         # ASCII chart: per-op IOPS sparkline (matplotlib 없는 환경에서도 패턴 확인)
-        h_csv, r_csv = dev_csv.get(dname, (None, None))
-        if h_csv:
-            lines.extend(_device_chart_block(h_csv, r_csv))
+        # CUI 전용 텍스트 도식 — ascii_charts=False(PDF)에서는 생략.
+        if ascii_charts:
+            h_csv, r_csv = dev_csv.get(dname, (None, None))
+            if h_csv:
+                lines.extend(_device_chart_block(h_csv, r_csv))
 
-    # eBPF latency phase breakdown (선택 — ebpf_summary가 있을 때만)
+    # eBPF latency phase breakdown — ASCII stacked bar라 CUI 전용. PDF는 PNG
+    # 'eBPF full-stack' 차트가 동일 내용을 담으므로 생략.
     ebpf = _load_ebpf_summary(session_dir, sid)
-    ebpf_lines = _ebpf_phase_block(ebpf)
+    ebpf_lines = _ebpf_phase_block(ebpf) if ascii_charts else []
     lines.extend(ebpf_lines)
 
     # System aggregate (eBPF 블록 유무에 따라 섹션 번호가 바뀜)
@@ -514,8 +522,9 @@ def build_report(session_dir, sid):
             ["node", "user avg", "sys avg", "iowait avg", "iowait peak", "irq avg", "softirq avg"],
             ["l"] + ["r"] * 6))
         lines.append("")
-        # NUMA balance hbar — multi-node에서만 의미 있음 (single-node는 표만으로 충분)
-        if len(busy_items) >= 2:
+        # NUMA balance hbar — CUI 전용 텍스트 도식. multi-node에서만 의미 있고,
+        # PDF는 sys_cpu PNG 차트가 대신한다.
+        if len(busy_items) >= 2 and ascii_charts:
             lines.append("**NUMA balance** (user + sys + iowait avg %)")
             lines.append("")
             lines.append("```")
